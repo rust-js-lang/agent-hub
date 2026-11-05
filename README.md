@@ -120,6 +120,11 @@ bun run build
 bun run test
 ```
 
+In VS Code, rust-analyzer checks the dashboard through rust-js, which reads
+inside `jsx!`, and the rest natively: `.vscode/settings.json` sets its
+check to `node rust-js/tooling/check.js --package dashboard`. Other
+editors take the same command as rust-analyzer's `check.overrideCommand`.
+
 `bun run dev` sends `/api` to the hub at `127.0.0.1:7878`, or to
 `CROSS_AGENT_HUB`. The JavaScript rust-js writes beside `dashboard/src/*.rs`
 is committed, so diffs show what a change does to it.
