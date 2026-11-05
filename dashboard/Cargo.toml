@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
+# The root module is the `App` component's, so its JS is `App.jsx`.
+[lib]
+path = "src/App.rs"
+
 [dependencies]
 protocol = { path = "../protocol" }
 serde = "1"
