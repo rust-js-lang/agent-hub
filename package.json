@@ -1,0 +1,21 @@
+{
+  "name": "cross-agent-message",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite web",
+    "build": "node rust-js/tooling/cli.js build --package dashboard && vite build web",
+    "test": "playwright test"
+  },
+  "dependencies": {
+    "@rust-js/runtime": "file:rust-js/runtime",
+    "@rust-js/std": "file:rust-js/std",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "vite": "8.3.0"
+  }
+}

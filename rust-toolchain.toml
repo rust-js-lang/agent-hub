@@ -1,0 +1,5 @@
+# The Rust release the pinned rust-js is built with. rust-js checks the
+# dashboard for wasm32-unknown-unknown, whose `usize` is 32 bits, as its is.
+[toolchain]
+channel = "1.99.0"
+targets = ["wasm32-unknown-unknown"]

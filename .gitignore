@@ -1,0 +1,10 @@
+/target
+/node_modules
+/web/dist
+# The patch `rust-js build` writes, of where installed crates are.
+/.cargo
+# The JS rust-js writes beside the Rust is committed; its maps aren't.
+*.js.map
+*.jsx.map
+/test-results
+/playwright-report

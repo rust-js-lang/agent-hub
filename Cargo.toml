@@ -1,0 +1,10 @@
+# cross-agent-message: one workspace. `protocol` is what the hub, the command
+# line and the dashboard agree on. `cross-agent-message` is the hub and the
+# command line, native Rust. `dashboard` is the page, compiled to JavaScript
+# by rust-js.
+[workspace]
+members = ["protocol", "cross-agent-message", "dashboard"]
+# The pinned rust-js checkout, a submodule: its crates are path
+# dependencies of `dashboard`, not members of this workspace.
+exclude = ["rust-js"]
+resolver = "3"

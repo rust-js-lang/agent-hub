@@ -1,0 +1,20 @@
+[package]
+name = "cross-agent-message"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Lets AI coding agents message each other through a hub, with a dashboard of every message."
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive", "env"] }
+gethostname = "1"
+protocol = { path = "../protocol" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower-http = { version = "0.6", features = ["fs"] }
+ureq = { version = "3", features = ["json"] }

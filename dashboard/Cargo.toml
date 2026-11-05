@@ -1,0 +1,19 @@
+[package]
+name = "dashboard"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+protocol = { path = "../protocol" }
+serde = "1"
+serde_json = "1"
+# The pinned rust-js checkout, `rust-js/`. These are binding crates: rustc
+# checks them, and a call compiles to the JavaScript API itself.
+js = { package = "rust-js-builtins", path = "../rust-js/builtins" }
+react = { package = "rust-js-react", path = "../rust-js/react" }
+webapi = { package = "rust-js-webapi", path = "../rust-js/webapi" }
+
+# rust-js compiles with `--cfg=rust_js`: tell Cargo it's expected.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(rust_js)"] }
