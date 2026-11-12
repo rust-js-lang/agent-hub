@@ -801,6 +801,91 @@ fn a_slow_drain_serves_the_request_and_defers_without_launching_a_candidate() {
     fresh_request_during_drain(Duration::from_secs(3), true);
 }
 
+#[test]
+fn a_slow_legacy_departure_moves_forward_without_admission_deferral() {
+    let running = Running::new();
+    let candidate = running.root.join("slow-legacy-worker");
+    let terminations = running.root.join("legacy-terminations");
+    // A protocol-0 child owns the database; this wrapper delays termination
+    // for one second and reaps that child before the supervisor can proceed.
+    std::fs::write(
+        &candidate,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, os, pathlib, signal, subprocess, sys, time
+source = {source:?}
+if sys.argv[1] != 'worker':
+    os.execv(source, [source] + sys.argv[1:])
+config_path = pathlib.Path(sys.argv[sys.argv.index('--config') + 1])
+config = json.loads(config_path.read_text())
+config['handoff_protocol'] = 0
+config['handoff_startup'] = False
+legacy_config = config_path.with_name('legacy-worker.json')
+legacy_config.write_text(json.dumps(config))
+args = sys.argv[1:]
+args[args.index('--config') + 1] = str(legacy_config)
+stopping = False
+def stop(signum, frame):
+    global stopping
+    stopping = True
+signal.signal(signal.SIGTERM, stop)
+ready_fd = int(os.environ['CROSS_AGENT_READY_FD'])
+child = subprocess.Popen([source] + args, pass_fds=tuple(range(3, ready_fd + 1)))
+while child.poll() is None:
+    if stopping:
+        with open({terminations:?}, 'a') as output:
+            output.write('term\n')
+        time.sleep(1)
+        child.send_signal(signal.SIGTERM)
+        break
+    time.sleep(0.01)
+sys.exit(child.wait())
+"#,
+            source = running.source.to_str().unwrap(),
+            terminations = terminations.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let first = running.upgrade(&candidate);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        !running
+            .client()
+            .info()
+            .unwrap()
+            .features
+            .iter()
+            .any(|feature| feature == "cooperative-handoff")
+    );
+    let legacy_pid = running.worker_pid();
+    let probe = Availability::start(&running.url);
+    let result = running.upgrade(&running.source);
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&result.stdout).contains("Upgrade deferred"));
+    assert_ne!(running.worker_pid(), legacy_pid);
+    assert_eq!(std::fs::read_to_string(terminations).unwrap(), "term\n");
+    assert!(
+        running
+            .client()
+            .info()
+            .unwrap()
+            .features
+            .iter()
+            .any(|feature| feature == "cooperative-handoff")
+    );
+    probe.finish();
+}
+
 fn fresh_request_during_drain(delay: Duration, deferred: bool) {
     use std::io::Read;
     let running = Running::new();
@@ -844,6 +929,14 @@ fn fresh_request_during_drain(delay: Duration, deferred: bool) {
             );
             assert!(!stdout.contains("hub moved"));
             assert_eq!(running.worker_pid(), original);
+            assert!(
+                client
+                    .read_inbox("observer", 100)
+                    .unwrap()
+                    .messages
+                    .is_empty(),
+                "deferral must not broadcast an announcement to agents"
+            );
             let log = std::fs::read_to_string(running.root.join("log")).unwrap();
             assert_eq!(
                 log.lines()
@@ -1236,6 +1329,37 @@ fn a_read_only_installation_fails_preflight_without_draining_the_worker() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("must be writable before upgrading"));
     assert_eq!(running.worker_pid(), before);
     assert!(running.client().info().is_ok());
+}
+
+#[test]
+fn a_fragmented_control_request_waits_for_its_terminating_newline() {
+    use std::os::unix::net::UnixStream;
+    let running = Running::new();
+    let config = cross_agent_message::supervisor::load_config(&running.db).unwrap();
+    let swap = cross_agent_message::supervisor::Swap {
+        binary: running.binary.clone(),
+        sha256: cross_agent_message::updates::sha256(&std::fs::read(&running.binary).unwrap()),
+    };
+    let request = serde_json::to_vec(&swap).unwrap();
+    let mut socket = UnixStream::connect(config.control()).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    socket.write_all(&request).unwrap();
+    // A successful write need not be coalesced with the frame terminator.
+    std::thread::sleep(Duration::from_millis(100));
+    let newline = socket.write_all(b"\n");
+    let mut reply = String::new();
+    std::io::BufReader::new(socket)
+        .read_line(&mut reply)
+        .unwrap();
+    assert!(
+        newline.is_ok(),
+        "control peer closed before frame completion: {newline:?}; {reply}"
+    );
+    let reply: cross_agent_message::supervisor::Swapped = serde_json::from_str(&reply).unwrap();
+    assert!(!reply.rolled_back && !reply.deferred, "{:?}", reply.reason);
+    running.client().info().unwrap();
 }
 
 #[test]

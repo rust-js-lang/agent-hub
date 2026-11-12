@@ -219,9 +219,6 @@ pub fn run(path: &Path, db: &Path, checksum: Option<&str>) -> Result<()> {
             result.build, reason, stats.count, stats.failed, stats.longest_ms
         );
         println!("{message}");
-        if let Err(error) = announce(&config, &message) {
-            eprintln!("could not announce upgrade deferral: {error:#}");
-        }
         return Err(supervisor::Deferred(reason).into());
     }
     let ready_addresses: Vec<&str> = result

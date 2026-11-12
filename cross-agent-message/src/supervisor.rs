@@ -777,7 +777,15 @@ fn quiesce(worker: &mut Worker, image: &Path, config: &Config) -> Result<Exposur
             .with_context(|| format!("{error:#}; old worker resume did not finish"))?;
         return Err(error);
     }
-    let exposure = Exposure::from_stops(&worker.stopped_accepting_ns, config, started_ns)?;
+    let exposure = match Exposure::from_stops(&worker.stopped_accepting_ns, config, started_ns) {
+        Ok(exposure) => exposure,
+        Err(error) => {
+            resume(worker, image, config).with_context(|| {
+                format!("cannot measure drained worker exposure: {error:#}; resume did not finish")
+            })?;
+            return Err(error);
+        }
+    };
     worker.exposure_deadline = Some(exposure.deadline);
     Ok(exposure)
 }
@@ -916,9 +924,23 @@ fn rollback_candidate(
                         worker.resume_from_ns.remove(address);
                     }
                 }
-                let resumed_deadline =
-                    Exposure::from_stops(&worker.resume_from_ns, config, rollback_started_ns)?
-                        .deadline;
+                let resumed_deadline = match Exposure::from_stops(
+                    &worker.resume_from_ns,
+                    config,
+                    rollback_started_ns,
+                ) {
+                    Ok(exposure) => exposure.deadline,
+                    Err(error) => {
+                        // Diagnostic failure must not drop a parked candidate
+                        // before ownership has moved into retirement/recovery.
+                        eprintln!(
+                            "cannot measure rollback exposure; retaining the existing deadline: {error:#}"
+                        );
+                        worker
+                            .exposure_deadline
+                            .unwrap_or_else(|| Instant::now() + FIRST_ACCEPT_LIMIT)
+                    }
+                };
                 let partial = protected(config)
                     .any(|address| !candidate.first_accepted_ns.contains_key(&address));
                 // A still-uncovered address must never gain a later deadline
@@ -1359,7 +1381,7 @@ pub fn run(mut config: Config) -> Result<()> {
                     &listeners,
                     READY_LIMIT,
                     Some(capability),
-                    Some(&exposure),
+                    worker.handoff.then_some(&exposure),
                 );
                 match restart {
                     Ok((next, Ok(()))) => {
@@ -1450,7 +1472,12 @@ pub fn run(mut config: Config) -> Result<()> {
             };
         match incoming {
             Ok((mut stream, buffered)) => {
+                // BSD accept can inherit O_NONBLOCK from the listening socket.
+                // A local client may send JSON and newline in separate writes;
+                // wait for the bounded complete frame instead of refusing EAGAIN.
+                stream.set_nonblocking(false)?;
                 stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+                stream.set_write_timeout(Some(Duration::from_secs(1)))?;
                 let mut line = String::new();
                 let received = if let Some(buffered) = buffered {
                     line = buffered;
@@ -1463,6 +1490,7 @@ pub fn run(mut config: Config) -> Result<()> {
                 };
                 let mut parsed = received
                     .map_err(anyhow::Error::from)
+                    .context("cannot read complete supervisor control request")
                     .and_then(|_| serde_json::from_str::<Swap>(&line).map_err(Into::into));
                 if serde_json::from_str::<serde_json::Value>(&line)
                     .ok()
@@ -1539,7 +1567,7 @@ pub fn run(mut config: Config) -> Result<()> {
                     config.required_ready = crate::addresses::ready(&worker.addresses);
                     let protected_before_swap = config.required_ready.clone();
                     let exposure = quiesce(&mut worker, &active.current, &config)?;
-                    match start_candidate(&candidate, &mut config, &listeners, READY_LIMIT, Some(capability), Some(&exposure)) {
+                    match start_candidate(&candidate, &mut config, &listeners, READY_LIMIT, Some(capability), worker.handoff.then_some(&exposure)) {
                         Ok((child, readiness)) => {
                             let next = Active {
                                 current: candidate,
