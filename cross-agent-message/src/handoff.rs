@@ -2,12 +2,66 @@
 //! drain acknowledgement harmless after the supervisor has requested resume.
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 pub(crate) const VERSION: u32 = 1;
+pub(crate) const REQUEST_DRAIN: Duration = Duration::from_secs(4);
+pub(crate) const DRAIN_LIMIT: Duration = REQUEST_DRAIN.saturating_add(Duration::from_secs(1));
+pub(crate) const FIRST_ACCEPT_LIMIT: Duration = Duration::from_secs(2);
+pub(crate) const EARLY_DRAIN_LIMIT: Duration = Duration::from_secs(1);
+pub(crate) const READY_LIMIT: Duration = Duration::from_secs(5);
+// ALF may resolve a flow's attributed PID asynchronously, including under load.
+pub(crate) const RETIRE_GRACE: Duration = Duration::from_secs(5);
+// Both attempts can consume drain + readiness, followed by the firewall grace.
+const OPERATION_LIMIT: Duration = DRAIN_LIMIT
+    .saturating_add(READY_LIMIT)
+    .saturating_add(DRAIN_LIMIT)
+    .saturating_add(READY_LIMIT)
+    .saturating_add(RETIRE_GRACE);
+pub(crate) const PARK_LIMIT: Duration = OPERATION_LIMIT.saturating_add(Duration::from_secs(5));
+pub(crate) const CONTROL_LIMIT: Duration = PARK_LIMIT
+    .saturating_add(RETIRE_GRACE)
+    .saturating_add(Duration::from_secs(5));
+const _: () = {
+    assert!(DRAIN_LIMIT.as_millis() > REQUEST_DRAIN.as_millis());
+    assert!(DRAIN_LIMIT.as_millis() + FIRST_ACCEPT_LIMIT.as_millis() < 10_000);
+    assert!(
+        DRAIN_LIMIT.as_millis()
+            + 2 * FIRST_ACCEPT_LIMIT.as_millis()
+            + EARLY_DRAIN_LIMIT.as_millis()
+            <= 10_000
+    );
+    assert!(PARK_LIMIT.as_millis() > OPERATION_LIMIT.as_millis());
+    assert!(CONTROL_LIMIT.as_millis() > PARK_LIMIT.as_millis() + RETIRE_GRACE.as_millis());
+};
 const MAX_FRAME: usize = 1024 * 1024;
+
+/// All related processes share this host clock; process-local Instant origins
+/// cannot be serialized and subtracted across the lifecycle channel.
+pub(crate) fn monotonic_ns() -> Result<u64> {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: the pointer is writable and CLOCK_MONOTONIC is a valid host clock.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    u64::try_from(time.tv_sec)?
+        .checked_mul(1_000_000_000)
+        .and_then(|seconds| seconds.checked_add(time.tv_nsec as u64))
+        .context("monotonic timestamp overflow")
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct Acceptance {
+    pub request: u64,
+    pub address: String,
+    pub at_ns: u64,
+}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "command", rename_all = "kebab-case")]
@@ -20,7 +74,13 @@ pub(crate) enum Command {
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub(crate) enum Reply {
-    Drained { id: u64 },
+    Drained {
+        id: u64,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        stopped_accepting_ns: BTreeMap<String, u64>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        first_accepted_ns: BTreeMap<String, u64>,
+    },
 }
 
 pub(crate) struct Channel {
@@ -134,11 +194,19 @@ mod tests {
             .unwrap();
         assert_eq!(
             serde_json::from_str::<Reply>(&channel.poll().unwrap().unwrap()).unwrap(),
-            Reply::Drained { id: 7 }
+            Reply::Drained {
+                id: 7,
+                stopped_accepting_ns: BTreeMap::new(),
+                first_accepted_ns: BTreeMap::new()
+            }
         );
         assert_eq!(
             serde_json::from_str::<Reply>(&channel.poll().unwrap().unwrap()).unwrap(),
-            Reply::Drained { id: 8 }
+            Reply::Drained {
+                id: 8,
+                stopped_accepting_ns: BTreeMap::new(),
+                first_accepted_ns: BTreeMap::new()
+            }
         );
         assert!(channel.poll().unwrap().is_none());
     }

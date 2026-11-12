@@ -15,6 +15,8 @@ pub struct Ready {
     pub request: u64,
     #[serde(default)]
     pub accepted: Vec<String>,
+    #[serde(default)]
+    pub first_accepted_ns: std::collections::BTreeMap<String, u64>,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -5,8 +5,12 @@ use crate::{
     supervisor::Config,
 };
 use anyhow::{Context, Result, bail};
+use std::collections::BTreeMap;
 use std::os::fd::{FromRawFd, RawFd};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::Duration;
 
 pub fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Result<()> {
@@ -49,26 +53,38 @@ pub fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Result<()>
     let mut request = 0;
     loop {
         let outcome = serve(&config, dashboard.clone(), &listeners, &mut ready, request)?;
-        let Outcome::Quiesced(id) = outcome else {
+        let Outcome::Quiesced {
+            id,
+            stopped_accepting_ns,
+            first_accepted_ns,
+        } = outcome
+        else {
             return Ok(());
         };
         // serve's runtime has now been dropped: all Hub/Router clones and
         // SQLite connections are gone before this acknowledgement is sent.
         ready.send(
-            &crate::handoff::Reply::Drained { id },
+            &crate::handoff::Reply::Drained {
+                id,
+                stopped_accepting_ns: stopped_accepting_ns.clone(),
+                first_accepted_ns: first_accepted_ns.clone(),
+            },
             std::time::Instant::now() + Duration::from_secs(1),
         )?;
         eprintln!(
             "Worker {} drained and closed SQLite; awaiting resume or retire.",
             std::process::id()
         );
-        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let deadline = std::time::Instant::now() + crate::handoff::PARK_LIMIT;
         loop {
             if signals.stopped() {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
-                bail!("parked worker received no resume or retire within 30 seconds");
+                bail!(
+                    "parked worker received no resume or retire within {} seconds",
+                    crate::handoff::PARK_LIMIT.as_secs()
+                );
             }
             if let Some(line) = ready.poll()? {
                 match serde_json::from_str::<crate::handoff::Command>(&line)? {
@@ -77,9 +93,14 @@ pub fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Result<()>
                         break;
                     }
                     crate::handoff::Command::Retire { .. } => return Ok(()),
-                    crate::handoff::Command::Quiesce { id } => {
-                        ready.send(&crate::handoff::Reply::Drained { id }, deadline)?
-                    }
+                    crate::handoff::Command::Quiesce { id } => ready.send(
+                        &crate::handoff::Reply::Drained {
+                            id,
+                            stopped_accepting_ns: stopped_accepting_ns.clone(),
+                            first_accepted_ns: first_accepted_ns.clone(),
+                        },
+                        deadline,
+                    )?,
                 }
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -89,15 +110,35 @@ pub fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Result<()>
 
 enum Outcome {
     Stopped,
-    Quiesced(u64),
+    Quiesced {
+        id: u64,
+        stopped_accepting_ns: BTreeMap<String, u64>,
+        first_accepted_ns: BTreeMap<String, u64>,
+    },
+}
+
+struct ListenerTiming {
+    address: String,
+    first_accepted_ns: AtomicU64,
+    stopped_accepting_ns: AtomicU64,
 }
 
 fn readiness(
     config: &Config,
     addresses: Vec<protocol::ListenAddress>,
-    accepted: u64,
+    timing: &[ListenerTiming],
     request: u64,
 ) -> crate::addresses::Ready {
+    let mut first_accepted_ns = BTreeMap::<String, u64>::new();
+    for listener in timing {
+        let first = listener.first_accepted_ns.load(Ordering::SeqCst);
+        if first != 0 {
+            first_accepted_ns
+                .entry(listener.address.clone())
+                .and_modify(|at| *at = (*at).min(first))
+                .or_insert(first);
+        }
+    }
     crate::addresses::Ready {
         build: hub::BUILD.to_string(),
         addresses,
@@ -107,13 +148,8 @@ fn readiness(
             0
         },
         request,
-        accepted: config
-            .addresses
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| accepted & (1u64 << index) != 0)
-            .map(|(_, address)| address.to_string())
-            .collect(),
+        accepted: first_accepted_ns.keys().cloned().collect(),
+        first_accepted_ns,
     }
 }
 
@@ -158,7 +194,6 @@ async fn serve(
     );
     let (shutdown, _) = tokio::sync::watch::channel(false);
     let mut tasks = tokio::task::JoinSet::new();
-    let accepted_on = Arc::new(std::sync::atomic::AtomicU64::new(0));
     crate::runtime::prepare(&config.db)?;
     let control = config.worker_control();
     if control.exists() {
@@ -188,6 +223,17 @@ async fn serve(
             ))
         })
         .collect::<std::io::Result<Vec<_>>>()?;
+    let timing: Arc<Vec<ListenerTiming>> = Arc::new(
+        listeners
+            .iter()
+            .map(|(_, address)| ListenerTiming {
+                address: address.clone(),
+                first_accepted_ns: AtomicU64::new(0),
+                stopped_accepting_ns: AtomicU64::new(0),
+            })
+            .collect(),
+    );
+    let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::unbounded_channel();
     if config.handoff_startup && config.handoff_protocol == crate::handoff::VERSION {
         ready.write(
             &format!("accepting {request}\n"),
@@ -195,7 +241,8 @@ async fn serve(
         )?;
     }
     for (index, (listener, local_address)) in listeners.into_iter().enumerate() {
-        let accepted_on = accepted_on.clone();
+        let timing = timing.clone();
+        let accepted_tx = accepted_tx.clone();
         let app = app.clone();
         let peer_hub = hub.clone();
         let local_ips = local_ips.clone();
@@ -206,11 +253,18 @@ async fn serve(
             loop {
                 tokio::select! {
                     biased;
-                    _ = shutdown.changed() => break,
+                    _ = shutdown.changed() => {
+                        timing[index].stopped_accepting_ns.store(crate::handoff::monotonic_ns()?, Ordering::SeqCst);
+                        break;
+                    },
                     _ = connections.join_next(), if !connections.is_empty() => {},
                     accepted = listener.accept() => {
                         let (socket, peer) = accepted?;
-                        accepted_on.fetch_or(1u64 << index, std::sync::atomic::Ordering::SeqCst);
+                        if timing[index].first_accepted_ns.load(Ordering::SeqCst) == 0 {
+                            let at_ns = crate::handoff::monotonic_ns()?;
+                            timing[index].first_accepted_ns.store(at_ns, Ordering::SeqCst);
+                            let _ = accepted_tx.send(crate::handoff::Acceptance { request, address: local_address.clone(), at_ns });
+                        }
                         let external = crate::addresses::is_remote(peer.ip(), &local_ips);
                         let peer_hub = peer_hub.clone(); let local_address = local_address.clone();
                         let app = app.clone(); let mut shutdown = shutdown.clone();
@@ -241,7 +295,7 @@ async fn serve(
                                     // keep-alive. Let its first request reach the
                                     // service before closing, within the drain bound.
                                     if observed.load(std::sync::atomic::Ordering::SeqCst) { connection.as_mut().graceful_shutdown(); }
-                                    let _ = tokio::time::timeout(Duration::from_secs(4), &mut connection).await;
+                                    let _ = tokio::time::timeout(crate::handoff::REQUEST_DRAIN, &mut connection).await;
                                 },
                             }
                         });
@@ -295,15 +349,20 @@ async fn serve(
     tokio::pin!(stopped);
     let outcome = loop {
         tokio::select! {
+            Some(accepted) = accepted_rx.recv() => {
+                if config.handoff_startup && config.handoff_protocol == crate::handoff::VERSION {
+                    ready.write(&format!("accepted {}\n", serde_json::to_string(&accepted)?), std::time::Instant::now() + Duration::from_secs(1))?;
+                }
+            },
             addresses = &mut initial, if !ready_sent => {
-                ready.write(&format!("ready {}\n", serde_json::to_string(&readiness(config, addresses?, accepted_on.load(std::sync::atomic::Ordering::SeqCst), request))?), std::time::Instant::now() + Duration::from_secs(1))?;
+                ready.write(&format!("ready {}\n", serde_json::to_string(&readiness(config, addresses?, &timing, request))?), std::time::Instant::now() + Duration::from_secs(1))?;
                 ready_sent = true;
                 tasks.spawn(crate::addresses::monitor(config.clone(), hub.clone(), shutdown.subscribe()));
             },
             _ = heartbeat.tick() => hub.heartbeat().map_err(|e| anyhow::anyhow!("heartbeat failed: {e:?}"))?,
-            _ = term.recv() => break Outcome::Stopped,
-            _ = interrupt.recv() => break Outcome::Stopped,
-            _ = &mut stopped => break Outcome::Stopped,
+            _ = term.recv() => break None,
+            _ = interrupt.recv() => break None,
+            _ = &mut stopped => break None,
             command = async {
                 match commands.as_mut() {
                     Some(stream) => stream.receive().await,
@@ -311,10 +370,10 @@ async fn serve(
                 }
             } => {
                 match command? {
-                    crate::handoff::Command::Quiesce { id } => break Outcome::Quiesced(id),
-                    crate::handoff::Command::Retire { .. } => break Outcome::Stopped,
+                    crate::handoff::Command::Quiesce { id } => break Some(id),
+                    crate::handoff::Command::Retire { .. } => break None,
                     crate::handoff::Command::Resume { id } => {
-                        ready.write(&format!("ready {}\n", serde_json::to_string(&readiness(config, hub.info().addresses, accepted_on.load(std::sync::atomic::Ordering::SeqCst), id))?), std::time::Instant::now() + Duration::from_secs(1))?;
+                        ready.write(&format!("ready {}\n", serde_json::to_string(&readiness(config, hub.info().addresses, &timing, id))?), std::time::Instant::now() + Duration::from_secs(1))?;
                     }
                 }
             },
@@ -329,5 +388,24 @@ async fn serve(
     // drain window before dropping the runtime (the supervisor enforces it too).
 
     let _ = std::fs::remove_file(control);
-    Ok(outcome)
+    Ok(match outcome {
+        None => Outcome::Stopped,
+        Some(id) => {
+            let mut stopped_accepting_ns = BTreeMap::<String, u64>::new();
+            for listener in timing.iter() {
+                let stopped = listener.stopped_accepting_ns.load(Ordering::SeqCst);
+                if stopped != 0 {
+                    stopped_accepting_ns
+                        .entry(listener.address.clone())
+                        .and_modify(|at| *at = (*at).max(stopped))
+                        .or_insert(stopped);
+                }
+            }
+            Outcome::Quiesced {
+                id,
+                stopped_accepting_ns,
+                first_accepted_ns: readiness(config, Vec::new(), &timing, id).first_accepted_ns,
+            }
+        }
+    })
 }

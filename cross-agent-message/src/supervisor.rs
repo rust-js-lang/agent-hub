@@ -1,6 +1,8 @@
 //! The stable process owns the listeners. Only its worker opens the live DB.
+use crate::handoff::{DRAIN_LIMIT, FIRST_ACCEPT_LIMIT, READY_LIMIT, RETIRE_GRACE};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::os::fd::{AsRawFd, RawFd};
@@ -98,6 +100,11 @@ struct Worker {
     addresses: Vec<protocol::ListenAddress>,
     channel: crate::handoff::Channel,
     handoff: bool,
+    startup: bool,
+    observed_accepting: bool,
+    stopped_accepting_ns: BTreeMap<String, u64>,
+    first_accepted_ns: BTreeMap<String, u64>,
+    resume_from_ns: BTreeMap<String, u64>,
     sequence: u64,
     phase: Phase,
 }
@@ -111,10 +118,28 @@ enum Phase {
     Retiring,
 }
 
-// ALF may look up a flow's already-attributed PID asynchronously. Keep the
-// database-free predecessor alive after replacement readiness so those
-// lookups can still resolve it, including when the firewall daemon is busy.
-const RETIRE_GRACE: Duration = Duration::from_secs(5);
+struct StartLimit {
+    until: Instant,
+    at_ns: u64,
+}
+
+fn log_accept_windows(
+    stopped: &BTreeMap<String, u64>,
+    accepted: &BTreeMap<String, u64>,
+    phase: &str,
+) {
+    for (address, stopped) in stopped {
+        if let Some(first) = accepted.get(address) {
+            match first.checked_sub(*stopped) {
+                Some(window) => eprintln!(
+                    "Handoff {phase} {address}: no accepts for {:.3} ms.",
+                    window as f64 / 1_000_000.0
+                ),
+                None => eprintln!("Handoff {phase} {address}: invalid acceptance timestamp order."),
+            }
+        }
+    }
+}
 
 struct Retirement {
     worker: Worker,
@@ -122,8 +147,21 @@ struct Retirement {
     after: Option<Instant>,
 }
 
-fn activate_worker(worker: &mut Worker, next: Worker, retirement: &mut Option<Retirement>) {
-    assert!(retirement.is_none(), "worker handoffs must be serialized");
+fn activate_worker(
+    worker: &mut Worker,
+    next: Worker,
+    retirement: &mut Option<Retirement>,
+) -> std::result::Result<(), Box<Worker>> {
+    if retirement.is_some() {
+        // Return ownership so the caller can cooperatively roll back instead
+        // of panicking or dropping a candidate that has already accepted.
+        return Err(Box::new(next));
+    }
+    log_accept_windows(
+        &worker.stopped_accepting_ns,
+        &next.first_accepted_ns,
+        "upgrade",
+    );
     let mut previous = std::mem::replace(worker, next);
     if previous.handoff {
         previous.phase = Phase::Retiring;
@@ -132,6 +170,7 @@ fn activate_worker(worker: &mut Worker, next: Worker, retirement: &mut Option<Re
             after: Some(Instant::now() + RETIRE_GRACE),
         });
     }
+    Ok(())
 }
 
 impl Worker {
@@ -166,7 +205,7 @@ fn start_or_restore(
     config: &mut Config,
     listeners: &[TcpListener],
 ) -> Result<Worker> {
-    match start(&active.current, config, listeners, Duration::from_secs(3)) {
+    match start(&active.current, config, listeners, READY_LIMIT) {
         Ok(worker) => Ok(worker),
         Err(error) => {
             let previous = active.previous.take().with_context(|| {
@@ -175,13 +214,8 @@ fn start_or_restore(
             eprintln!("Worker startup failed; restoring the previous installed image: {error:#}");
             active.current = previous;
             atomic_json(&config.active_path(), active)?;
-            start(
-                &active.current,
-                config,
-                listeners,
-                Duration::from_millis(2500),
-            )
-            .context("previous worker did not recover")
+            start(&active.current, config, listeners, READY_LIMIT)
+                .context("previous worker did not recover")
         }
     }
 }
@@ -352,7 +386,7 @@ fn start(
     listeners: &[TcpListener],
     limit: Duration,
 ) -> Result<Worker> {
-    let (mut worker, readiness) = start_candidate(binary, config, listeners, limit)?;
+    let (mut worker, readiness) = start_candidate(binary, config, listeners, limit, None)?;
     if let Err(error) = readiness {
         terminate(&mut worker, Duration::ZERO)?;
         return Err(error);
@@ -367,8 +401,11 @@ fn start_candidate(
     config: &mut Config,
     listeners: &[TcpListener],
     limit: Duration,
+    capability: Option<crate::updates::BuildInfo>,
 ) -> Result<(Worker, Result<()>)> {
-    let deadline = Instant::now() + limit;
+    let started = Instant::now();
+    let at_ns = crate::handoff::monotonic_ns()?;
+    let deadline = started + limit;
     let bytes = serde_json::to_vec(config)?;
     if std::fs::read(config.config_path()).ok().as_deref() != Some(bytes.as_slice()) {
         atomic_json(&config.config_path(), config)?;
@@ -386,7 +423,10 @@ fn start_candidate(
     crate::runtime::prepare_worker(&config.db)?;
     // Discover capability before launch: readiness may time out with a startup
     // marker still buffered, or before the child has had a chance to send it.
-    let capability = crate::updates::inspect(&executable)?;
+    let capability = match capability {
+        Some(info) => info,
+        None => crate::updates::inspect(&executable)?,
+    };
     let (mut process, stream) = child(&executable, config, listeners)?;
     let channel = match crate::handoff::Channel::new(stream) {
         Ok(channel) => channel,
@@ -400,27 +440,37 @@ fn start_candidate(
         channel,
         handoff: capability.handoff_protocol == crate::handoff::VERSION
             && config.handoff_protocol == crate::handoff::VERSION,
+        startup: capability.handoff_startup && config.handoff_startup,
+        observed_accepting: !(capability.handoff_startup && config.handoff_startup),
+        stopped_accepting_ns: BTreeMap::new(),
+        first_accepted_ns: BTreeMap::new(),
+        resume_from_ns: BTreeMap::new(),
         addresses: Vec::new(),
         sequence: 0,
         phase: Phase::Running,
     };
+    let startup = worker.startup;
     let ready = match wait_ready(
-        &mut worker.process,
-        &mut worker.channel,
+        &mut worker,
         config,
         0,
         deadline,
-        &mut worker.handoff,
+        startup.then_some(StartLimit {
+            until: started + FIRST_ACCEPT_LIMIT,
+            at_ns,
+        }),
     ) {
         Ok(ready) => ready,
         Err(error) => return Ok((worker, Err(error))),
     };
+    worker.first_accepted_ns = ready.first_accepted_ns;
     worker.addresses = ready.addresses;
     config.required_ready = crate::addresses::ready(&worker.addresses);
     eprintln!(
-        "Worker {} is ready at {}.",
+        "Worker {} is ready at {} ({} ms).",
         worker.id(),
-        executable.display()
+        executable.display(),
+        started.elapsed().as_millis()
     );
     Ok((worker, Ok(())))
 }
@@ -461,29 +511,47 @@ fn validate_ready(ready: &crate::addresses::Ready, config: &Config) -> Result<()
 }
 
 fn wait_ready(
-    process: &mut Child,
-    channel: &mut crate::handoff::Channel,
+    worker: &mut Worker,
     config: &Config,
     request: u64,
     deadline: Instant,
-    handoff: &mut bool,
+    startup: Option<StartLimit>,
 ) -> Result<crate::addresses::Ready> {
+    let mut first_accepted = BTreeMap::new();
     loop {
         if Instant::now() >= deadline {
             bail!("worker readiness timed out");
         }
-        if let Some(line) = channel.poll()? {
+        if let Some(line) = worker.channel.poll()? {
+            if let Some(payload) = line.strip_prefix("accepted ") {
+                if !config.handoff_startup {
+                    bail!("worker sent unnegotiated acceptance telemetry");
+                }
+                let accepted: crate::handoff::Acceptance = serde_json::from_str(payload)?;
+                if accepted.request == request {
+                    worker.observed_accepting = true;
+                    worker
+                        .first_accepted_ns
+                        .entry(accepted.address.clone())
+                        .or_insert(accepted.at_ns);
+                    first_accepted
+                        .entry(accepted.address)
+                        .or_insert(accepted.at_ns);
+                }
+                continue;
+            }
             if let Some(id) = line.strip_prefix("accepting ") {
                 if !config.handoff_startup || config.handoff_protocol != crate::handoff::VERSION {
                     bail!("worker sent an unnegotiated startup marker");
                 }
                 if id.trim().parse::<u64>()? == request {
-                    *handoff = true;
+                    worker.handoff = true;
+                    worker.observed_accepting = true;
                 }
                 continue;
             }
             if let Some(payload) = line.strip_prefix("ready ") {
-                let ready = if let Ok(ready) =
+                let mut ready = if let Ok(ready) =
                     serde_json::from_str::<crate::addresses::Ready>(payload.trim())
                 {
                     ready
@@ -504,6 +572,7 @@ fn wait_ready(
                         handoff_protocol: 0,
                         request: 0,
                         accepted: Vec::new(),
+                        first_accepted_ns: BTreeMap::new(),
                     }
                 } else {
                     bail!("invalid resumed worker readiness");
@@ -511,9 +580,30 @@ fn wait_ready(
                 if ready.request != request {
                     continue;
                 }
-                *handoff = ready.handoff_protocol == crate::handoff::VERSION
+                worker.observed_accepting = true;
+                worker.handoff = ready.handoff_protocol == crate::handoff::VERSION
                     && config.handoff_protocol == crate::handoff::VERSION;
+                worker.first_accepted_ns = ready.first_accepted_ns.clone();
                 validate_ready(&ready, config)?;
+                if let Some(limit) = &startup {
+                    for address in protected(config) {
+                        let first = ready
+                            .first_accepted_ns
+                            .get(&address)
+                            .context("worker omitted first acceptance timing")?;
+                        let elapsed = first
+                            .checked_sub(limit.at_ns)
+                            .context("worker acceptance predates startup")?;
+                        if elapsed > FIRST_ACCEPT_LIMIT.as_nanos() as u64 {
+                            bail!(
+                                "worker first acceptance on {address} exceeded its startup budget"
+                            );
+                        }
+                    }
+                }
+                if ready.first_accepted_ns.is_empty() {
+                    ready.first_accepted_ns = first_accepted;
+                }
                 if Instant::now() > deadline {
                     bail!("worker readiness timed out");
                 }
@@ -524,7 +614,15 @@ fn wait_ready(
                 bail!("worker readiness refused: {line}");
             }
         }
-        if let Some(status) = process.try_wait()? {
+        // Consume buffered telemetry before a deadline decision: the parent
+        // itself may have been scheduled after the worker accepted on time.
+        if let Some(limit) = &startup
+            && Instant::now() >= limit.until
+            && protected(config).any(|address| !first_accepted.contains_key(&address))
+        {
+            bail!("worker first acceptance timed out on a required address");
+        }
+        if let Some(status) = worker.try_wait()? {
             bail!("worker exited before ready: {status}");
         }
         if Instant::now() >= deadline {
@@ -551,26 +649,40 @@ fn restore_image(snapshot: &Path, config: &Config) -> Result<()> {
 }
 
 fn resume(worker: &mut Worker, image: &Path, config: &Config) -> Result<()> {
+    let started = Instant::now();
+    let at_ns = crate::handoff::monotonic_ns()?;
     restore_image(image, config)?;
     let id = worker.next_request();
     worker.phase = Phase::Resuming(id);
-    let deadline = Instant::now() + Duration::from_millis(2500);
+    worker.first_accepted_ns.clear();
+    let deadline = started + READY_LIMIT;
     worker
         .channel
         .send(&crate::handoff::Command::Resume { id }, deadline)?;
+    let startup = worker.startup;
     let ready = wait_ready(
-        &mut worker.process,
-        &mut worker.channel,
+        worker,
         config,
         id,
         deadline,
-        &mut worker.handoff,
+        startup.then_some(StartLimit {
+            until: started + FIRST_ACCEPT_LIMIT,
+            at_ns,
+        }),
     )?;
+    worker.first_accepted_ns = ready.first_accepted_ns;
+    log_accept_windows(
+        &worker.resume_from_ns,
+        &worker.first_accepted_ns,
+        "rollback",
+    );
+    worker.resume_from_ns.clear();
     worker.addresses = ready.addresses;
     worker.phase = Phase::Running;
     eprintln!(
-        "Worker {} resumed on the same process after rollback.",
-        worker.id()
+        "Worker {} resumed on the same process after rollback ({} ms).",
+        worker.id(),
+        started.elapsed().as_millis()
     );
     Ok(())
 }
@@ -598,7 +710,15 @@ fn drain(worker: &mut Worker) -> Result<()> {
         bail!("worker handoff is still awaiting recovery");
     }
     let id = worker.next_request();
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let started = Instant::now();
+    let early = worker.startup && !worker.observed_accepting;
+    let mut deadline = started
+        + if early {
+            crate::handoff::EARLY_DRAIN_LIMIT
+        } else {
+            DRAIN_LIMIT
+        };
+    worker.stopped_accepting_ns.clear();
     worker.phase = Phase::Quiescing;
     worker
         .channel
@@ -606,16 +726,30 @@ fn drain(worker: &mut Worker) -> Result<()> {
     loop {
         if let Some(line) = worker.channel.poll()? {
             match serde_json::from_str::<crate::handoff::Reply>(&line) {
-                Ok(crate::handoff::Reply::Drained { id: reply }) if reply == id => {
+                Ok(crate::handoff::Reply::Drained {
+                    id: reply,
+                    stopped_accepting_ns,
+                    first_accepted_ns,
+                }) if reply == id => {
+                    worker.stopped_accepting_ns = stopped_accepting_ns;
+                    worker.first_accepted_ns = first_accepted_ns;
                     worker.phase = Phase::Parked;
                     eprintln!(
-                        "Worker {} acknowledged drained; database is closed and PID retained.",
-                        worker.id()
+                        "Worker {} acknowledged drained; database is closed and PID retained ({} ms).",
+                        worker.id(),
+                        started.elapsed().as_millis()
                     );
                     return Ok(());
                 }
                 Ok(_) => {}
-                Err(_) if line.starts_with("ready ") || line.starts_with("accepting ") => {}
+                Err(_)
+                    if line.starts_with("ready ")
+                        || line.starts_with("accepting ")
+                        || line.starts_with("accepted ") =>
+                {
+                    worker.observed_accepting = true;
+                    deadline = started + DRAIN_LIMIT;
+                }
                 Err(_) => bail!("invalid worker drain acknowledgement"),
             }
         }
@@ -663,7 +797,7 @@ fn recover(
     if worker.handoff && worker.try_wait()?.is_none() {
         resume(worker, image, config)
     } else {
-        *worker = start(image, config, listeners, Duration::from_millis(2500))?;
+        *worker = start(image, config, listeners, READY_LIMIT)?;
         Ok(())
     }
 }
@@ -676,12 +810,33 @@ fn rollback_candidate(
     listeners: &[TcpListener],
     retirement: &mut Option<Retirement>,
 ) -> Result<()> {
-    if retirement.is_some() {
-        bail!("cannot begin rollback while another predecessor is retiring");
+    if let Some(mut pending) = retirement.take() {
+        // The serialization guard normally makes this unreachable. If it is
+        // violated, keep the ready candidate serving while the existing grace
+        // finishes, then use the same cooperative rollback as any other refusal.
+        let after = pending
+            .after
+            .unwrap_or_else(|| Instant::now() + RETIRE_GRACE);
+        while Instant::now() < after {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if let Err(error) = retire(&mut pending.worker) {
+            eprintln!("retirement before controlled activation rollback failed: {error:#}");
+        }
     }
+    worker.resume_from_ns = worker.stopped_accepting_ns.clone();
     if candidate.handoff && candidate.try_wait()?.is_none() {
         match drain(&mut candidate) {
             Ok(()) => {
+                // An address the candidate never accepted still spans the
+                // original worker's whole stop -> resume window.
+                for address in candidate.first_accepted_ns.keys() {
+                    if let Some(stopped) = candidate.stopped_accepting_ns.get(address) {
+                        worker.resume_from_ns.insert(address.clone(), *stopped);
+                    } else {
+                        worker.resume_from_ns.remove(address);
+                    }
+                }
                 candidate.phase = Phase::Retiring;
                 // Retain ownership even if resume times out: the main loop
                 // starts this grace only after the active worker proves ready.
@@ -698,11 +853,24 @@ fn rollback_candidate(
             Err(error) => eprintln!("Failed candidate would not park: {error:#}"),
         }
     }
-    eprintln!(
-        "Failed candidate cannot cooperate; remote connections may be interrupted while it is reaped and the previous worker resumes."
-    );
     // A writer that did not acknowledge drain must be reaped before rollback.
     terminate(&mut candidate, Duration::ZERO)?;
+    while let Ok(Some(line)) = candidate.channel.poll() {
+        if line.starts_with("accepting ")
+            || line.starts_with("accepted ")
+            || line.starts_with("ready ")
+        {
+            candidate.observed_accepting = true;
+        }
+    }
+    if !candidate.startup || candidate.observed_accepting {
+        worker.resume_from_ns.clear(); // abrupt exit has no trustworthy stop timestamp
+        eprintln!(
+            "Failed candidate cannot cooperate after possibly accepting; remote connections may be interrupted during rollback."
+        );
+    } else {
+        eprintln!("Rejected candidate never entered acceptance; recovering the previous worker.");
+    }
     recover(worker, image, config, listeners)
 }
 
@@ -740,7 +908,7 @@ fn shutdown(
 pub fn request(config: &Config, swap: &Swap) -> Result<Swapped> {
     let mut socket = UnixStream::connect(config.control())
         .context("no supervised hub here; start one with serve --replace first")?;
-    socket.set_read_timeout(Some(Duration::from_secs(30)))?;
+    socket.set_read_timeout(Some(crate::handoff::CONTROL_LIMIT))?;
     socket.write_all(&serde_json::to_vec(swap)?)?;
     socket.write_all(b"\n")?;
     let mut line = String::new();
@@ -1003,12 +1171,7 @@ pub fn run(mut config: Config) -> Result<()> {
             let restart = if replaced {
                 start_or_restore(&mut active, &mut config, &listeners)
             } else {
-                start(
-                    &active.current,
-                    &mut config,
-                    &listeners,
-                    Duration::from_secs(3),
-                )
+                start(&active.current, &mut config, &listeners, READY_LIMIT)
             };
             match restart {
                 Ok(child) => {
@@ -1040,6 +1203,13 @@ pub fn run(mut config: Config) -> Result<()> {
                         && ready.request == id
                         && validate_ready(&ready, &config).is_ok()
                     {
+                        worker.first_accepted_ns = ready.first_accepted_ns;
+                        log_accept_windows(
+                            &worker.resume_from_ns,
+                            &worker.first_accepted_ns,
+                            "rollback",
+                        );
+                        worker.resume_from_ns.clear();
                         worker.addresses = ready.addresses;
                         worker.phase = Phase::Running;
                         eprintln!("Worker {} completed delayed resume.", worker.id());
@@ -1071,6 +1241,13 @@ pub fn run(mut config: Config) -> Result<()> {
                 worker.addresses = crate::addresses::probe(&config, &build);
                 config.required_ready = crate::addresses::ready(&worker.addresses);
                 let protected_before = config.required_ready.clone();
+                // Inspect the final file while the current worker still serves.
+                let capability = crate::updates::inspect(
+                    config
+                        .worker_path
+                        .as_deref()
+                        .context("stable worker path missing")?,
+                )?;
                 if let Err(error) = quiesce(&mut worker, &prior.current, &config) {
                     eprintln!("listener handoff cancelled; retaining worker: {error:#}");
                     active = prior;
@@ -1082,11 +1259,35 @@ pub fn run(mut config: Config) -> Result<()> {
                     &active.current,
                     &mut config,
                     &listeners,
-                    Duration::from_secs(3),
+                    READY_LIMIT,
+                    Some(capability),
                 );
                 match restart {
                     Ok((next, Ok(()))) => {
-                        activate_worker(&mut worker, next, &mut retirement);
+                        if let Err(candidate) = activate_worker(&mut worker, next, &mut retirement)
+                        {
+                            eprintln!(
+                                "listener activation cancelled while predecessor retirement is pending"
+                            );
+                            active = prior;
+                            if let Err(error) = atomic_json(&config.active_path(), &active) {
+                                eprintln!(
+                                    "could not record previous image; continuing live rollback: {error:#}"
+                                );
+                            }
+                            config.required_ready = protected_before;
+                            if let Err(error) = rollback_candidate(
+                                *candidate,
+                                &mut worker,
+                                &active.current,
+                                &mut config,
+                                &listeners,
+                                &mut retirement,
+                            ) {
+                                eprintln!("listener activation recovery pending: {error:#}");
+                            }
+                            handoff_retry = true;
+                        }
                     }
                     Ok((candidate, Err(error))) => {
                         eprintln!(
@@ -1209,26 +1410,29 @@ pub fn run(mut config: Config) -> Result<()> {
                     // A fresh Mach-O's first execution may otherwise consume the
                     // handoff deadline. start reuses this inode when unchanged.
                     let executable = config.worker_path.as_deref().context("stable worker path missing")?;
-                    let prepared = (|| -> Result<()> {
+                    let prepared = (|| -> Result<crate::updates::BuildInfo> {
                         crate::installation::activate_verified(&candidate, executable, &swap.sha256)?;
-                        crate::updates::inspect(executable)?;
+                        let info = crate::updates::inspect(executable)?;
                         if crate::updates::sha256(&std::fs::read(executable)?) != swap.sha256 { bail!("installed image changed during final-path preflight"); }
-                        Ok(())
+                        Ok(info)
                     })();
-                    if let Err(error) = prepared {
+                    let capability = match prepared {
+                        Ok(info) => info,
+                        Err(error) => {
                         let previous_sha = active.current.parent().and_then(|parent| parent.file_name()).and_then(|name| name.to_str()).context("previous image checksum missing")?;
                         if let Err(restore) = crate::installation::activate_verified(&active.current, executable, previous_sha) {
                             eprintln!("could not restore installed image; existing worker is still serving: {restore:#}");
                         }
                         return Err(error.context("candidate final-path preflight failed; existing worker retained"));
-                    }
+                        }
+                    };
                     // Probe before draining: already-pending/blocked addresses do
                     // not prevent an upgrade, but every ready address is protected.
                     worker.addresses = crate::addresses::probe(&config, &previous_build);
                     config.required_ready = crate::addresses::ready(&worker.addresses);
                     let protected_before_swap = config.required_ready.clone();
                     quiesce(&mut worker, &active.current, &config)?;
-                    match start_candidate(&candidate, &mut config, &listeners, Duration::from_secs(3)) {
+                    match start_candidate(&candidate, &mut config, &listeners, READY_LIMIT, Some(capability)) {
                         Ok((child, readiness)) => {
                             let next = Active {
                                 current: candidate,
@@ -1245,7 +1449,13 @@ pub fn run(mut config: Config) -> Result<()> {
                                     addresses: worker.addresses.clone(),
                                 });
                             }
-                            activate_worker(&mut worker, child, &mut retirement);
+                            if let Err(candidate) = activate_worker(&mut worker, child, &mut retirement) {
+                                config.required_ready = protected_before_swap;
+                                let recorded = atomic_json(&config.active_path(), &active);
+                                rollback_candidate(*candidate, &mut worker, &active.current, &mut config, &listeners, &mut retirement)?;
+                                recorded.context("could not record previous image after activation refusal")?;
+                                bail!("activation cancelled while predecessor retirement is pending; previous worker resumed");
+                            }
                             active = next;
                             activated = Instant::now();
                             crashes.clear();
@@ -1373,6 +1583,7 @@ mod tests {
             build: "fixture".to_string(),
             handoff_protocol: crate::handoff::VERSION,
             request: 0,
+            first_accepted_ns: BTreeMap::new(),
             accepted: vec![loopback.to_string()],
             addresses: [loopback, private]
                 .iter()
@@ -1399,6 +1610,110 @@ mod tests {
         assert!(validate_ready(&ready, &config).is_ok());
         ready.handoff_protocol = 999;
         assert!(validate_ready(&ready, &config).is_err());
+    }
+
+    #[test]
+    fn first_acceptance_is_per_address_and_independent_of_readiness_completion() {
+        let loopback = "127.0.0.1:12345";
+        let private = "127.0.0.2:12345";
+        let config = Config {
+            addresses: vec![loopback.parse().unwrap(), private.parse().unwrap()],
+            requested_addresses: Vec::new(),
+            required_ready: vec![private.into()],
+            db: PathBuf::from("unused.db"),
+            worker_path: None,
+            handoff_protocol: crate::handoff::VERSION,
+            handoff_startup: true,
+            activate_current: false,
+            away_after: 60_000,
+            forget_after: 120_000,
+            reconnect_grace: 0,
+        };
+        for all_addresses in [true, false] {
+            let (parent, child_socket) = UnixStream::pair().unwrap();
+            let source = child_socket.as_raw_fd();
+            let mut command = Command::new("python3");
+            command
+                .arg("-c")
+                .arg(
+                    r#"
+import json, socket, sys, time
+wire = socket.socket(fileno=3)
+addresses = ['127.0.0.1:12345', '127.0.0.2:12345']
+if sys.argv[1] == 'false': addresses.pop()
+first = {address: time.clock_gettime_ns(time.CLOCK_MONOTONIC) for address in addresses}
+wire.sendall(b'accepting 0\n')
+for address, at in first.items():
+    wire.sendall(('accepted '+json.dumps({'request':0,'address':address,'at_ns':at})+'\n').encode())
+time.sleep(float(sys.argv[2])+0.2)
+ready = {'build':'fixture','request':0,'handoff_protocol':1,'accepted':addresses,
+         'first_accepted_ns':first,
+         'addresses':[{'address':address,'state':'ready'} for address in addresses]}
+wire.sendall(('ready '+json.dumps(ready)+'\n').encode())
+wire.recv(1)
+"#,
+                )
+                .arg(all_addresses.to_string())
+                .arg(FIRST_ACCEPT_LIMIT.as_secs_f64().to_string());
+            // SAFETY: only descriptor duplication/close runs between fork and exec.
+            unsafe {
+                command.pre_exec(move || {
+                    let copy = libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 128);
+                    if copy < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::dup2(copy, 3) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    libc::close(copy);
+                    Ok(())
+                });
+            }
+            let began = Instant::now();
+            let at_ns = crate::handoff::monotonic_ns().unwrap();
+            let mut worker = Worker {
+                process: command.spawn().unwrap(),
+                channel: crate::handoff::Channel::new(parent).unwrap(),
+                handoff: true,
+                startup: true,
+                observed_accepting: false,
+                stopped_accepting_ns: BTreeMap::new(),
+                first_accepted_ns: BTreeMap::new(),
+                resume_from_ns: BTreeMap::new(),
+                sequence: 0,
+                phase: Phase::Running,
+                addresses: Vec::new(),
+            };
+            drop(child_socket);
+            let result = wait_ready(
+                &mut worker,
+                &config,
+                0,
+                began + READY_LIMIT,
+                Some(StartLimit {
+                    until: began + FIRST_ACCEPT_LIMIT,
+                    at_ns,
+                }),
+            );
+            if all_addresses {
+                assert!(result.is_ok(), "{result:?}");
+                assert!(
+                    began.elapsed() >= FIRST_ACCEPT_LIMIT,
+                    "readiness should finish after its shorter acceptance deadline"
+                );
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("first acceptance timed out")
+                );
+                assert!(
+                    began.elapsed() < READY_LIMIT,
+                    "one ready address cannot mask a missing protected address"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1447,7 +1762,7 @@ ready(0)
 for line in lines:
     command=json.loads(line)
     if command['command']=='quiesce':
-        time.sleep(4.2)
+        time.sleep(float(sys.argv[2]) + 0.2)
         db.commit()
         db.close()
         wire.sendall((json.dumps({'state':'drained','id':command['id']})+'\n').encode())
@@ -1464,6 +1779,7 @@ for line in lines:
             .arg("-c")
             .arg(script)
             .arg(&config.db)
+            .arg(DRAIN_LIMIT.as_secs_f64().to_string())
             .stdout(Stdio::null());
         // SAFETY: duplicate the owned inherited socket with only libc calls.
         unsafe {
@@ -1479,27 +1795,25 @@ for line in lines:
                 Ok(())
             });
         }
-        let mut process = command.spawn().unwrap();
+        let process = command.spawn().unwrap();
         drop(child_socket);
         let pid = process.id();
-        let mut channel = crate::handoff::Channel::new(parent).unwrap();
-        let ready = wait_ready(
-            &mut process,
-            &mut channel,
-            &config,
-            0,
-            Instant::now() + Duration::from_secs(3),
-            &mut false,
-        )
-        .unwrap();
         let mut worker = Worker {
             process,
-            channel,
+            channel: crate::handoff::Channel::new(parent).unwrap(),
             handoff: true,
+            startup: false,
+            observed_accepting: true,
+            stopped_accepting_ns: BTreeMap::new(),
+            first_accepted_ns: BTreeMap::new(),
+            resume_from_ns: BTreeMap::new(),
             sequence: 0,
             phase: Phase::Running,
-            addresses: ready.addresses,
+            addresses: Vec::new(),
         };
+        let ready =
+            wait_ready(&mut worker, &config, 0, Instant::now() + READY_LIMIT, None).unwrap();
+        worker.addresses = ready.addresses;
         let error = quiesce(&mut worker, &snapshot, &config).unwrap_err();
         assert!(error.to_string().contains("drain timed out"), "{error:#}");
         assert!(worker.phase == Phase::Running);

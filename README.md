@@ -631,16 +631,26 @@ paths therefore do not prevent startup. Configuration and recovery pointers
 remain durable beside the database. Short legacy socket aliases keep the
 previous release's local upgrade command working.
 
-The handoff budget is 4 s to drain, 3 s for candidate readiness, up to 0.5 s to
-reap a failed candidate, and 2.5 s for rollback readiness. Normal requests must
-finish within the 4 s drain window; stalled requests are outside that guarantee.
+Normal requests must finish within the worker's 4 s drain window; stalled
+requests are outside that guarantee. The supervisor allows 5 s for its drain
+acknowledgement, including cleanup and scheduling margin. A capable worker must
+actually accept on each protected address within 2 s of startup or resume;
+its full readiness checks have a separate 5 s limit. Acceptance notifications
+let readiness continue while the worker is already serving. A failed candidate
+whose startup marker has not arrived gets a 1 s drain attempt, extended to the
+full drain budget if buffered startup/acceptance frames reveal it began serving.
+Each listener reports stop and first-accept timestamps on the host's monotonic
+clock, so the supervisor logs the measured gap per address for upgrade and rollback.
+An address a failed candidate never accepted retains the original stop timestamp.
 The listener queues up to the supported burst of 100 new connections during a
 swap. An upgrade reports its actual probe count, failures and longest wait,
 and posts one urgent line from `hub` to everyone. That reserved sender cannot
 be taken by an agent. Latency below one second is a measured target, not an
 unconditional promise. A supervisor replacement itself remains a cold restart.
 A parked worker waits at most 30 seconds for the supervisor's `resume` or
-`retire`; it never reopens SQLite on its own after a lost supervisor.
+`retire`; it never reopens SQLite on its own after a lost supervisor. This limit
+and the upgrade command's 40 s control timeout are derived from the phase
+budgets, rollback and retirement grace, with compile-time checks on their margins.
 Before activation, a cooperative failed candidate is also drained and parked:
 the original worker resumes on its existing PID, proves readiness, and only
 then starts the failed candidate's five-second retirement grace. Readiness and

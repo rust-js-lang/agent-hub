@@ -154,10 +154,12 @@ impl Worker {
         );
         line
     }
-    fn ready(&mut self, id: u64, address: &str) {
+    fn ready(&mut self, id: u64, address: &str) -> cross_agent_message::addresses::Ready {
         let mut line = self.line();
-        if line.starts_with("accepting ") {
-            assert_eq!(line.trim(), format!("accepting {id}"));
+        while line.starts_with("accepting ") || line.starts_with("accepted ") {
+            if line.starts_with("accepting ") {
+                assert_eq!(line.trim(), format!("accepting {id}"));
+            }
             line = self.line();
         }
         let ready: cross_agent_message::addresses::Ready =
@@ -165,14 +167,27 @@ impl Worker {
         assert_eq!(ready.request, id);
         assert_eq!(ready.handoff_protocol, 1);
         assert!(ready.accepted.iter().any(|accepted| accepted == address));
+        assert!(
+            ready
+                .first_accepted_ns
+                .get(address)
+                .is_some_and(|at| *at > 0)
+        );
+        ready
     }
-    fn drained(&mut self, id: u64) {
-        let reply: serde_json::Value = serde_json::from_str(&self.line()).unwrap();
-        assert_eq!(reply, serde_json::json!({"state":"drained","id":id}));
+    fn drained(&mut self, id: u64) -> std::collections::BTreeMap<String, u64> {
+        let mut line = self.line();
+        while line.starts_with("accepted ") {
+            line = self.line();
+        }
+        let reply: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["state"], "drained");
+        assert_eq!(reply["id"], id);
         assert!(
             self.child.try_wait().unwrap().is_none(),
             "drained PID must remain alive"
         );
+        serde_json::from_value(reply["stopped_accepting_ns"].clone()).unwrap()
     }
     fn retire(&mut self, id: u64) {
         self.send("retire", id);
@@ -324,17 +339,22 @@ fn drained_process_has_no_sqlite_handles_and_lives_until_replacement_accepts() {
     let fixture = Fixture::new();
     let address = fixture.config.addresses[0].to_string();
     let mut old = fixture.spawn();
-    old.ready(0, &address);
+    let before = old.ready(0, &address);
     let client = fixture.client();
     client.register("a").unwrap();
     client.register("b").unwrap();
     client.take("invariant", "a", 1).unwrap();
     assert!(fixture.database_open_by(old.child.id()));
     old.send("quiesce", 1);
-    old.drained(1);
+    let stopped = old.drained(1);
+    assert!(stopped[&address] >= before.first_accepted_ns[&address]);
     assert!(!fixture.database_open_by(old.child.id()));
     let mut new = fixture.spawn();
-    new.ready(0, &address);
+    let after = new.ready(0, &address);
+    assert!(
+        after.first_accepted_ns[&address] >= stopped[&address],
+        "timestamps must be comparable across worker processes"
+    );
     assert!(old.child.try_wait().unwrap().is_none());
     assert!(!fixture.database_open_by(old.child.id()));
     assert!(fixture.database_open_by(new.child.id()));
