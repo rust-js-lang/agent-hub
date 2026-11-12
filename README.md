@@ -291,6 +291,110 @@ all.
 A hold is now one agent's among all the machines, so name it for the
 machine it guards: `hold check-studio`, `hold check-mini`.
 
+### Add a machine, step by step
+
+The four steps above, in full, for one more machine whose agents should
+reach a hub that already runs elsewhere. Step 1 is the person's; an agent
+can do the rest, given this page.
+
+**Before you start**, on the hub's machine, note its name, the second
+column of its own line in `tailscale status` (`studio` below), and make
+sure the hub listens on its Tailscale address:
+
+```bash
+cross-agent-message serve --replace --listen "$(tailscale ip -4)"
+```
+
+**1. Install Tailscale and sign in.**
+
+| System | Install | Sign in |
+|---|---|---|
+| macOS | `brew install --cask tailscale-app`, or the app from [tailscale.com/download](https://tailscale.com/download) | Open Tailscale, then "Log in" in its menu-bar icon |
+| Linux | `curl -fsSL https://tailscale.com/install.sh \| sh` | `sudo tailscale up`, and open the link it prints |
+| Windows | The installer from [tailscale.com/download](https://tailscale.com/download) | "Log in" in its tray icon |
+| iPhone, Android | The Tailscale app from the store | In the app, then switch it on |
+
+Sign in to **the same account** as the hub's machine: that is what puts
+the two on one private network. On macOS, if a terminal says `tailscale:
+command not found`, the app's command is inside it:
+
+```bash
+alias tailscale=/Applications/Tailscale.app/Contents/MacOS/Tailscale
+```
+
+Now the new machine sees the hub's, and reaches it:
+
+```console
+$ tailscale status
+100.96.251.120  mac-mini    you@  macOS  -
+100.98.127.108  studio      you@  macOS  -
+$ tailscale ping studio
+pong from studio (100.98.127.108) via 192.168.1.20:41641 in 3ms
+```
+
+**2. Check the hub answers**, before installing anything else:
+
+```console
+$ curl -s -o /dev/null -w '%{http_code}\n' http://studio:7878/
+200
+```
+
+| Instead of `200` | Means | Do |
+|---|---|---|
+| `Could not resolve host` | The name isn't known here: MagicDNS is off for your account | Use the hub's `100.x.y.z` address in place of its name, here and below, or turn MagicDNS on in Tailscale's admin console |
+| `Connection refused` | The hub's machine is there, but the hub isn't listening on its Tailscale address | Run the `serve --replace --listen` line above on the hub's machine |
+| It hangs, then times out | The hub's machine is asleep or off, or Tailscale is switched off on one side | Wake it, and check `tailscale status` on both |
+
+The first time, macOS on the hub's machine may ask whether
+`cross-agent-message` may accept incoming connections: allow it.
+
+**3. Install the command.** It needs `git` and Rust's
+[rustup](https://rustup.rs), which installs the release this project pins
+by itself. Not a hub: there is one already.
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh    # only if `cargo` isn't there yet
+git clone --recurse-submodules --shallow-submodules https://github.com/rust-js-lang/cross-agent-message.git
+cargo install --path cross-agent-message/cross-agent-message
+```
+
+Bun and Node.js are for building the dashboard, which only the hub's
+machine serves, so this machine doesn't need them.
+
+**4. Say where the hub is**, in the file your shell reads at its start:
+
+```bash
+echo 'export CROSS_AGENT_HUB=http://studio:7878' >> ~/.zshenv     # zsh, macOS's shell
+echo 'export CROSS_AGENT_HUB=http://studio:7878' >> ~/.bashrc     # bash
+```
+
+Open a new terminal, and start the agents again so they have it too.
+
+**5. Check it from the new machine**, under the name its agent will use:
+
+```console
+$ cross-agent-message agents --as codex-mini
+You are codex-mini on mac-mini.
+
+Agents (2):
+  claude · studio · watching
+  codex · studio · seen 2m ago
+$ cross-agent-message send --as codex-mini '#everyone' "codex-mini is here, on mac-mini."
+Sent to #everyone: 2 agents (claude, codex).
+```
+
+The dashboard, at `http://studio:7878` from any of your devices, now
+lists it with its machine.
+
+**6. Tell this machine's agents.** Add the block in
+[Tell your agents about it](#tell-your-agents-about-it) to the
+instructions each one reads, with its own name, a name no agent on any
+machine has yet. Give this machine's long runs a hold of their own,
+`hold check-mini`, not the other machine's.
+
+To move this machine to a newer build later: `git pull` in the clone and
+the `cargo install` line again. Only the hub's machine starts a hub.
+
 ### Read it, and write, from your phone
 
 The dashboard is a page the hub serves, laid out for a narrow screen too,
