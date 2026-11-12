@@ -29,6 +29,7 @@ pub enum Feature {
     ReadAck,
     BoundedSkip,
     NoticeId,
+    WriteNonce,
 }
 
 impl Feature {
@@ -40,6 +41,7 @@ impl Feature {
             Self::ReadAck => "read-ack",
             Self::BoundedSkip => "bounded-skip",
             Self::NoticeId => "notice-id",
+            Self::WriteNonce => "write-nonce",
         }
     }
 }
@@ -50,24 +52,34 @@ pub trait Request {
     fn needs(&self) -> Vec<Feature> {
         Vec::new()
     }
+
+    fn retry(&self) -> Retry {
+        Retry::Never
+    }
+}
+
+/// Whether replay is safe after an ambiguous transport failure. This does
+/// not make a feature mandatory for a normal, single-attempt request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Retry {
+    Never,
+    Always,
+    Feature(Feature),
 }
 
 macro_rules! plain_requests {
     ($($request:ty),* $(,)?) => { $(impl Request for $request {})* };
 }
 
-plain_requests!(
-    (),
-    History,
-    Events,
-    crate::Send,
-    crate::Join,
-    crate::SignIn,
-    crate::Take,
-    crate::Release,
-    crate::Retire,
-    crate::Acknowledge
-);
+plain_requests!((), History, Events,);
+
+macro_rules! retry_requests {
+    ($retry:expr; $($request:ty),* $(,)?) => { $(
+        impl Request for $request { fn retry(&self) -> Retry { $retry } }
+    )* };
+}
+retry_requests!(Retry::Always; crate::Join, crate::SignIn, crate::Retire, crate::Acknowledge);
+retry_requests!(Retry::Feature(Feature::WriteNonce); crate::Send, crate::Take, crate::Release);
 
 impl Request for crate::ReadInbox {
     fn needs(&self) -> Vec<Feature> {
@@ -83,6 +95,20 @@ impl Request for crate::ReadInbox {
         }
         features
     }
+
+    fn retry(&self) -> Retry {
+        if self.skip {
+            if self.up_to.is_some() {
+                Retry::Feature(Feature::BoundedSkip)
+            } else {
+                Retry::Never
+            }
+        } else if self.defer_ack {
+            Retry::Feature(Feature::ReadAck)
+        } else {
+            Retry::Never
+        }
+    }
 }
 
 impl Request for crate::ReadMessage {
@@ -91,6 +117,14 @@ impl Request for crate::ReadMessage {
             vec![Feature::ReadAck]
         } else {
             Vec::new()
+        }
+    }
+
+    fn retry(&self) -> Retry {
+        if self.defer_ack {
+            Retry::Always
+        } else {
+            Retry::Never
         }
     }
 }
@@ -102,6 +136,10 @@ impl Request for crate::Register {
         } else {
             Vec::new()
         }
+    }
+
+    fn retry(&self) -> Retry {
+        Retry::Always
     }
 }
 
@@ -259,6 +297,14 @@ impl Refused {
         }
     }
 }
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.refusal.reason.fmt(f)
+    }
+}
+
+impl std::error::Error for Refused {}
 
 /// A JSON endpoint succeeds with 200. Invalid success JSON is a decode
 /// failure, never a successful response with invented default fields.

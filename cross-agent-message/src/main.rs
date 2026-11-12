@@ -758,18 +758,6 @@ fn inbox(
     channel: Option<&str>,
     skip: Option<&str>,
 ) -> Result<()> {
-    // An old hub ignores new fields. Never let that turn a skip/channel read
-    // into an unseen acknowledgement of the entire inbox.
-    if channel.is_some() || skip.is_some() {
-        let info = client.info()?;
-        if !info
-            .features
-            .iter()
-            .any(|feature| feature == "inbox-digests")
-        {
-            bail!("this hub does not support selective inbox reads; upgrade it first");
-        }
-    }
     register(client, me)?;
     let skip_channel = skip.filter(|name| name.starts_with('#'));
     let selected = channel
@@ -781,6 +769,10 @@ fn inbox(
         .filter(|name| !name.starts_with('#'))
         .map(str::to_string);
     let deferred = client.has_feature("read-ack")?;
+    // Digests are an optional display preference for a normal read. A
+    // selective read, however, must fail if its filter isn't supported;
+    // the shared request contract checks that before the inbox POST.
+    let digest = client.has_feature("inbox-digests")?;
     let up_to = if skip.is_some() && client.has_feature("bounded-skip")? {
         let preview = client.read_mail(&protocol::ReadInbox {
             name: me.name.clone(),
@@ -811,7 +803,7 @@ fn inbox(
         channel: selected.clone(),
         sender: skipped_sender.clone(),
         skip: skip.is_some(),
-        digest: true,
+        digest,
 
         defer_ack: deferred,
 
@@ -974,6 +966,7 @@ fn watch(client: &Client, me: &Me, channels: bool) -> Result<()> {
                         return;
                     }
                     let mut restarting = false;
+                    let mut reported_decode_error = false;
                     for event in events {
                         match event {
                             Ok(Event::Retired { name: retired }) if retired == name => {
@@ -989,6 +982,12 @@ fn watch(client: &Client, me: &Me, channels: bool) -> Result<()> {
                                     return;
                                 }
                             }
+                            Err(error) if error.downcast_ref::<serde_json::Error>().is_some() => {
+                                if !reported_decode_error {
+                                    eprintln!("{error:#}");
+                                    reported_decode_error = true;
+                                }
+                            }
                             Err(_) => break,
                         }
                     }
@@ -998,8 +997,10 @@ fn watch(client: &Client, me: &Me, channels: bool) -> Result<()> {
                 }
                 Err(error)
                     if error
-                        .downcast_ref::<cross_agent_message::client::RetiredAgent>()
-                        .is_some() =>
+                        .downcast_ref::<protocol::endpoints::Refused>()
+                        .is_some_and(|error| {
+                            error.code() == protocol::endpoints::Code::Retired
+                        }) =>
                 {
                     let _ = tx.send(WatchInput::Retired);
                     return;

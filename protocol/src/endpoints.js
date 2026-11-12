@@ -21,7 +21,12 @@
  * ```
  */
 
-import { Event, eventDeserialize_deserialize, refusalDeserialize_deserialize } from "./lib.js";
+import {
+  Event,
+  eventDeserialize_deserialize,
+  refusalDebug_fmt,
+  refusalDeserialize_deserialize,
+} from "./lib.js";
 import { $displayJsonError, $fromJson, $index, $next, $parseInt, $utf8Bytes } from "@rust-js/std";
 
 export const Feature = {
@@ -39,22 +44,53 @@ export const Feature = {
         return "bounded-skip";
       case "NoticeId":
         return "notice-id";
+      case "WriteNonce":
+        return "write-nonce";
     }
   },
 };
 
-export const __Request = { needs: (self) => [] };
-export const historyRequest = { needs: (history) => [] };
-export const eventsRequest = { needs: (events) => [] };
-export const sendRequest = { needs: (send) => [] };
-export const joinRequest = { needs: (join) => [] };
-export const signInRequest = { needs: (signIn) => [] };
-export const takeRequest = { needs: (take) => [] };
-export const releaseRequest = { needs: (release) => [] };
-export const retireRequest = { needs: (retire) => [] };
-export const acknowledgeRequest = { needs: (acknowledge) => [] };
+export const __Request = { needs: (self) => [], retry: (self) => "Never" };
+export const historyRequest = { needs: (history) => [], retry: (history) => "Never" };
+export const eventsRequest = { needs: (events) => [], retry: (events) => "Never" };
 
-export const readInboxRequest = { needs: readInboxRequest_needs };
+export const joinRequest = { needs: (join) => [], retry: joinRequest_retry };
+export const signInRequest = { needs: (signIn) => [], retry: signInRequest_retry };
+export const retireRequest = { needs: (retire) => [], retry: retireRequest_retry };
+export const acknowledgeRequest = { needs: (acknowledge) => [], retry: acknowledgeRequest_retry };
+
+function joinRequest_retry(join) {
+  return "Always";
+}
+
+function signInRequest_retry(signIn) {
+  return "Always";
+}
+
+function retireRequest_retry(retire) {
+  return "Always";
+}
+
+function acknowledgeRequest_retry(acknowledge) {
+  return "Always";
+}
+export const sendRequest = { needs: (send) => [], retry: sendRequest_retry };
+export const takeRequest = { needs: (take) => [], retry: takeRequest_retry };
+export const releaseRequest = { needs: (release) => [], retry: releaseRequest_retry };
+
+function sendRequest_retry(send) {
+  return { TAG: "Feature", _0: "WriteNonce" };
+}
+
+function takeRequest_retry(take) {
+  return { TAG: "Feature", _0: "WriteNonce" };
+}
+
+function releaseRequest_retry(release) {
+  return { TAG: "Feature", _0: "WriteNonce" };
+}
+
+export const readInboxRequest = { needs: readInboxRequest_needs, retry: readInboxRequest_retry };
 function readInboxRequest_needs(readInbox) {
   const features = [];
   if (readInbox.digest || readInbox.skip || readInbox.channel != null || readInbox.sender != null) {
@@ -69,19 +105,43 @@ function readInboxRequest_needs(readInbox) {
   return features;
 }
 
-export const readMessageRequest = { needs: readMessageRequest_needs };
+function readInboxRequest_retry(readInbox) {
+  if (readInbox.skip) {
+    return readInbox.upTo != null ? { TAG: "Feature", _0: "BoundedSkip" } : "Never";
+  } else if (readInbox.deferAck) {
+    return { TAG: "Feature", _0: "ReadAck" };
+  } else {
+    return "Never";
+  }
+}
+
+export const readMessageRequest = {
+  needs: readMessageRequest_needs,
+  retry: readMessageRequest_retry,
+};
 function readMessageRequest_needs(readMessage) {
   return readMessage.deferAck ? ["ReadAck"] : [];
 }
 
-export const registerRequest = { needs: registerRequest_needs };
+function readMessageRequest_retry(readMessage) {
+  return readMessage.deferAck ? "Always" : "Never";
+}
+
+export const registerRequest = { needs: registerRequest_needs, retry: registerRequest_retry };
 function registerRequest_needs(register) {
   return register.reconnect ? ["AgentLifecycle"] : [];
 }
 
-export const noticeQueryRequest = { needs: (noticeQuery) => [] };
+function registerRequest_retry(register) {
+  return "Always";
+}
 
-export const noticeSnapshotRequest = { needs: noticeSnapshotRequest_needs };
+export const noticeQueryRequest = { needs: (noticeQuery) => [], retry: (noticeQuery) => "Never" };
+
+export const noticeSnapshotRequest = {
+  needs: noticeSnapshotRequest_needs,
+  retry: (noticeSnapshot) => "Never",
+};
 function noticeSnapshotRequest_needs(noticeSnapshot) {
   return ["NoticeId"];
 }
@@ -271,6 +331,13 @@ export const ALL = [
   { name: "EVENTS", method: "Get", path: "/api/events", kind: "Stream" },
 ];
 
+/** Keep the HTTP status even when an old hub has no refusal code. */
+export const refusedDebug = { fmt: refusedDebug_fmt };
+
+function refusedDebug_fmt(refused) {
+  return `Refused { status: ${refused.status}, refusal: ${refusalDebug_fmt(refused.refusal)} }`;
+}
+
 export const Refused = {
   code(refused) {
     if (refused.refusal.code != null) {
@@ -296,6 +363,22 @@ export const Refused = {
         return "Other";
     }
   },
+};
+
+export const refusedDisplay = { fmt: refusedDisplay_fmt };
+function refusedDisplay_fmt(refused) {
+  return refused.refusal.reason;
+}
+
+const $refusedError_source = () => undefined;
+
+export const refusedError = {
+  Debug: () => refusedDebug,
+  Display: () => refusedDisplay,
+  source: $refusedError_source,
+  typeId: () => "protocol::endpoints::Refused",
+  description: () => "description() is deprecated; use Display",
+  cause: $refusedError_source,
 };
 
 /**

@@ -376,8 +376,8 @@ fn retirement_ends_a_watch_and_reconnect_does_not_revive_the_name() {
     let error = client.register_connection("b", true).unwrap_err();
     assert!(
         error
-            .downcast_ref::<cross_agent_message::client::RetiredAgent>()
-            .is_some()
+            .downcast_ref::<protocol::endpoints::Refused>()
+            .is_some_and(|error| error.code() == protocol::endpoints::Code::Retired)
     );
     assert!(client.send("a", "b", "still retired").is_err());
     assert!(client.agents().unwrap().iter().all(|a| a.name != "b"));
@@ -503,10 +503,7 @@ fn a_new_cli_reads_an_old_hub_but_refuses_to_skip_when_filters_would_be_ignored(
     for args in [&["--skip", "#team"][..], &["#team"][..]] {
         let refused = run(args);
         assert!(!refused.status.success());
-        assert!(
-            String::from_utf8_lossy(&refused.stderr)
-                .contains("does not support selective inbox reads")
-        );
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("inbox-digests"));
         assert_eq!(
             reads.load(Ordering::SeqCst),
             1,

@@ -893,6 +893,10 @@ export function releaseDeserialize_deserialize(json) {
 }
 
 /** Why the hub refused a request: the body of every answer that isn't 200. */
+export function refusalDebug_fmt(refusal) {
+  return `Refusal { code: ${refusal.code == null ? "None" : `Some(${$debugStr(refusal.code)})`}, reason: ${$debugStr(refusal.reason)} }`;
+}
+
 export function refusalSerialize_serialize(refusal, json) {
   json.beginObject();
   json.key("code");

@@ -2,7 +2,7 @@
 
 import type { Acknowledge, Agent, Channel, Event, Hold, HubInfo, Inbox, Join, Message, Notice, ReadInbox, ReadMessage, Refusal, Register, Release, Retire, Retired, Send, SignIn, Take, Taken } from "./lib.js";
 
-export type Feature = "InboxDigests" | "AgentLifecycle" | "BinaryDownload" | "ReadAck" | "BoundedSkip" | "NoticeId";
+export type Feature = "InboxDigests" | "AgentLifecycle" | "BinaryDownload" | "ReadAck" | "BoundedSkip" | "NoticeId" | "WriteNonce";
 
 export const Feature: {
     name(feature: Feature): string;
@@ -14,7 +14,17 @@ export const Feature: {
  */
 export interface Request<Self> {
     needs(self: Self): Feature[];
+    retry(self: Self): Retry;
 }
+
+/**
+ * Whether replay is safe after an ambiguous transport failure. This does
+ * not make a feature mandatory for a normal, single-attempt request.
+ */
+export type Retry = "Never" | "Always" | {
+    TAG: "Feature";
+    _0: Feature;
+};
 
 export const __Request: Request<undefined>;
 
@@ -22,19 +32,19 @@ export const historyRequest: Request<History>;
 
 export const eventsRequest: Request<Events>;
 
-export const sendRequest: Request<Send>;
-
 export const joinRequest: Request<Join>;
 
 export const signInRequest: Request<SignIn>;
 
-export const takeRequest: Request<Take>;
-
-export const releaseRequest: Request<Release>;
-
 export const retireRequest: Request<Retire>;
 
 export const acknowledgeRequest: Request<Acknowledge>;
+
+export const sendRequest: Request<Send>;
+
+export const takeRequest: Request<Take>;
+
+export const releaseRequest: Request<Release>;
 
 export const readInboxRequest: Request<ReadInbox>;
 
