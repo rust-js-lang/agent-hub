@@ -229,6 +229,8 @@ def check_previous_client_deferral(current, previous):
         try:
             wait_for(lambda: info().get("supervised"))
             before = info()
+            workers = subprocess.check_output(["pgrep", "-P", str(process.pid)], text=True, timeout=5).split()
+            assert len(workers) == 1, workers
             subprocess.run([current, "agents", "--as", "defer-observer"], env=env,
                 stdout=subprocess.DEVNULL, check=True, timeout=15)
             events = urllib.request.urlopen(url + "/api/events?agent=defer-observer&protocol=1&types=restarting", timeout=20)
@@ -252,10 +254,14 @@ def check_previous_client_deferral(current, previous):
                 response += chunk
             assert response.startswith(b"HTTP/1.1 200"), response
             stdout, stderr = upgrade.communicate(timeout=15)
-            assert upgrade.returncode != 0 and "upgrade deferred" in stderr.lower(), (stdout, stderr)
+            # Older clients use stderr for generic errors; newer clients print
+            # the explicit EX_TEMPFAIL deferral on stdout. Both are actionable.
+            diagnostic = stdout + "\n" + stderr
+            assert upgrade.returncode != 0 and "upgrade deferred" in diagnostic.lower(), (stdout, stderr)
             assert time.monotonic() - exposed < 10, "legacy-client deferral exceeded exposure bound"
             after = info()
             assert (after["version"], after["build"]) == (before["version"], before["build"])
+            assert subprocess.check_output(["pgrep", "-P", str(process.pid)], text=True, timeout=5).split() == workers
             print("PASS: previous client receives actionable deferred-upgrade refusal while requests finish")
         finally:
             if events:
