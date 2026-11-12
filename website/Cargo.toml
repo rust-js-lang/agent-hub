@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 
-# The root module is the `App` component's, so its JS is `App.jsx`.
+# App Router routes and components are Rust modules of the home page.
 [lib]
-path = "src/App.rs"
+path = "app/page.rs"
 
 [dependencies]
+next = { package = "rust-js-next", path = "../rust-js/next" }
 # The pinned rust-js checkout, `rust-js/`. These are binding crates: rustc
 # checks them, and a call compiles to the JavaScript API itself.
 js = { package = "rust-js-builtins", path = "../rust-js/builtins" }

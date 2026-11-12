@@ -1,9 +1,10 @@
 import { defineConfig, devices } from "@playwright/test";
+import siteConfig from "./website/next.config.mjs";
 
-// Test the production bundle under the same subpath as a project Pages site.
-const baseURL = "http://127.0.0.1:4174/cross-agent-message/";
+// Test the static export using the same base path Next.js builds for deployment.
+const baseURL = `http://127.0.0.1:4174${siteConfig.basePath}/`;
 export default defineConfig({
-  testDir: "site/e2e",
+  testDir: "website/e2e",
   timeout: 30_000,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
@@ -15,8 +16,7 @@ export default defineConfig({
     { name: "mobile", use: { ...devices["Pixel 7"] } },
   ],
   webServer: {
-    command:
-      "bunx vite preview site --host 127.0.0.1 --port 4174 --strictPort --base /cross-agent-message/",
+    command: "node scripts/preview-site.mjs --host 127.0.0.1 --port 4174",
     url: baseURL,
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,

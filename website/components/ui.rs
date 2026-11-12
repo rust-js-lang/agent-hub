@@ -1,3 +1,5 @@
+js::directive!("use client");
+
 use js::{settle, spawn};
 use react::{JSX, jsx, use_state};
 use webapi::window;

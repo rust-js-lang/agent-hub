@@ -848,6 +848,23 @@ name = "rust-js-builtins"
 version = "0.0.2"
 
 [[package]]
+name = "rust-js-next"
+version = "0.0.4"
+dependencies = [
+ "rust-js-builtins",
+ "rust-js-node",
+ "rust-js-react",
+]
+
+[[package]]
+name = "rust-js-node"
+version = "0.0.1"
+dependencies = [
+ "rust-js-builtins",
+ "rust-js-webapi",
+]
+
+[[package]]
 name = "rust-js-react"
 version = "0.0.4"
 dependencies = [
@@ -1358,6 +1375,7 @@ name = "website"
 version = "0.1.0"
 dependencies = [
  "rust-js-builtins",
+ "rust-js-next",
  "rust-js-react",
  "rust-js-webapi",
 ]

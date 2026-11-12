@@ -520,20 +520,28 @@ in `~/.zshenv`. Never start a hub here. Your machine's hold is
 
 ## Documentation website
 
-The public landing page and documentation live in `website/` (React components
-written in Rust through the rust-js bindings) and `site/` (Vite entry and plain
-CSS). This is a separate static site; it does not need or connect to a hub.
-Its only browser libraries are React and React DOM, plus rust-js's standard
-library when generated code needs it.
+The public landing page and documentation are a Next.js App Router app in
+`website/`. Routes, layouts, metadata, links, and React components are written
+in Rust through the rust-js `next` and `react` bindings. Styling is plain CSS.
+Routes and layouts live in `website/app/`, shared UI in `website/components/`,
+and documentation content in `website/lib/`. The site exports static HTML,
+independently of the hub; no Next.js server is needed in production.
+Vite still builds the hub dashboard.
 
 ```bash
-bun run site:dev        # compile website Rust, then start Vite
-bun run site:compile    # after editing website/src/*.rs; Vite reloads the JSX
-bun run site:build      # compile Rust and bundle to site/dist
-bun run site:preview    # preview the production bundle
+bun run site:dev        # compile website Rust, then start Next.js
+bun run site:compile    # after editing website/**/*.rs; Fast Refresh picks up JSX
+bun run site:build      # compile Rust and export to website/out
+bun run site:preview    # serve the static export with a dependency-free preview
 ```
 
-Vite reloads CSS directly. Generated JSX and declarations beside the Rust
+The default URL path is `/cross-agent-message/`, including during local
+preview. `SITE_BASE_PATH="" bun run site:build` exports for a custom domain or
+root deployment; set the same environment variable for preview. Next.js
+handles internal links through its Rust `Link` binding. Every guide is
+pre-rendered at `/docs/<slug>/`, with its own metadata and working reloads.
+
+Next.js reloads CSS directly. Generated JSX and declarations beside the Rust
 are committed, as they are for `dashboard/`. `bun run clients:compile`
 regenerates both browser apps in one compiler invocation. The rust-js
 submodule is pinned to the team's verified `f308e07d9` build; its generated
@@ -554,16 +562,18 @@ bun run site:test
 
 ### GitHub Pages
 
-The site is prepared for GitHub Pages, with relative asset URLs and
-hash-based documentation routes. It works at a repository subpath or a
-custom domain without a server rewrite. To deploy later:
+Next.js exports every route to a directory with an `index.html`, using
+`output: "export"`, `trailingSlash: true`, and the configured `basePath`.
+This supports GitHub Pages and custom domains without server rewrites.
+To deploy:
 
 1. Commit the website sources **and their generated JSX/declarations**.
 2. In the repository's **Settings → Pages**, choose **GitHub Actions**.
 3. Run **Deploy documentation** in Actions (`.github/workflows/pages.yml`).
 
 Run the browser tests locally before deploying. The manual workflow installs
-locked dependencies, bundles the committed JSX, and deploys `site/dist`.
+locked dependencies, builds the committed JSX with Next.js, and deploys
+`website/out`.
 It does not install browsers or run tests in CI. It does not need to
 build the Rust compiler on the runner. All actions are pinned to full commit
 SHAs of their latest stable releases. No automatic production deployment
@@ -603,8 +613,8 @@ is committed, so diffs show what a change does to it.
 | `cross-agent-message/` | The hub (`hub.rs`), its SQLite store (`store.rs`), and the command line (`main.rs`, `client.rs`). |
 | `dashboard/` | The page, in Rust, compiled to JSX by rust-js. |
 | `web/` | The dashboard's HTML, CSS and Vite config. |
-| `website/` | The landing page and documentation, React written in Rust. |
-| `site/` | The public site's Vite entry, plain CSS, and Playwright tests. |
+| `website/` | The Next.js landing page and docs: Rust routes/components, CSS, and browser tests. |
+| `scripts/preview-site.mjs` | A dependency-free static export preview. |
 | `rust-js/` | rust-js, pinned. |
 
 ### Move rust-js to another commit

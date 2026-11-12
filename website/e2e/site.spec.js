@@ -18,7 +18,7 @@ const guides = [
   ["development", "Build it. Make it yours."],
 ];
 
-test("landing page loads its assets under the GitHub Pages subpath", async ({
+test("landing page loads its assets under the configured deployment path", async ({
   page,
 }) => {
   const errors = [];
@@ -71,7 +71,7 @@ test("get started, guide navigation, back and home work", async ({ page }) => {
     .getByRole("link", { name: "Get started", exact: false })
     .first()
     .click();
-  await expect(page).toHaveURL(/#docs\/getting-started$/);
+  await expect(page).toHaveURL(/\/docs\/getting-started\/$/);
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(
     "From clone to conversation.",
   );
@@ -108,7 +108,7 @@ test("all guides support direct links and browser reloads", async ({
   page,
 }) => {
   for (const [slug, title] of guides) {
-    await page.goto(`./#docs/${slug}`);
+    await page.goto(`./docs/${slug}/`);
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(title);
     expect(
       await page
@@ -125,7 +125,7 @@ test("all guides support direct links and browser reloads", async ({
 test("guide search filters navigation and handles no matches", async ({
   page,
 }) => {
-  await page.goto("./#docs/introduction");
+  await page.goto("./docs/introduction/");
   await openGuideMenu(page);
   const search = page.getByPlaceholder("Search guides…");
   const navigation = page.getByRole("navigation", {
@@ -153,7 +153,7 @@ test("copy button puts the actual command on the clipboard", async ({
   context,
 }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
-  await page.goto("./#docs/getting-started");
+  await page.goto("./docs/getting-started/");
   const code = page.locator(".code-block").first();
   const text = await code.locator("code").innerText();
   await code.getByRole("button", { name: "Copy command" }).click();
@@ -162,7 +162,8 @@ test("copy button puts the actual command on the clipboard", async ({
 });
 
 test("unknown documentation route offers recovery", async ({ page }) => {
-  await page.goto("./#docs/not-a-guide");
+  const response = await page.goto("./docs/not-a-guide/");
+  expect(response.status()).toBe(404);
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(
     "Let's get you back on track.",
   );
@@ -175,12 +176,12 @@ test("unknown documentation route offers recovery", async ({ page }) => {
 test("adjacent guide links and source link point to real destinations", async ({
   page,
 }) => {
-  await page.goto("./#docs/introduction");
+  await page.goto("./docs/introduction/");
   await page
     .getByRole("navigation", { name: "Adjacent guides" })
     .getByRole("link")
     .click();
-  await expect(page).toHaveURL(/#docs\/getting-started$/);
+  await expect(page).toHaveURL(/\/docs\/getting-started\/$/);
   await expect(
     page
       .getByRole("navigation", { name: "Main navigation" })
@@ -194,13 +195,13 @@ test("adjacent guide links and source link point to real destinations", async ({
 test("keyboard skip link keeps the current guide and focuses content", async ({
   page,
 }) => {
-  await page.goto("./#docs/channels");
+  await page.goto("./docs/channels/");
   await page.keyboard.press("Tab");
   await expect(
     page.getByRole("link", { name: "Skip to content" }),
   ).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(page).toHaveURL(/#docs\/channels$/);
+  await expect(page).toHaveURL(/\/docs\/channels\/$/);
   await expect(page.locator("#content")).toBeFocused();
 });
 
@@ -257,7 +258,7 @@ test("responsive layouts keep diagram cards separate and docs content near the t
       path: testInfo.outputPath(`home-${width}.png`),
       fullPage: true,
     });
-    await page.goto("./#docs/getting-started");
+    await page.goto("./docs/getting-started/");
     if (width <= 760) {
       await expect(
         page.getByRole("button", { name: "Browse guides" }),
@@ -285,4 +286,44 @@ test("responsive layouts keep diagram cards separate and docs content near the t
       fullPage: true,
     });
   }
+});
+
+test("Next exports guide content and metadata before JavaScript runs", async ({
+  browser,
+  baseURL,
+}) => {
+  const context = await browser.newContext({ javaScriptEnabled: false });
+  const page = await context.newPage();
+  const response = await page.goto(`${baseURL}docs/getting-started/`);
+  expect(response.status()).toBe(200);
+  await expect(page).toHaveTitle("From clone to conversation.");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(
+    "From clone to conversation.",
+  );
+  await expect(
+    page.getByRole("heading", { name: "1. Clone and install" }),
+  ).toBeVisible();
+  await expect(page.locator('meta[name="description"]')).toHaveAttribute(
+    "content",
+    /Build the project from source/,
+  );
+  await context.close();
+});
+
+test("Next Link navigation keeps the loaded document", async ({ page }) => {
+  await page.goto("./");
+  await page.evaluate(() => {
+    window.navigationMarker = "same-document";
+  });
+  await page
+    .getByRole("link", { name: "Get started", exact: false })
+    .first()
+    .click();
+  await expect(page).toHaveURL(/\/docs\/getting-started\/$/);
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText(
+    "From clone to conversation.",
+  );
+  expect(await page.evaluate(() => window.navigationMarker)).toBe(
+    "same-document",
+  );
 });

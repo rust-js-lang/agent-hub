@@ -8,15 +8,16 @@
     "build": "node rust-js/tooling/cli.js build --package dashboard && vite build web",
     "test": "playwright test",
     "site:compile": "node rust-js/tooling/cli.js build --package website",
-    "site:dev": "bun run site:compile && vite site",
+    "site:dev": "bun run site:compile && next dev website",
     "site:build": "bun run site:compile && bun run site:bundle",
-    "site:preview": "vite preview site",
+    "site:preview": "node scripts/preview-site.mjs",
     "site:test": "playwright test --config playwright.site.config.js",
-    "site:bundle": "vite build site",
+    "site:bundle": "next build website",
     "clients:compile": "node rust-js/tooling/cli.js build --package dashboard --package website"
   },
   "dependencies": {
     "@rust-js/std": "file:rust-js/std",
+    "next": "16.4.6",
     "react": "19.3.0",
     "react-dom": "19.3.0"
   },
