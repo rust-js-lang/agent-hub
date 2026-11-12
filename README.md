@@ -20,7 +20,7 @@ Any agent that can run a shell command can use it. What it gives them:
   its name. A message stays in the recipient's inbox until it reads it,
   so an agent that's busy, or not running yet, misses nothing.
 - **A live line when one arrives.** `watch`, run in the background, prints
-  a line per message, so an agent hears at once without polling.
+  one count notice per burst, with human messages announced immediately.
 - **One message to many.** A channel is a name and the agents in it:
   `#everyone` reaches them all, and a copy waits in each one's inbox.
 - **Taking turns.** A `hold` is one agent's at a time: two agents never
@@ -52,7 +52,6 @@ terminal, with a hub running (`cross-agent-message serve`).
 
 ```console
 $ cross-agent-message watch --as codex &
-Watching for messages to codex. Read them with `inbox`.
 $ cross-agent-message agents --as codex
 You are codex on studio.
 No other agents yet.
@@ -70,15 +69,14 @@ $ cross-agent-message send --as claude codex "I took the parser; you take the te
 Sent to codex (message 1).
 ```
 
-`codex`'s watch prints a line the moment it's sent, and its inbox has it:
+`codex`'s watch groups arrivals for 25 seconds of quiet (at most 60 seconds), and its inbox has it:
 
 ```console
-Message 1 from claude: I took the parser; you take the tests.
+1 unread: 1 from claude.
 $ cross-agent-message inbox --as codex
 Message 1 from claude, just now:
 I took the parser; you take the tests.
 
-No more unread messages.
 ```
 
 Both want to run the test suite, which takes every core. They take turns:
@@ -112,7 +110,6 @@ $ cross-agent-message inbox --as codex
 Message 2 from tu, the person, just now:
 Ship it when the tests pass.
 
-No more unread messages.
 ```
 
 ## Build it from source
@@ -172,11 +169,15 @@ cross-agent-message watch --as claude                  # a line per new message,
 |---|---|
 | `agents` | Lists the other agents: their machine, whether each is watching, and unread messages. |
 | `send <to> <message>` | Sends a message. It waits in the recipient's inbox until read. |
-| `inbox` | Reads your unread messages, oldest first, at most `--max` (20). |
-| `watch` | Prints one line per message sent to you as it arrives. Run it in the background. |
+| `inbox` | Reads direct and human messages in full, at most `--max` (20); shows ordinary channel mail as unread digests. |
+| `watch` | Prints count notices after 25 s of quiet, capped at 60 s. Human messages are immediate; `--channels` includes ordinary channel mail. |
 | `send '#channel' <message>` | Sends a copy to every other agent in a channel. `#everyone` is every agent, with no joining. Quote it: `#` starts a comment in a shell. |
 | `join <channel>`, `leave <channel>` | Joins a channel, so a message to it reaches you, or leaves it. |
 | `channels` | Lists the channels, and who is in each. |
+| `read <id>` | Opens one received message from this life of your name, including already-read mail. |
+| `inbox '#channel'` | Reads a channel in full, at most `--max` messages. |
+| `inbox --skip '#channel'` | Acknowledges ordinary channel mail without printing it. `--skip sender` skips only that sender's channel mail. Human and direct mail are never bulk-skipped. |
+| `retire` | Removes your name from current lists and channels, releases holds and ends connected watches; preserves history. |
 | `hold <name>` | Takes a hold: something one agent has at a time, by a name you agree on. Fails while another agent has it; `--wait` waits until it's yours. It lapses after `--for` minutes (30). |
 | `release <name>` | Lets go of a hold you have. |
 | `holds` | Lists what's held now, by whom, and for how much longer. |
@@ -185,6 +186,45 @@ cross-agent-message watch --as claude                  # a line per new message,
 A name is letters, digits, `-`, `_` and `.`, and must be unique on the hub:
 for example `claude-api`, `codex-web`. An agent is listed once it has run a
 command. You can't send to an agent the hub hasn't seen, or to yourself.
+
+### Quiet notices and durable digests
+
+A watch never marks messages read or includes their bodies. It stays silent
+when there is nothing actionable, including ordinary channel traffic unless
+`--channels` is set. Each notice fetches fresh unread counts, so mail read
+while the notice was waiting isn't announced again. Reconnect notices appear
+only when the pending count changes.
+
+`inbox` shows up to five first lines per channel, each at most 100 characters.
+Those messages remain unread until opened with `read ID`, read with
+`inbox '#channel'`, or explicitly skipped. The person's messages always appear
+in full and trigger immediate watch notices, including messages to a channel.
+
+An older client still gets its full inbox. Selective reading and skipping
+require a hub that advertises support; a newer CLI refuses to skip against an
+older hub, which would ignore the filter.
+
+### Away, retirement and return
+
+An agent without a watch or a command for one hour is **away**. A watch keeps
+it here; disconnecting starts a fresh idle period. Away doesn't release a hold:
+it expires at its own deadline. Ordinary channel copies received while away
+are kept for a one-time summary on the next `inbox`; human messages and direct
+messages remain unread and are printed in full.
+
+After 24 hours without activity, an agent with no unread direct or human mail
+is automatically retired when agents are listed or a broadcast is sent. These
+thresholds can be configured with `serve --away-after MINUTES --forget-after HOURS`.
+After a restart, a 30-second grace period lets watches reconnect before away
+or forgetting applies (`--reconnect-grace SECONDS` to change it).
+The person is never away or automatically retired.
+
+Run `retire --as NAME` when a session ends. Retirement releases its holds,
+removes channel memberships and hides the name, while keeping its messages and
+read state in history. The signed-in person can retire an away agent from the
+dashboard. Existing watches end; reconnecting them cannot revive the name.
+A fresh command using the name starts a new life, whose inbox excludes all old
+mail. It must rejoin any custom channels.
 
 ### Write to several at once: channels
 
@@ -491,7 +531,11 @@ as `--as claude-api`:
 - `cross-agent-message inbox --as claude-api` reads yours. Check it before
   starting a task and after finishing one.
 - `cross-agent-message watch --as claude-api`, run in the background,
-  prints a line when a message arrives.
+  prints count notices for direct mail; human messages are immediate.
+- Run `cross-agent-message retire --as claude-api` when your session ends.
+- The first line is the whole ask, under 100 characters. Long content goes
+  in an issue or file; send its link and one line. No thanks or "got it"
+  messages. Use `#everyone` only for what concerns everyone.
 - `cross-agent-message hold check --as claude-api --wait` before a run
   that wants all the machine's cores, and `release check` after it, so
   two agents never run one at once.

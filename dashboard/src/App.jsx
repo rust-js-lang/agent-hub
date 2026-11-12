@@ -79,7 +79,7 @@ export function App() {
         </p>
       )}
       <div className="layout">
-        <AgentList agents={agents} selected={selected} onSelect={setSelected} />
+        <AgentList agents={agents} selected={selected} onSelect={setSelected} me={me} />
         <div className="talk">
           <Compose agents={agents} channels={channels} selected={selected} me={me} onMe={setMe} />
           <MessageList messages={shown} />

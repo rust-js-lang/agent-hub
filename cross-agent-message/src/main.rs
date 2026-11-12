@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! `cross-agent-message`: run the hub, or use it as an agent.
 
 use std::io::Write;
@@ -59,6 +61,15 @@ enum Command {
         /// new one by themselves.
         #[arg(long)]
         replace: bool,
+        /// Minutes without a watch or a command before an agent is away.
+        #[arg(long, default_value_t = 60)]
+        away_after: u64,
+        /// Hours without activity before forgetting a name with no urgent unread mail.
+        #[arg(long, default_value_t = 24)]
+        forget_after: u64,
+        /// Seconds allowed for watches to reconnect after the hub restarts.
+        #[arg(long, default_value_t = 30)]
+        reconnect_grace: u64,
     },
     /// List the other agents the hub knows, whether each is watching, and
     /// its unread messages.
@@ -80,6 +91,11 @@ enum Command {
     },
     /// Read your unread messages, oldest first. They're read from then on.
     Inbox {
+        /// Read one channel in full instead of showing its digest.
+        channel: Option<String>,
+        /// Acknowledge ordinary mail in a channel without printing it.
+        #[arg(long, conflicts_with = "channel")]
+        skip: Option<String>,
         #[command(flatten)]
         me: Me,
         /// The most messages to read at once.
@@ -88,7 +104,19 @@ enum Command {
     },
     /// Print one line for each message sent to you, as it arrives, until
     /// stopped. Run it in the background; read the messages with `inbox`.
+    Read {
+        #[command(flatten)]
+        me: Me,
+        id: u64,
+    },
+    Retire {
+        #[command(flatten)]
+        me: Me,
+    },
     Watch {
+        /// Include ordinary channel messages in notices.
+        #[arg(long)]
+        channels: bool,
         #[command(flatten)]
         me: Me,
     },
@@ -174,16 +202,54 @@ fn main() -> Result<()> {
             db,
             listen,
             replace,
+            away_after,
+            forget_after,
+            reconnect_grace,
         } => {
             let local = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
             let others = listen.into_iter().map(|ip| SocketAddr::from((ip, port)));
             let addresses: Vec<SocketAddr> = std::iter::once(local).chain(others).collect();
-            serve(&addresses, db, replace)
+            let away_after = away_after
+                .checked_mul(60_000)
+                .filter(|n| *n > 0)
+                .context("away-after must be positive minutes")?;
+            let forget_after = forget_after
+                .checked_mul(3_600_000)
+                .filter(|n| *n >= away_after)
+                .context("forget-after must be hours at least as long as away-after")?;
+            serve(
+                &addresses,
+                db,
+                replace,
+                away_after,
+                forget_after,
+                reconnect_grace
+                    .checked_mul(1000)
+                    .context("reconnect-grace is too large")?,
+            )
         }
         Command::Agents { me } => agents(&client, &me),
         Command::Send { me, to, message } => send(&client, &me, &to, &message),
-        Command::Inbox { me, max } => inbox(&client, &me, max),
-        Command::Watch { me } => watch(&client, &me),
+        Command::Inbox {
+            me,
+            max,
+            channel,
+            skip,
+        } => inbox(&client, &me, max, channel.as_deref(), skip.as_deref()),
+        Command::Read { me, id } => {
+            register(&client, &me)?;
+            print_message(&client.read_message(&me.name, id)?);
+            Ok(())
+        }
+        Command::Retire { me } => {
+            let retired = client.retire(&me.name)?;
+            println!(
+                "Retired {}: left {} channels, released {} holds. History preserved.",
+                me.name, retired.channels, retired.holds
+            );
+            Ok(())
+        }
+        Command::Watch { me, channels } => watch(&client, &me, channels),
         Command::Hold {
             me,
             hold: name,
@@ -208,7 +274,14 @@ fn running(address: SocketAddr) -> Option<(Client, protocol::HubInfo)> {
 
 /// The hub at `addresses`, this machine's own first, in place of one
 /// already there where `replace` says.
-fn serve(addresses: &[SocketAddr], db: PathBuf, replace: bool) -> Result<()> {
+fn serve(
+    addresses: &[SocketAddr],
+    db: PathBuf,
+    replace: bool,
+    away_after: u64,
+    forget_after: u64,
+    reconnect_grace: u64,
+) -> Result<()> {
     let address = addresses[0];
     if let Some((client, info)) = running(address) {
         if !replace {
@@ -228,11 +301,17 @@ fn serve(addresses: &[SocketAddr], db: PathBuf, replace: bool) -> Result<()> {
             bail!("the hub at http://{address} didn't stop");
         }
     }
-    serve_at(addresses, db)
+    serve_at(addresses, db, away_after, forget_after, reconnect_grace)
 }
 
 #[tokio::main]
-async fn serve_at(addresses: &[SocketAddr], db: PathBuf) -> Result<()> {
+async fn serve_at(
+    addresses: &[SocketAddr],
+    db: PathBuf,
+    away_after: u64,
+    forget_after: u64,
+    reconnect_grace: u64,
+) -> Result<()> {
     if let Some(parent) = db.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("can't make {}", parent.display()))?;
@@ -261,7 +340,9 @@ async fn serve_at(addresses: &[SocketAddr], db: PathBuf) -> Result<()> {
         at.join(" and "),
         db.display()
     );
-    let hub = Arc::new(Hub::new(store).context("can't read what the hub kept held")?);
+    let hub = Arc::new(
+        Hub::with_timeouts(store, away_after, forget_after)?.with_reconnect_grace(reconnect_grace),
+    );
     let stopped = hub.stopped();
     let app = hub::router(hub, dashboard);
     let mut served = tokio::task::JoinSet::new();
@@ -336,8 +417,12 @@ fn agents(client: &Client, me: &Me) -> Result<()> {
         println!("No other agents yet.");
         return Ok(());
     }
-    println!("\nAgents ({}):", others.len());
-    for agent in others {
+    println!(
+        "\nAgents ({}):",
+        others.iter().filter(|agent| !agent.away).count()
+    );
+    let away: Vec<&Agent> = others.iter().filter(|agent| agent.away).collect();
+    for agent in others.iter().filter(|agent| !agent.away) {
         let state = if agent.person {
             "the person".to_string()
         } else if agent.watching {
@@ -351,6 +436,20 @@ fn agents(client: &Client, me: &Me) -> Result<()> {
         };
         println!("  {} · {} · {state}{unread}", agent.name, agent.machine);
     }
+    if !away.is_empty() {
+        let names: Vec<String> = away
+            .iter()
+            .map(|agent| {
+                format!(
+                    "{} {} ({} unread)",
+                    agent.name,
+                    ago(now, agent.last_seen),
+                    agent.unread
+                )
+            })
+            .collect();
+        println!("Away ({}): {}", away.len(), names.join(", "));
+    }
     Ok(())
 }
 
@@ -360,15 +459,29 @@ fn send(client: &Client, me: &Me, to: &str, message: &str) -> Result<()> {
     if let Some(channel) = to.strip_prefix('#') {
         let sent = client.broadcast(&me.name, channel, message, None)?;
         let to: Vec<&str> = sent.iter().map(|message| message.to.as_str()).collect();
+        let away = sent.iter().filter(|message| message.away).count();
         println!(
-            "Sent to #{channel}: {} ({}).",
+            "Sent to #{channel}: {} ({}); {away} away.",
             agents_counted(to.len()),
             to.join(", ")
         );
         return Ok(());
     }
     let message = client.send(&me.name, to, message)?;
-    println!("Sent to {} (message {}).", message.to, message.id);
+    print!("Sent to {} (message {}).", message.to, message.id);
+    if let Ok(agents) = client.agents()
+        && let Some(agent) = agents.iter().find(|agent| agent.name == message.to)
+    {
+        if agent.away {
+            print!(
+                " It was last seen {} and is not watching: it may not read this.",
+                ago(hub::now(), agent.last_seen)
+            );
+        } else {
+            print!(" It has {} unread.", agent.unread);
+        }
+    }
+    println!();
     Ok(())
 }
 
@@ -423,88 +536,273 @@ fn channels(client: &Client, me: &Me) -> Result<()> {
     Ok(())
 }
 
-fn inbox(client: &Client, me: &Me, max: u32) -> Result<()> {
+fn print_message(message: &protocol::Message) {
+    println!(
+        "Message {} from {}, {}:\n{}",
+        message.id,
+        sender(message),
+        ago(hub::now(), message.sent_at),
+        message.body
+    );
+}
+
+fn inbox(
+    client: &Client,
+    me: &Me,
+    max: u32,
+    channel: Option<&str>,
+    skip: Option<&str>,
+) -> Result<()> {
+    // An old hub ignores new fields. Never let that turn a skip/channel read
+    // into an unseen acknowledgement of the entire inbox.
+    if channel.is_some() || skip.is_some() {
+        let info = client.info()?;
+        if !info
+            .features
+            .iter()
+            .any(|feature| feature == "inbox-digests")
+        {
+            bail!("this hub does not support selective inbox reads; upgrade it first");
+        }
+    }
     register(client, me)?;
-    let inbox = client.read_inbox(&me.name, max)?;
-    if inbox.messages.is_empty() {
-        println!("No unread messages.");
+    let skip_channel = skip.filter(|name| name.starts_with('#'));
+    let selected = channel
+        .or(skip_channel)
+        .map(channel_named)
+        .transpose()?
+        .map(str::to_string);
+    let skipped_sender = skip
+        .filter(|name| !name.starts_with('#'))
+        .map(str::to_string);
+    let inbox = client.read_mail(&protocol::ReadInbox {
+        name: me.name.clone(),
+        max,
+        channel: selected.clone(),
+        sender: skipped_sender.clone(),
+        skip: skip.is_some(),
+        digest: true,
+    })?;
+    if skip.is_some() {
+        let scope = match (selected, skipped_sender) {
+            (Some(name), _) => format!("#{name}"),
+            (_, Some(name)) => format!("channel mail from {name}"),
+            _ => bail!("skip needs a channel or sender"),
+        };
+        println!(
+            "Skipped {} in {}. Human messages remain unread.",
+            inbox.skipped, scope
+        );
         return Ok(());
     }
-    let now = hub::now();
-    for message in &inbox.messages {
+    for summary in &inbox.away {
+        let senders: Vec<String> = summary
+            .senders
+            .iter()
+            .map(|(name, count)| format!("{name} ({count})"))
+            .collect();
         println!(
-            "Message {} from {}, {}:",
-            message.id,
-            sender(message),
-            ago(now, message.sent_at)
+            "While you were away: #{} had {} messages, from {}.",
+            summary.channel,
+            summary.count,
+            senders.join(", ")
         );
-        println!("{}\n", message.body);
     }
-    match inbox.remaining {
-        0 => println!("No more unread messages."),
-        remaining => println!("{remaining} more unread: run `inbox` again to read them."),
+    for (i, message) in inbox.messages.iter().enumerate() {
+        if i > 0 {
+            println!();
+        }
+        print_message(message);
+    }
+    for digest in &inbox.digests {
+        println!("#{}: {} unread:", digest.channel, digest.unread);
+        for line in &digest.first {
+            println!("  {} {}: {}", line.id, line.from, line.first_line);
+        }
+        let more = digest.unread.saturating_sub(digest.first.len() as u32);
+        if more > 0 {
+            println!("  .. {more} more");
+        }
+        println!(
+            "  Read: inbox '#{}'. One: read N. Drop: inbox --skip '#{}'.",
+            digest.channel, digest.channel
+        );
+    }
+    if inbox.remaining > 0 {
+        println!("{} more unread: run inbox again.", inbox.remaining);
+    } else if inbox.messages.is_empty() && inbox.away.is_empty() && inbox.digests.is_empty() {
+        println!("No unread messages.");
     }
     Ok(())
 }
 
-fn watch(client: &Client, me: &Me) -> Result<()> {
-    let you = register(client, me)?;
-    let mut events = client.watch(&me.name)?;
-    let mut out = std::io::stdout().lock();
-    writeln!(
-        out,
-        "Watching for messages to {}. Read them with `inbox`.",
-        you.name
-    )?;
-    if you.unread > 0 {
-        writeln!(out, "{} unread already.", you.unread)?;
+/// Scheduling is independent of I/O, so tests can use a clock without sleeps.
+#[derive(Default)]
+struct Burst {
+    first: Option<u64>,
+    last: u64,
+}
+impl Burst {
+    fn arrive(&mut self, at: u64) {
+        self.first.get_or_insert(at);
+        self.last = at;
     }
-    out.flush()?;
-    loop {
-        for event in events {
-            let Ok(event) = event else {
-                break;
-            };
-            if let Event::Sent { message } = event {
-                let first = message.body.lines().next().unwrap_or_default();
-                let preview: String = first.chars().take(100).collect();
-                let more = if preview.len() < message.body.len() {
-                    "…"
-                } else {
-                    ""
-                };
-                writeln!(
-                    out,
-                    "Message {} from {}: {preview}{more}",
-                    message.id,
-                    sender(&message)
-                )?;
-                out.flush()?;
-            }
+    fn observe(&mut self, at: u64, message: &protocol::Message, channels: bool) -> bool {
+        if message.person || message.channel.is_none() || channels {
+            self.arrive(at);
+            message.person
+        } else {
+            false
         }
-        // The hub went away, to be started again or replaced by another
-        // build: the watch goes on with the one that comes back, which
-        // has what was sent meanwhile.
-        writeln!(out, "The hub went away. Waiting for it to come back.")?;
-        out.flush()?;
-        let (you, stream) = loop {
-            std::thread::sleep(HUB_POLL);
-            if let Ok(you) = client.register(&me.name)
-                && let Ok(stream) = client.watch(&me.name)
-            {
-                break (you, stream);
+    }
+    fn deadline(&self) -> Option<u64> {
+        self.first
+            .map(|first| (first + 60_000).min(self.last + 25_000))
+    }
+    fn clear(&mut self) {
+        self.first = None;
+    }
+}
+
+enum WatchInput {
+    Event(Event),
+    Connected,
+    Disconnected,
+    Retired,
+}
+
+fn notice(client: &Client, name: &str, channels: bool) -> Result<(u32, String)> {
+    match client.notice(name, channels) {
+        Ok(groups) => {
+            let total: u32 = groups.iter().map(|(_, _, count)| count).sum();
+            let mut parts: Vec<String> = groups
+                .iter()
+                .take(3)
+                .map(|(name, person, count)| {
+                    format!(
+                        "{count} from {name}{}",
+                        if *person { ", the person" } else { "" }
+                    )
+                })
+                .collect();
+            let rest: u32 = groups.iter().skip(3).map(|(_, _, count)| count).sum();
+            if rest > 0 {
+                parts.push(format!("{rest} from others"));
             }
-        };
-        events = stream;
-        let build = client
-            .info()
-            .map_or("unknown".to_string(), |info| info.build);
-        let unread = match you.unread {
-            0 => "No unread messages.".to_string(),
-            unread => format!("{unread} unread: read them with `inbox`."),
-        };
-        writeln!(out, "The hub is back, build {build}. {unread}")?;
-        out.flush()?;
+            Ok((total, format!("{total} unread: {}.", parts.join("; "))))
+        }
+        Err(_) => {
+            // Older hubs have no grouped-count endpoint.
+            let total = client
+                .agents()?
+                .iter()
+                .find(|agent| agent.name == name)
+                .map_or(0, |agent| agent.unread);
+            Ok((total, format!("{total} unread.")))
+        }
+    }
+}
+
+fn watch(client: &Client, me: &Me, channels: bool) -> Result<()> {
+    register(client, me)?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let address = client.hub().to_string();
+    let name = me.name.clone();
+    // A blocking SSE reader must not prevent the quiet-period timer firing.
+    std::thread::spawn(move || {
+        let client = Client::new(&address);
+        loop {
+            match client
+                .register_connection(&name, true)
+                .and_then(|_| client.watch(&name))
+            {
+                Ok(events) => {
+                    if tx.send(WatchInput::Connected).is_err() {
+                        return;
+                    }
+                    for event in events {
+                        match event {
+                            Ok(Event::Retired { name: retired }) if retired == name => {
+                                let _ = tx.send(WatchInput::Retired);
+                                return;
+                            }
+                            Ok(event) => {
+                                if tx.send(WatchInput::Event(event)).is_err() {
+                                    return;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                }
+                Err(error)
+                    if error
+                        .downcast_ref::<cross_agent_message::client::RetiredAgent>()
+                        .is_some() =>
+                {
+                    let _ = tx.send(WatchInput::Retired);
+                    return;
+                }
+                Err(_) => {}
+            }
+            if tx.send(WatchInput::Disconnected).is_err() {
+                return;
+            }
+            std::thread::sleep(HUB_POLL);
+        }
+    });
+    let epoch = std::time::Instant::now();
+    let mut burst = Burst::default();
+    let mut previous = 0;
+    let mut out = std::io::stdout().lock();
+    loop {
+        let at = epoch.elapsed().as_millis() as u64;
+        let wait = burst
+            .deadline()
+            .map_or(std::time::Duration::from_secs(60), |due| {
+                std::time::Duration::from_millis(due.saturating_sub(at))
+            });
+        let mut report = false;
+        match rx.recv_timeout(wait) {
+            Ok(WatchInput::Retired) => {
+                writeln!(out, "{} was retired. This watch has ended.", me.name)?;
+                out.flush()?;
+                return Ok(());
+            }
+            Ok(WatchInput::Connected) => {
+                if let Ok((count, line)) = notice(client, &me.name, channels) {
+                    if count > 0 && count != previous {
+                        writeln!(out, "{line}")?;
+                        out.flush()?;
+                    }
+                    previous = count;
+                }
+            }
+            Ok(WatchInput::Disconnected) => burst.clear(),
+            Ok(WatchInput::Event(Event::Sent { message })) => {
+                report = burst.observe(epoch.elapsed().as_millis() as u64, &message, channels);
+            }
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => report = burst.deadline().is_some(),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+        }
+        // Constant arrivals cannot starve the 60-second cap.
+        if burst
+            .deadline()
+            .is_some_and(|due| epoch.elapsed().as_millis() as u64 >= due)
+        {
+            report = true;
+        }
+        if report {
+            if let Ok((count, line)) = notice(client, &me.name, channels) {
+                if count > 0 {
+                    writeln!(out, "{line}")?;
+                    out.flush()?;
+                }
+                previous = count;
+            }
+            burst.clear();
+        }
     }
 }
 
@@ -633,5 +931,51 @@ mod tests {
         assert_eq!(ago(7_300_000, 0), "2h ago");
         assert_eq!(ago(200_000_000, 0), "2d ago");
         assert_eq!(ago(0, 9), "just now");
+    }
+    #[test]
+    fn watch_bursts_have_a_quiet_period_and_an_absolute_cap() {
+        let mut burst = super::Burst::default();
+        assert_eq!(burst.deadline(), None);
+        for at in [0, 10_000, 20_000] {
+            burst.arrive(at);
+        }
+        assert_eq!(burst.deadline(), Some(45_000));
+        burst.arrive(40_000);
+        assert_eq!(burst.deadline(), Some(60_000));
+        burst.arrive(59_999);
+        assert_eq!(burst.deadline(), Some(60_000));
+        burst.clear();
+        assert_eq!(burst.deadline(), None);
+        burst.arrive(100_000);
+        assert_eq!(burst.deadline(), Some(125_000));
+    }
+    #[test]
+    fn channels_do_not_extend_a_burst_and_human_messages_flush_immediately() {
+        let mut burst = super::Burst::default();
+        let mut message = protocol::Message {
+            id: 1,
+            from: "a".to_string(),
+            to: "b".to_string(),
+            body: "body".to_string(),
+            sent_at: 1,
+            read_at: None,
+            person: false,
+            channel: Some("team".to_string()),
+            away: false,
+        };
+        assert!(!burst.observe(0, &message, false));
+        assert_eq!(burst.deadline(), None);
+        message.channel = None;
+        assert!(!burst.observe(1000, &message, false));
+        assert_eq!(burst.deadline(), Some(26_000));
+        message.channel = Some("team".to_string());
+        assert!(!burst.observe(20_000, &message, false));
+        assert_eq!(burst.deadline(), Some(26_000));
+        assert!(!burst.observe(20_000, &message, true));
+        assert_eq!(burst.deadline(), Some(45_000));
+        message.person = true;
+        assert!(burst.observe(21_000, &message, false));
+        burst.clear();
+        assert_eq!(burst.deadline(), None);
     }
 }

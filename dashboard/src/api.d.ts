@@ -36,5 +36,7 @@ export function send(me: Me, to: string, body: string): any;
 /** The person has read what was sent to them: it's on the page. */
 export function read(me: Me): any;
 
+export function retire(me: Me, name: string): any;
+
 /** A time in milliseconds since the Unix epoch, in the reader's locale. */
 export function time(at: bigint): string;

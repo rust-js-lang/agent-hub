@@ -28,6 +28,10 @@ export const MESSAGES = "/api/messages";
  * [`Inbox`]. They're read from then on.
  */
 export const INBOX = "/api/inbox";
+/** `GET`: actionable unread counts by sender; never acknowledges mail. */
+export const NOTICE = "/api/inbox/notice";
+export const READ = "/api/messages/read";
+export const RETIRE = "/api/agents/retire";
 
 /**
  * `GET`: server-sent events, each an [`Event`]'s JSON. With `?agent=<name>`,
@@ -114,6 +118,14 @@ export function agentSerialize_serialize(agent, json) {
   json.int(agent.unread);
   json.key("person");
   json.bool(agent.person);
+  json.key("away");
+  json.bool(agent.away);
+  json.key("retiredAt");
+  if (agent.retiredAt == null) {
+    json.null();
+  } else {
+    json.int(agent.retiredAt);
+  }
   json.endObject();
 }
 
@@ -127,14 +139,18 @@ export function agentDeserialize_deserialize(json) {
       ["watching", $json.bool],
       ["unread", $json.u32],
       ["person", $json.bool],
+      ["away", $json.bool, () => false],
+      ["retiredAt", $json.option($json.u64), () => undefined],
     ],
-    ([name, machine, lastSeen, watching, unread, person]) => ({
+    ([name, machine, lastSeen, watching, unread, person, away, retiredAt]) => ({
       name,
       machine,
       lastSeen,
       watching,
       unread,
       person,
+      away,
+      retiredAt,
     }),
   );
 }
@@ -217,6 +233,8 @@ export function registerSerialize_serialize(register, json) {
   json.string(register.name);
   json.key("machine");
   json.string(register.machine);
+  json.key("reconnect");
+  json.bool(register.reconnect);
   json.endObject();
 }
 
@@ -226,8 +244,9 @@ export function registerDeserialize_deserialize(json) {
     [
       ["name", $json.string],
       ["machine", $json.string],
+      ["reconnect", $json.bool, () => false],
     ],
-    ([name, machine]) => ({ name, machine }),
+    ([name, machine, reconnect]) => ({ name, machine, reconnect }),
   );
 }
 
@@ -289,6 +308,8 @@ export function messageSerialize_serialize(message, json) {
   } else {
     json.string(message.channel);
   }
+  json.key("away");
+  json.bool(message.away);
   json.endObject();
 }
 
@@ -304,8 +325,9 @@ export function messageDeserialize_deserialize(json) {
       ["readAt", $json.option($json.u64)],
       ["person", $json.bool],
       ["channel", $json.option($json.string)],
+      ["away", $json.bool, () => false],
     ],
-    ([id, from, to, body, sentAt, readAt, person, channel]) => ({
+    ([id, from, to, body, sentAt, readAt, person, channel, away]) => ({
       id,
       from,
       to,
@@ -314,6 +336,7 @@ export function messageDeserialize_deserialize(json) {
       readAt,
       person,
       channel,
+      away,
     }),
   );
 }
@@ -325,6 +348,22 @@ export function readInboxSerialize_serialize(readInbox, json) {
   json.string(readInbox.name);
   json.key("max");
   json.int(readInbox.max);
+  json.key("channel");
+  if (readInbox.channel == null) {
+    json.null();
+  } else {
+    json.string(readInbox.channel);
+  }
+  json.key("sender");
+  if (readInbox.sender == null) {
+    json.null();
+  } else {
+    json.string(readInbox.sender);
+  }
+  json.key("skip");
+  json.bool(readInbox.skip);
+  json.key("digest");
+  json.bool(readInbox.digest);
   json.endObject();
 }
 
@@ -334,8 +373,160 @@ export function readInboxDeserialize_deserialize(json) {
     [
       ["name", $json.string],
       ["max", $json.u32],
+      ["channel", $json.option($json.string), () => undefined],
+      ["sender", $json.option($json.string), () => undefined],
+      ["skip", $json.bool, () => false],
+      ["digest", $json.bool, () => false],
     ],
-    ([name, max]) => ({ name, max }),
+    ([name, max, channel, sender, skip, digest]) => ({ name, max, channel, sender, skip, digest }),
+  );
+}
+
+export function readMessageSerialize_serialize(readMessage, json) {
+  json.beginObject();
+  json.key("name");
+  json.string(readMessage.name);
+  json.key("id");
+  json.int(readMessage.id);
+  json.endObject();
+}
+
+export function readMessageDeserialize_deserialize(json) {
+  return json.struct(
+    "struct ReadMessage",
+    [
+      ["name", $json.string],
+      ["id", $json.u64],
+    ],
+    ([name, id]) => ({ name, id }),
+  );
+}
+
+export function retireSerialize_serialize(retire, json) {
+  json.beginObject();
+  json.key("name");
+  json.string(retire.name);
+  json.key("key");
+  if (retire.key == null) {
+    json.null();
+  } else {
+    json.string(retire.key);
+  }
+  json.endObject();
+}
+
+export function retireDeserialize_deserialize(json) {
+  return json.struct(
+    "struct Retire",
+    [
+      ["name", $json.string],
+      ["key", $json.option($json.string)],
+    ],
+    ([name, key]) => ({ name, key }),
+  );
+}
+
+export function retiredSerialize_serialize(retired, json) {
+  json.beginObject();
+  json.key("channels");
+  json.int(retired.channels);
+  json.key("holds");
+  json.int(retired.holds);
+  json.endObject();
+}
+
+export function retiredDeserialize_deserialize(json) {
+  return json.struct(
+    "struct Retired",
+    [
+      ["channels", $json.u32],
+      ["holds", $json.u32],
+    ],
+    ([channels, holds]) => ({ channels, holds }),
+  );
+}
+
+export function digestLineSerialize_serialize(digestLine, json) {
+  json.beginObject();
+  json.key("id");
+  json.int(digestLine.id);
+  json.key("from");
+  json.string(digestLine.from);
+  json.key("first_line");
+  json.string(digestLine.firstLine);
+  json.endObject();
+}
+
+export function digestLineDeserialize_deserialize(json) {
+  return json.struct(
+    "struct DigestLine",
+    [
+      ["id", $json.u64],
+      ["from", $json.string],
+      ["first_line", $json.string],
+    ],
+    ([id, from, firstLine]) => ({ id, from, firstLine }),
+  );
+}
+
+export function digestSerialize_serialize(digest, json) {
+  json.beginObject();
+  json.key("channel");
+  json.string(digest.channel);
+  json.key("unread");
+  json.int(digest.unread);
+  json.key("first");
+  json.beginArray();
+  for (const item of digest.first) {
+    json.element();
+    digestLineSerialize_serialize(item, json);
+  }
+  json.endArray();
+  json.endObject();
+}
+
+export function digestDeserialize_deserialize(json) {
+  return json.struct(
+    "struct Digest",
+    [
+      ["channel", $json.string],
+      ["unread", $json.u32],
+      ["first", $json.vec(digestLineDeserialize_deserialize)],
+    ],
+    ([channel, unread, first]) => ({ channel, unread, first }),
+  );
+}
+
+export function awaySummarySerialize_serialize(awaySummary, json) {
+  json.beginObject();
+  json.key("channel");
+  json.string(awaySummary.channel);
+  json.key("count");
+  json.int(awaySummary.count);
+  json.key("senders");
+  json.beginArray();
+  for (const item of awaySummary.senders) {
+    json.element();
+    json.beginTuple();
+    json.element();
+    json.string(item[0]);
+    json.element();
+    json.int(item[1]);
+    json.endArray();
+  }
+  json.endArray();
+  json.endObject();
+}
+
+export function awaySummaryDeserialize_deserialize(json) {
+  return json.struct(
+    "struct AwaySummary",
+    [
+      ["channel", $json.string],
+      ["count", $json.u32],
+      ["senders", $json.vec($json.tuple($json.string, $json.u32))],
+    ],
+    ([channel, count, senders]) => ({ channel, count, senders }),
   );
 }
 
@@ -351,6 +542,29 @@ export function inboxSerialize_serialize(inbox, json) {
   json.endArray();
   json.key("remaining");
   json.int(inbox.remaining);
+  json.key("digests");
+  json.beginArray();
+  for (const item of inbox.digests) {
+    json.element();
+    digestSerialize_serialize(item, json);
+  }
+  json.endArray();
+  json.key("away");
+  json.beginArray();
+  for (const item of inbox.away) {
+    json.element();
+    awaySummarySerialize_serialize(item, json);
+  }
+  json.endArray();
+  json.key("read_ids");
+  json.beginArray();
+  for (const item of inbox.readIds) {
+    json.element();
+    json.int(item);
+  }
+  json.endArray();
+  json.key("skipped");
+  json.int(inbox.skipped);
   json.endObject();
 }
 
@@ -360,8 +574,19 @@ export function inboxDeserialize_deserialize(json) {
     [
       ["messages", $json.vec(messageDeserialize_deserialize)],
       ["remaining", $json.u32],
+      ["digests", $json.vec(digestDeserialize_deserialize), () => []],
+      ["away", $json.vec(awaySummaryDeserialize_deserialize), () => []],
+      ["read_ids", $json.vec($json.u64), () => []],
+      ["skipped", $json.u32, () => 0],
     ],
-    ([messages, remaining]) => ({ messages, remaining }),
+    ([messages, remaining, digests, away, readIds, skipped]) => ({
+      messages,
+      remaining,
+      digests,
+      away,
+      readIds,
+      skipped,
+    }),
   );
 }
 
@@ -377,6 +602,17 @@ export function hubInfoSerialize_serialize(hubInfo, json) {
   json.string(hubInfo.build);
   json.key("started");
   json.int(hubInfo.started);
+  json.key("away_after");
+  json.int(hubInfo.awayAfter);
+  json.key("forget_after");
+  json.int(hubInfo.forgetAfter);
+  json.key("features");
+  json.beginArray();
+  for (const item of hubInfo.features) {
+    json.element();
+    json.string(item);
+  }
+  json.endArray();
   json.endObject();
 }
 
@@ -387,9 +623,26 @@ export function hubInfoDeserialize_deserialize(json) {
       ["version", $json.string],
       ["build", $json.string],
       ["started", $json.u64],
+      ["away_after", $json.u64, () => defaultAwayAfter()],
+      ["forget_after", $json.u64, () => defaultForgetAfter()],
+      ["features", $json.vec($json.string), () => []],
     ],
-    ([version, build, started]) => ({ version, build, started }),
+    ([version, build, started, awayAfter, forgetAfter, features]) => ({
+      version,
+      build,
+      started,
+      awayAfter,
+      forgetAfter,
+      features,
+    }),
   );
+}
+
+export function defaultAwayAfter() {
+  return 3600000n;
+}
+export function defaultForgetAfter() {
+  return 86400000n;
 }
 
 /**
@@ -527,12 +780,19 @@ export function eventSerialize_serialize(event, json) {
     }
     json.endArray();
     json.endObject();
-  } else {
+  } else if (event.TAG === "Agent") {
     json.beginObject();
     json.key("type");
     json.string("agent");
     json.key("agent");
     agentSerialize_serialize(event.agent, json);
+    json.endObject();
+  } else {
+    json.beginObject();
+    json.key("type");
+    json.string("retired");
+    json.key("name");
+    json.string(event.name);
     json.endObject();
   }
 }
@@ -541,7 +801,7 @@ export function eventDeserialize_deserialize(json) {
   return json.internallyTagged(
     "type",
     "internally tagged enum Event",
-    ["sent", "read", "agent"],
+    ["sent", "read", "agent", "retired"],
     (variant, content) => {
       if (variant === "sent") {
         return content.struct(
@@ -560,10 +820,17 @@ export function eventDeserialize_deserialize(json) {
           ([name, ids]) => ({ TAG: "Read", name, ids }),
         );
       }
+      if (variant === "agent") {
+        return content.struct(
+          "struct variant Event::Agent",
+          [["agent", agentDeserialize_deserialize]],
+          ([agent]) => ({ TAG: "Agent", agent }),
+        );
+      }
       return content.struct(
-        "struct variant Event::Agent",
-        [["agent", agentDeserialize_deserialize]],
-        ([agent]) => ({ TAG: "Agent", agent }),
+        "struct variant Event::Retired",
+        [["name", $json.string]],
+        ([name]) => ({ TAG: "Retired", name }),
       );
     },
   );

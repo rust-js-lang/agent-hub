@@ -299,3 +299,10 @@ h2 {
 .message.person.unread {
   border-left-color: var(--unread);
 }
+
+
+.agent-row { display: grid; gap: 0.25rem; }
+.agent-row > .agent { width: 100%; }
+.away-agents > summary { cursor: pointer; color: var(--muted); padding: 0.6rem 0; }
+.away-agents .agent-row { margin-bottom: 0.35rem; }
+.retire { justify-self: end; font: inherit; font-size: 0.8rem; color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 0.25rem 0.5rem; cursor: pointer; }

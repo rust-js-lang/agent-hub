@@ -17,6 +17,8 @@ struct Shown<'a> {
     first: &'a Message,
     copies: usize,
     read: usize,
+    away: usize,
+    active_read: usize,
 }
 
 /// `messages` as they're shown: the copies of one sent to a channel, which
@@ -36,11 +38,15 @@ fn shown<'a>(messages: &[&'a Message]) -> Vec<Shown<'a>> {
             Some(other) => {
                 other.copies += 1;
                 other.read += read;
+                other.active_read += usize::from(message.read_at.is_some() && !message.away);
+                other.away += usize::from(message.away);
             }
             None => shown.push(Shown {
                 first: message,
                 copies: 1,
                 read,
+                away: usize::from(message.away),
+                active_read: usize::from(message.read_at.is_some() && !message.away),
             }),
         }
     }
@@ -60,12 +66,14 @@ pub fn MessageList(MessageListProps { messages }: MessageListProps) -> JSX::Elem
                     let (to, state) = match (&message.channel, message.read_at) {
                         (Some(channel), _) => (
                             format!("#{channel}"),
-                            format!("read by {} of {}", group.read, group.copies),
+                            if group.away > 0 {
+                                format!("read by {} of {}, {} away", group.active_read, group.copies - group.away, group.away)
+                            } else { format!("read by {} of {}", group.read, group.copies) },
                         ),
                         (None, Some(at)) => (message.to.clone(), format!("read {}", api::time(at))),
                         (None, None) => (message.to.clone(), "unread".to_string()),
                     };
-                    let class = match (group.read == group.copies, message.person) {
+                    let class = match (group.active_read == group.copies - group.away, message.person) {
                         (true, false) => "message",
                         (false, false) => "message unread",
                         (true, true) => "message person",

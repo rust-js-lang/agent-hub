@@ -5,7 +5,10 @@ use std::path::Path;
 
 use std::hash::{BuildHasher, Hasher};
 
-use protocol::{Agent, Channel, EVERYONE, Hold, Inbox, Message, Register, Send};
+use protocol::{
+    Agent, AwaySummary, Channel, Digest, DigestLine, EVERYONE, Hold, Inbox, Message, ReadInbox,
+    Register, Retired, Send,
+};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 pub struct Store {
@@ -44,12 +47,16 @@ const SCHEMA: &str = "
     );
 ";
 
-const MESSAGE_COLUMNS: &str = "id, sender, recipient, body, sent_at, read_at, person, channel";
+const MESSAGE_COLUMNS: &str =
+    "id, sender, recipient, body, sent_at, read_at, person, channel, away";
+
+/// Every inbox operation is scoped to the current life of its recipient.
+const CURRENT_MAIL: &str = "recipient = ?1 AND id > (SELECT since_id FROM agents WHERE name = ?1)";
 
 const AGENT_QUERY: &str = "
     SELECT name, machine, last_seen,
-        (SELECT count(*) FROM messages WHERE recipient = agents.name AND read_at IS NULL),
-        person
+        (SELECT count(*) FROM messages WHERE recipient = agents.name AND read_at IS NULL AND away = 0 AND id > agents.since_id),
+        person, retired_at
     FROM agents
 ";
 
@@ -60,6 +67,9 @@ const ADDED: &[(&str, &str, &str)] = &[
     ("agents", "person", "INTEGER NOT NULL DEFAULT 0"),
     ("messages", "person", "INTEGER NOT NULL DEFAULT 0"),
     ("messages", "channel", "TEXT"),
+    ("agents", "retired_at", "INTEGER"),
+    ("agents", "since_id", "INTEGER NOT NULL DEFAULT 0"),
+    ("messages", "away", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 /// A key no one would guess, twelve digits in three groups, `4821-7730-1182`:
@@ -139,7 +149,9 @@ impl Store {
     pub fn see(&self, agent: &Register, now: u64) -> rusqlite::Result<()> {
         self.db.execute(
             "INSERT INTO agents (name, machine, last_seen) VALUES (?1, ?2, ?3)
-             ON CONFLICT (name) DO UPDATE SET machine = ?2, last_seen = ?3",
+             ON CONFLICT (name) DO UPDATE SET machine = ?2, last_seen = ?3,
+                 since_id = CASE WHEN retired_at IS NULL THEN since_id ELSE (SELECT COALESCE(MAX(id), 0) FROM messages) END,
+                 retired_at = NULL",
             params![agent.name, agent.machine, now],
         )?;
         Ok(())
@@ -155,7 +167,9 @@ impl Store {
 
     /// Every agent, by name.
     pub fn agents(&self) -> rusqlite::Result<Vec<Agent>> {
-        let mut query = self.db.prepare(&format!("{AGENT_QUERY} ORDER BY name"))?;
+        let mut query = self.db.prepare(&format!(
+            "{AGENT_QUERY} WHERE retired_at IS NULL ORDER BY name"
+        ))?;
         query.query_map([], agent)?.collect()
     }
 
@@ -169,9 +183,9 @@ impl Store {
     /// on the dashboard.
     pub fn members(&self, channel: &str) -> rusqlite::Result<Vec<String>> {
         if channel == EVERYONE {
-            let mut query = self
-                .db
-                .prepare("SELECT name FROM agents WHERE person = 0 ORDER BY name")?;
+            let mut query = self.db.prepare(
+                "SELECT name FROM agents WHERE person = 0 AND retired_at IS NULL ORDER BY name",
+            )?;
             return query.query_map([], |row| row.get(0))?.collect();
         }
         let mut query = self
@@ -227,12 +241,28 @@ impl Store {
         now: u64,
         person: bool,
     ) -> rusqlite::Result<Vec<Message>> {
+        let recipients: Vec<(String, bool)> = recipients
+            .iter()
+            .map(|name| (name.clone(), false))
+            .collect();
+        self.broadcast_with_away(send, channel, &recipients, now, person)
+    }
+
+    pub fn broadcast_with_away(
+        &mut self,
+        send: &Send,
+        channel: &str,
+        recipients: &[(String, bool)],
+        now: u64,
+        person: bool,
+    ) -> rusqlite::Result<Vec<Message>> {
         let transaction = self.db.transaction()?;
         let mut messages = Vec::new();
-        for recipient in recipients {
+        for (recipient, away) in recipients {
+            let away = *away && !person;
             transaction.execute(
-                "INSERT INTO messages (sender, recipient, body, sent_at, person, channel) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![send.from, recipient, send.body, now, person, channel],
+                "INSERT INTO messages (sender, recipient, body, sent_at, person, channel, away) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![send.from, recipient, send.body, now, person, channel, away],
             )?;
             messages.push(Message {
                 id: transaction.last_insert_rowid() as u64,
@@ -243,6 +273,7 @@ impl Store {
                 read_at: None,
                 person,
                 channel: Some(channel.to_string()),
+                away,
             });
         }
         transaction.commit()?;
@@ -270,70 +301,243 @@ impl Store {
             read_at: None,
             person,
             channel: channel.map(str::to_string),
+            away: false,
         })
     }
 
-    /// At most `max` of `name`'s unread messages, oldest first, read now.
+    /// Full inbox behavior retained for existing clients.
     pub fn read_inbox(&mut self, name: &str, max: u32, now: u64) -> rusqlite::Result<Inbox> {
-        let transaction = self.db.transaction()?;
-        let mut messages: Vec<Message> = transaction
-            .prepare(&format!(
-                "SELECT {MESSAGE_COLUMNS} FROM messages
-                 WHERE recipient = ?1 AND read_at IS NULL ORDER BY id LIMIT ?2"
-            ))?
-            .query_map(params![name, max], message)?
-            .collect::<rusqlite::Result<_>>()?;
-        for message in &mut messages {
-            transaction.execute(
-                "UPDATE messages SET read_at = ?1 WHERE id = ?2",
-                params![now, message.id],
-            )?;
-            message.read_at = Some(now);
+        self.read_mail(
+            &ReadInbox {
+                name: name.to_string(),
+                max,
+                channel: None,
+                sender: None,
+                skip: false,
+                digest: false,
+            },
+            now,
+        )
+    }
+
+    /// Select and acknowledge together: a digest never acknowledges ordinary mail.
+    pub fn read_mail(&mut self, read: &ReadInbox, now: u64) -> rusqlite::Result<Inbox> {
+        let tx = self.db.transaction()?;
+        let pending = format!("{CURRENT_MAIL} AND read_at IS NULL");
+        let mut result = Inbox {
+            messages: vec![],
+            remaining: 0,
+            digests: vec![],
+            away: vec![],
+            read_ids: vec![],
+            skipped: 0,
+        };
+        let channel = read.channel.as_deref();
+        if read.skip {
+            result.read_ids = tx.prepare(&format!("SELECT id FROM messages WHERE {pending} AND person = 0 AND channel IS NOT NULL AND (?2 IS NULL OR channel = ?2) AND (?3 IS NULL OR sender = ?3) ORDER BY id"))?
+                .query_map(params![read.name, channel, read.sender], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+            result.skipped = result.read_ids.len() as u32;
+        } else {
+            if read.digest && channel.is_none() {
+                let groups: Vec<(String, String, u32)> = tx.prepare(&format!("SELECT channel, sender, count(*) FROM messages WHERE {pending} AND away = 1 AND person = 0 GROUP BY channel, sender ORDER BY channel, sender"))?
+                    .query_map([&read.name], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+                for (channel, sender, count) in groups {
+                    if let Some(summary) = result.away.iter_mut().find(|s| s.channel == channel) {
+                        summary.count += count;
+                        summary.senders.push((sender, count));
+                    } else {
+                        result.away.push(AwaySummary {
+                            channel,
+                            count,
+                            senders: vec![(sender, count)],
+                        });
+                    }
+                }
+                result.read_ids = tx.prepare(&format!("SELECT id FROM messages WHERE {pending} AND away = 1 AND person = 0 ORDER BY id"))?
+                    .query_map([&read.name], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+            }
+            // A legacy request reads every kind in full. A digest request reads
+            // direct/human mail, unless it explicitly selects a channel.
+            let filter = if read.digest && channel.is_none() {
+                "(channel IS NULL OR person = 1)"
+            } else {
+                "1 = 1"
+            };
+            let sql = format!(
+                "SELECT {MESSAGE_COLUMNS} FROM messages WHERE {pending}
+                 AND (?2 IS NULL OR channel = ?2) AND {filter} ORDER BY id LIMIT ?3"
+            );
+            result.messages = tx
+                .prepare(&sql)?
+                .query_map(params![read.name, channel, read.max], message)?
+                .collect::<rusqlite::Result<_>>()?;
+            for message in &mut result.messages {
+                result.read_ids.push(message.id);
+                message.read_at = Some(now);
+            }
         }
-        let remaining = transaction.query_row(
-            "SELECT count(*) FROM messages WHERE recipient = ?1 AND read_at IS NULL",
-            [name],
+        for id in &result.read_ids {
+            tx.execute(
+                "UPDATE messages SET read_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+        }
+        let filter = if read.digest && channel.is_none() {
+            "(channel IS NULL OR person = 1)"
+        } else {
+            "1 = 1"
+        };
+        result.remaining = tx.query_row(
+            &format!(
+                "SELECT count(*) FROM messages WHERE {pending}
+                      AND (?2 IS NULL OR channel = ?2) AND {filter}"
+            ),
+            params![read.name, channel],
             |row| row.get(0),
         )?;
-        transaction.commit()?;
-        Ok(Inbox {
-            messages,
-            remaining,
-        })
+        if read.digest && channel.is_none() && !read.skip {
+            let channels: Vec<(String, u32)> = tx.prepare(&format!("SELECT channel, count(*) FROM messages WHERE {pending} AND channel IS NOT NULL AND person = 0 AND away = 0 GROUP BY channel ORDER BY channel"))?
+                .query_map([&read.name], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
+            for (channel, unread) in channels {
+                let first = tx.prepare(&format!("SELECT id, sender, body FROM messages WHERE {pending} AND channel = ?2 AND person = 0 AND away = 0 ORDER BY id LIMIT 5"))?
+                    .query_map(params![read.name, channel], |row| {
+                        let body: String = row.get(2)?;
+                        Ok(DigestLine { id: row.get(0)?, from: row.get(1)?, first_line: body.lines().next().unwrap_or_default().chars().take(100).collect() })
+                    })?.collect::<rusqlite::Result<_>>()?;
+                result.digests.push(Digest {
+                    channel,
+                    unread,
+                    first,
+                });
+            }
+        }
+        tx.commit()?;
+        Ok(result)
     }
 
-    /// What was held when the hub last kept them: a hold is of a run that
-    /// goes on while the hub is replaced, so a hub started again has it.
+    /// Opening a single copy cannot acknowledge another recipient's mail.
+    pub fn read_message(
+        &mut self,
+        name: &str,
+        id: u64,
+        now: u64,
+    ) -> rusqlite::Result<Option<Message>> {
+        let tx = self.db.transaction()?;
+        let found = tx
+            .query_row(
+                &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE {CURRENT_MAIL} AND id = ?2"),
+                params![name, id],
+                message,
+            )
+            .optional()?;
+        let found = if let Some(mut message) = found {
+            if message.read_at.is_none() {
+                tx.execute(
+                    "UPDATE messages SET read_at = ?1 WHERE id = ?2",
+                    params![now, id],
+                )?;
+                message.read_at = Some(now);
+            }
+            Some(message)
+        } else {
+            None
+        };
+        tx.commit()?;
+        Ok(found)
+    }
+
+    /// Tombstone, memberships and holds commit together.
+    pub fn retire(&mut self, name: &str, now: u64) -> rusqlite::Result<Option<Retired>> {
+        let tx = self.db.transaction()?;
+        let changed = tx.execute("UPDATE agents SET retired_at = ?2 WHERE name = ?1 AND retired_at IS NULL AND person = 0", params![name, now])?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let channels = tx.execute("DELETE FROM members WHERE agent = ?1", [name])? as u32;
+        let holds = tx.execute("DELETE FROM holds WHERE holder = ?1", [name])? as u32;
+        tx.commit()?;
+        Ok(Some(Retired { channels, holds }))
+    }
+
+    /// Candidates only: the hub must exclude connected watches while retiring.
+    /// Human broadcasts protect a name just as a direct message does.
+    pub fn forgettable(&self, cutoff: u64) -> rusqlite::Result<Vec<String>> {
+        self.db.prepare("SELECT name FROM agents WHERE person = 0 AND retired_at IS NULL AND last_seen <= ?1 AND NOT EXISTS (SELECT 1 FROM messages WHERE recipient = agents.name AND id > agents.since_id AND read_at IS NULL AND (channel IS NULL OR person = 1)) ORDER BY name")?
+            .query_map([cutoff], |row| row.get(0))?.collect()
+    }
+
+    /// Updates activity after a watch disconnects, without reviving a tombstone.
+    pub fn touch(&self, name: &str, now: u64) -> rusqlite::Result<()> {
+        self.db.execute(
+            "UPDATE agents SET last_seen = ?2 WHERE name = ?1 AND retired_at IS NULL",
+            params![name, now],
+        )?;
+        Ok(())
+    }
+
+    /// Unread actionable mail, grouped for a watch notice without bodies.
+    pub fn notice(&self, name: &str, channels: bool) -> rusqlite::Result<Vec<(String, bool, u32)>> {
+        self.db.prepare(&format!("SELECT sender, person, count(*) FROM messages WHERE {CURRENT_MAIL} AND read_at IS NULL AND away = 0 AND (?2 OR channel IS NULL OR person = 1) GROUP BY sender, person ORDER BY person DESC, sender"))?
+            .query_map(params![name, channels], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect()
+    }
+
+    /// SQLite is the sole authority for holds, including across restarts.
     pub fn holds(&self) -> rusqlite::Result<Vec<Hold>> {
-        let mut query = self
-            .db
-            .prepare("SELECT name, holder, since, until FROM holds ORDER BY name")?;
-        query
-            .query_map([], |row| {
-                Ok(Hold {
-                    name: row.get(0)?,
-                    holder: row.get(1)?,
-                    since: row.get(2)?,
-                    until: row.get(3)?,
-                })
-            })?
-            .collect()
+        read_holds(&self.db)
     }
 
-    /// Keeps `holds` as all that's held.
+    pub fn held(&mut self, now: u64) -> rusqlite::Result<Vec<Hold>> {
+        let tx = self.db.transaction()?;
+        tx.execute("DELETE FROM holds WHERE until <= ?1", [now])?;
+        let holds = read_holds(&tx)?;
+        tx.commit()?;
+        Ok(holds)
+    }
+
+    pub fn take_hold(
+        &mut self,
+        take: &protocol::Take,
+        now: u64,
+    ) -> rusqlite::Result<protocol::Taken> {
+        let tx = self.db.transaction()?;
+        let mut holds = read_holds(&tx)?
+            .into_iter()
+            .map(|hold| (hold.name.clone(), hold))
+            .collect();
+        let taken = crate::holds::take_hold(&mut holds, take, now);
+        if taken.yours {
+            write_holds(&tx, holds.values())?;
+        }
+        tx.commit()?;
+        Ok(taken)
+    }
+
+    pub fn release_hold(
+        &mut self,
+        release: &protocol::Release,
+        now: u64,
+    ) -> rusqlite::Result<Result<Vec<Hold>, String>> {
+        let tx = self.db.transaction()?;
+        let mut holds = read_holds(&tx)?
+            .into_iter()
+            .map(|hold| (hold.name.clone(), hold))
+            .collect();
+        if let Err(reason) = crate::holds::release_hold(&mut holds, release, now) {
+            return Ok(Err(reason));
+        }
+        let held = crate::holds::held(&mut holds, now);
+        write_holds(&tx, holds.values())?;
+        tx.commit()?;
+        Ok(Ok(held))
+    }
+
     pub fn keep_holds<'a>(
         &mut self,
         holds: impl Iterator<Item = &'a Hold>,
     ) -> rusqlite::Result<()> {
-        let transaction = self.db.transaction()?;
-        transaction.execute("DELETE FROM holds", [])?;
-        for hold in holds {
-            transaction.execute(
-                "INSERT INTO holds (name, holder, since, until) VALUES (?1, ?2, ?3, ?4)",
-                params![hold.name, hold.holder, hold.since, hold.until],
-            )?;
-        }
-        transaction.commit()
+        let tx = self.db.transaction()?;
+        write_holds(&tx, holds)?;
+        tx.commit()
     }
 
     /// The newest `limit` messages, newest first: all of them, or those
@@ -348,6 +552,30 @@ impl Store {
     }
 }
 
+fn read_holds(db: &Connection) -> rusqlite::Result<Vec<Hold>> {
+    db.prepare("SELECT name, holder, since, until FROM holds ORDER BY name")?
+        .query_map([], |row| {
+            Ok(Hold {
+                name: row.get(0)?,
+                holder: row.get(1)?,
+                since: row.get(2)?,
+                until: row.get(3)?,
+            })
+        })?
+        .collect()
+}
+
+fn write_holds<'a>(db: &Connection, holds: impl Iterator<Item = &'a Hold>) -> rusqlite::Result<()> {
+    db.execute("DELETE FROM holds", [])?;
+    for hold in holds {
+        db.execute(
+            "INSERT INTO holds (name, holder, since, until) VALUES (?1, ?2, ?3, ?4)",
+            params![hold.name, hold.holder, hold.since, hold.until],
+        )?;
+    }
+    Ok(())
+}
+
 fn agent(row: &Row) -> rusqlite::Result<Agent> {
     Ok(Agent {
         name: row.get(0)?,
@@ -356,6 +584,8 @@ fn agent(row: &Row) -> rusqlite::Result<Agent> {
         watching: false,
         unread: row.get(3)?,
         person: row.get(4)?,
+        away: false,
+        retired_at: row.get(5)?,
     })
 }
 
@@ -369,6 +599,7 @@ fn message(row: &Row) -> rusqlite::Result<Message> {
         read_at: row.get(5)?,
         person: row.get(6)?,
         channel: row.get(7)?,
+        away: row.get(8)?,
     })
 }
 
@@ -380,6 +611,7 @@ mod tests {
         let agent = Register {
             name: name.to_string(),
             machine: "m1".to_string(),
+            reconnect: false,
         };
         store.see(&agent, now).unwrap();
     }
@@ -547,6 +779,7 @@ mod tests {
                 &Register {
                     name: "a".to_string(),
                     machine: "m6".to_string(),
+                    reconnect: false,
                 },
                 9,
             )
@@ -555,5 +788,282 @@ mod tests {
         assert_eq!(agents.len(), 1);
         assert_eq!((agents[0].machine.as_str(), agents[0].last_seen), ("m6", 9));
         assert!(store.agent("nobody").unwrap().is_none());
+    }
+    fn digest_request(name: &str) -> ReadInbox {
+        ReadInbox {
+            name: name.to_string(),
+            max: 20,
+            channel: None,
+            sender: None,
+            skip: false,
+            digest: true,
+        }
+    }
+
+    #[test]
+    fn a_new_life_cannot_read_old_mail_even_at_the_same_timestamp() {
+        let mut store = Store::in_memory().unwrap();
+        register(&store, "a", 1);
+        register(&store, "b", 1);
+        store.join("team", "b").unwrap();
+        let old = send(&store, "a", "b", "old life", 5);
+        store.retire("b", 5).unwrap().unwrap();
+        assert!(!store.members(EVERYONE).unwrap().contains(&"b".to_string()));
+        assert!(store.members("team").unwrap().is_empty());
+        register(&store, "b", 5);
+        let new = send(&store, "a", "b", "new life", 5);
+        assert_eq!(store.agent("b").unwrap().unwrap().unread, 1);
+        assert!(store.read_message("b", old.id, 6).unwrap().is_none());
+        assert!(store.read_message("a", new.id, 6).unwrap().is_none());
+        let inbox = store.read_mail(&digest_request("b"), 6).unwrap();
+        assert_eq!(
+            inbox.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+            [new.id]
+        );
+        assert!(
+            store
+                .history(None, 10)
+                .unwrap()
+                .iter()
+                .find(|m| m.id == old.id)
+                .unwrap()
+                .read_at
+                .is_none()
+        );
+        assert_eq!(
+            store.read_message("b", new.id, 7).unwrap().unwrap().read_at,
+            Some(6)
+        );
+    }
+
+    #[test]
+    fn digests_never_acknowledge_mail_and_bulk_skip_never_drops_direct_or_human_mail() {
+        let mut store = Store::in_memory().unwrap();
+        for name in ["a", "b", "c"] {
+            register(&store, name, 1);
+        }
+        let direct = send(&store, "a", "b", "direct", 2);
+        let broadcast = |from: &str| Send {
+            from: from.to_string(),
+            to: "team".to_string(),
+            body: "ask\nlong body".to_string(),
+            key: None,
+        };
+        for _ in 0..7 {
+            store
+                .broadcast(&broadcast("a"), "team", &["b".to_string()], 3, false)
+                .unwrap();
+        }
+        store
+            .broadcast(&broadcast("c"), "team", &["b".to_string()], 3, false)
+            .unwrap();
+        let human = store
+            .broadcast(&broadcast("tu"), "team", &["b".to_string()], 3, true)
+            .unwrap()[0]
+            .id;
+        let first = store.read_mail(&digest_request("b"), 4).unwrap();
+        assert_eq!(
+            first.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+            [direct.id, human]
+        );
+        assert_eq!(first.digests[0].unread, 8);
+        assert_eq!(first.digests[0].first.len(), 5);
+        assert_eq!(first.digests[0].first[0].first_line, "ask");
+        assert_eq!(store.agent("b").unwrap().unwrap().unread, 8);
+        assert_eq!(
+            store.read_mail(&digest_request("b"), 5).unwrap().digests[0].unread,
+            8
+        );
+        let direct = send(&store, "a", "b", "another direct", 6);
+        let human = store
+            .broadcast(&broadcast("tu"), "team", &["b".to_string()], 6, true)
+            .unwrap()[0]
+            .id;
+        let mut skip = digest_request("b");
+        skip.skip = true;
+        skip.sender = Some("a".to_string());
+        assert_eq!(store.read_mail(&skip, 7).unwrap().skipped, 7);
+        assert!(
+            store
+                .history(None, 30)
+                .unwrap()
+                .iter()
+                .filter(|m| [direct.id, human].contains(&m.id))
+                .all(|m| m.read_at.is_none())
+        );
+        skip.sender = None;
+        skip.channel = Some("team".to_string());
+        assert_eq!(store.read_mail(&skip, 8).unwrap().skipped, 1);
+        let inbox = store.read_mail(&digest_request("b"), 9).unwrap();
+        assert_eq!(inbox.messages.len(), 2);
+        assert!(inbox.digests.is_empty());
+    }
+
+    #[test]
+    fn away_summaries_are_once_only_but_legacy_clients_read_the_full_bodies() {
+        let mut store = Store::in_memory().unwrap();
+        register(&store, "b", 1);
+        let send = Send {
+            from: "a".to_string(),
+            to: "team".to_string(),
+            body: "body".to_string(),
+            key: None,
+        };
+        let away = store
+            .broadcast_with_away(&send, "team", &[("b".to_string(), true)], 2, false)
+            .unwrap()[0]
+            .id;
+        let urgent = store
+            .broadcast_with_away(&send, "team", &[("b".to_string(), true)], 3, true)
+            .unwrap()[0]
+            .clone();
+        assert!(!urgent.away);
+        assert_eq!(store.agent("b").unwrap().unwrap().unread, 1);
+        let inbox = store.read_mail(&digest_request("b"), 4).unwrap();
+        assert_eq!(inbox.away[0].count, 1);
+        assert_eq!(inbox.messages[0].id, urgent.id);
+        assert!(inbox.read_ids.contains(&away));
+        assert!(
+            store
+                .read_mail(&digest_request("b"), 5)
+                .unwrap()
+                .away
+                .is_empty()
+        );
+        assert!(store.read_message("b", away, 6).unwrap().is_some());
+        store
+            .broadcast_with_away(&send, "team", &[("b".to_string(), true)], 7, false)
+            .unwrap();
+        let legacy = store.read_inbox("b", 20, 8).unwrap();
+        assert_eq!(legacy.messages.len(), 1);
+        assert_eq!(legacy.messages[0].body, "body");
+        assert!(legacy.away.is_empty());
+    }
+
+    #[test]
+    fn inbox_acknowledgements_roll_back_if_any_update_fails() {
+        let mut store = Store::in_memory().unwrap();
+        register(&store, "b", 1);
+        let send = Send {
+            from: "a".to_string(),
+            to: "team".to_string(),
+            body: "away".to_string(),
+            key: None,
+        };
+        store
+            .broadcast_with_away(&send, "team", &[("b".to_string(), true)], 2, false)
+            .unwrap();
+        send_direct_for_rollback(&store);
+        store.db.execute_batch("CREATE TRIGGER fail_direct BEFORE UPDATE OF read_at ON messages WHEN OLD.channel IS NULL BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+        assert!(store.read_mail(&digest_request("b"), 4).is_err());
+        assert!(
+            store
+                .history(None, 20)
+                .unwrap()
+                .iter()
+                .all(|m| m.read_at.is_none())
+        );
+        store.db.execute_batch("DROP TRIGGER fail_direct").unwrap();
+        assert_eq!(
+            store.read_mail(&digest_request("b"), 5).unwrap().away[0].count,
+            1
+        );
+    }
+
+    fn send_direct_for_rollback(store: &Store) {
+        send(store, "a", "b", "direct", 3);
+    }
+
+    #[test]
+    fn retirement_is_atomic_and_persists_without_destroying_history() {
+        let path = std::env::temp_dir().join(format!(
+            "cam-retire-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        {
+            let mut store = Store::open(&path).unwrap();
+            register(&store, "b", 1);
+            store.join("team", "b").unwrap();
+            send(&store, "a", "b", "never read", 2);
+            let hold = Hold {
+                name: "check".to_string(),
+                holder: "b".to_string(),
+                since: 1,
+                until: 1000,
+            };
+            store.keep_holds(std::iter::once(&hold)).unwrap();
+            store.db.execute_batch("CREATE TRIGGER fail_retire BEFORE DELETE ON members BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+            assert!(store.retire("b", 3).is_err());
+            assert!(store.agent("b").unwrap().unwrap().retired_at.is_none());
+            assert_eq!(store.holds().unwrap().len(), 1);
+            assert_eq!(store.members("team").unwrap(), ["b"]);
+            store.db.execute_batch("DROP TRIGGER fail_retire").unwrap();
+            let retired = store.retire("b", 4).unwrap().unwrap();
+            assert_eq!((retired.channels, retired.holds), (1, 1));
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(store.agents().unwrap().is_empty());
+        assert!(store.holds().unwrap().is_empty());
+        assert!(store.history(None, 10).unwrap()[0].read_at.is_none());
+        drop(store);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn forgetting_protects_direct_and_human_mail_but_not_channel_backlogs() {
+        let mut store = Store::in_memory().unwrap();
+        for name in ["direct", "human", "channel", "empty"] {
+            register(&store, name, 1);
+        }
+        store.see_person("tu", 1).unwrap();
+        send(&store, "a", "direct", "direct", 2);
+        let send = Send {
+            from: "tu".to_string(),
+            to: "team".to_string(),
+            body: "human".to_string(),
+            key: None,
+        };
+        store
+            .broadcast(&send, "team", &["human".to_string()], 2, true)
+            .unwrap();
+        store
+            .broadcast(&send, "team", &["channel".to_string()], 2, false)
+            .unwrap();
+        assert_eq!(store.forgettable(10).unwrap(), ["channel", "empty"]);
+    }
+    #[test]
+    fn failed_hold_writes_leave_the_previous_owner_and_deadline_intact() {
+        let mut store = Store::in_memory().unwrap();
+        let take = protocol::Take {
+            name: "check".to_string(),
+            holder: "a".to_string(),
+            minutes: 30,
+        };
+        let original = store.take_hold(&take, 1).unwrap().hold;
+        store.db.execute_batch("CREATE TRIGGER fail_hold_insert BEFORE INSERT ON holds BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+        assert!(store.take_hold(&take, 10).is_err());
+        assert_eq!(store.holds().unwrap(), [original.clone()]);
+        store.db.execute_batch("DROP TRIGGER fail_hold_insert; CREATE TRIGGER fail_hold_delete BEFORE DELETE ON holds BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
+        let release = protocol::Release {
+            name: "check".to_string(),
+            holder: "a".to_string(),
+        };
+        assert!(store.release_hold(&release, 11).is_err());
+        assert_eq!(store.holds().unwrap(), [original]);
+        store
+            .db
+            .execute_batch("DROP TRIGGER fail_hold_delete")
+            .unwrap();
+        assert!(
+            store
+                .release_hold(&release, 12)
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
     }
 }

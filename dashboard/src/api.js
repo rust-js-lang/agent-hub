@@ -15,9 +15,12 @@ import {
   messageDeserialize_deserialize,
   readInboxSerialize_serialize,
   refusalDeserialize_deserialize,
+  retireSerialize_serialize,
+  retiredDeserialize_deserialize,
   sendSerialize_serialize,
   signInSerialize_serialize,
 } from "../../protocol/src/lib.js";
+import * as Protocol from "../../protocol/src/lib.js";
 import { $displayJsonError, $fromJson, $json, $settle, $toJson, $try } from "@rust-js/std";
 
 /**
@@ -200,8 +203,26 @@ export async function read(me) {
   const read = {
     name: me.name,
     max: 100,
+    skip: false,
+    digest: false,
   };
   return await post(INBOX, read, inboxDeserialize_deserialize, readInboxSerialize_serialize);
+}
+
+export async function retire(me, name) {
+  const result = await post(
+    Protocol.RETIRE,
+    {
+      name,
+      key: me.key,
+    },
+    retiredDeserialize_deserialize,
+    retireSerialize_serialize,
+  );
+  if (result.TAG === "Err") {
+    return result;
+  }
+  return { TAG: "Ok" };
 }
 
 /** A time in milliseconds since the Unix epoch, in the reader's locale. */

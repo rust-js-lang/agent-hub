@@ -5,13 +5,22 @@ use std::io::{BufRead, BufReader};
 use anyhow::{Context, Result, bail};
 use protocol::{
     AGENTS, Agent, BROADCAST, CHANNELS, Channel, EVENTS, Event, HOLDS, HUB, Hold, HubInfo, INBOX,
-    Inbox, Join, LEAVE, MESSAGES, Message, PERSON, RELEASE, ReadInbox, Refusal, Register, Release,
-    STOP, Send, SignIn, Take, Taken,
+    Inbox, Join, LEAVE, MESSAGES, Message, PERSON, READ, RELEASE, RETIRE, ReadInbox, ReadMessage,
+    Refusal, Register, Release, Retire, Retired, STOP, Send, SignIn, Take, Taken,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use ureq::Body;
 use ureq::http::Response;
+
+#[derive(Debug)]
+pub struct RetiredAgent(pub String);
+impl std::fmt::Display for RetiredAgent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl std::error::Error for RetiredAgent {}
 
 pub struct Client {
     hub: String,
@@ -57,6 +66,9 @@ impl Client {
         }
         let status = response.status();
         match response.body_mut().read_json::<Refusal>() {
+            Ok(refusal) if status == ureq::http::StatusCode::GONE => {
+                Err(anyhow::Error::new(RetiredAgent(refusal.reason)))
+            }
             Ok(refusal) => bail!("{}", refusal.reason),
             Err(_) => bail!("the hub answered {status}"),
         }
@@ -82,6 +94,10 @@ impl Client {
 
     /// `name` is seen now, on this machine.
     pub fn register(&self, name: &str) -> Result<Agent> {
+        self.register_connection(name, false)
+    }
+
+    pub fn register_connection(&self, name: &str, reconnect: bool) -> Result<Agent> {
         let machine = gethostname::gethostname()
             .to_string_lossy()
             .trim_end_matches(".local")
@@ -91,6 +107,7 @@ impl Client {
             &Register {
                 name: name.to_string(),
                 machine,
+                reconnect,
             },
         )
     }
@@ -190,8 +207,42 @@ impl Client {
             &ReadInbox {
                 name: name.to_string(),
                 max,
+                channel: None,
+                sender: None,
+                skip: false,
+                digest: false,
             },
         )
+    }
+
+    pub fn read_mail(&self, read: &ReadInbox) -> Result<Inbox> {
+        self.post(INBOX, read)
+    }
+
+    pub fn read_message(&self, name: &str, id: u64) -> Result<Message> {
+        self.post(
+            READ,
+            &ReadMessage {
+                name: name.to_string(),
+                id,
+            },
+        )
+    }
+
+    pub fn retire(&self, name: &str) -> Result<Retired> {
+        self.post(
+            RETIRE,
+            &Retire {
+                name: name.to_string(),
+                key: None,
+            },
+        )
+    }
+
+    pub fn notice(&self, name: &str, channels: bool) -> Result<Vec<(String, bool, u32)>> {
+        self.get(&format!(
+            "/api/inbox/notice?name={name}&channels={channels}"
+        ))
     }
 
     /// The hub that's running: its build.
@@ -243,7 +294,8 @@ impl Client {
             .call()
             .with_context(|| self.unreachable())?;
         if !response.status().is_success() {
-            return Err(Client::answer::<Refusal>(response).unwrap_err());
+            Client::answer::<Refusal>(response)?;
+            bail!("the hub refused the watch without an error reason");
         }
         let lines = BufReader::new(response.into_body().into_reader()).lines();
         // Server-sent events: each is a `data:` line; others keep it alive.

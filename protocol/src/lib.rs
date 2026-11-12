@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
+
 //! What the hub, the command line and the dashboard agree on: the hub's
 //! routes, their JSON, and what an agent's name may be.
 //!
@@ -18,6 +20,10 @@ pub const MESSAGES: &str = "/api/messages";
 /// `POST` a [`ReadInbox`]: the agent's unread messages, oldest first, as an
 /// [`Inbox`]. They're read from then on.
 pub const INBOX: &str = "/api/inbox";
+/// `GET`: actionable unread counts by sender; never acknowledges mail.
+pub const NOTICE: &str = "/api/inbox/notice";
+pub const READ: &str = "/api/messages/read";
+pub const RETIRE: &str = "/api/agents/retire";
 
 /// `GET`: server-sent events, each an [`Event`]'s JSON. With `?agent=<name>`,
 /// only the messages sent to that agent, and the agent is watching while
@@ -87,6 +93,10 @@ pub struct Agent {
     /// Whether it's the person the agents work for, signed in from the
     /// dashboard with the hub's key: only the dashboard sends as it.
     pub person: bool,
+    #[serde(default)]
+    pub away: bool,
+    #[serde(default)]
+    pub retired_at: Option<u64>,
 }
 
 /// A channel: a name, and the agents a message to it goes to.
@@ -117,6 +127,9 @@ pub struct SignIn {
 pub struct Register {
     pub name: String,
     pub machine: String,
+    /// A reconnect must never revive a retired name.
+    #[serde(default)]
+    pub reconnect: bool,
 }
 
 /// A message to send.
@@ -148,6 +161,8 @@ pub struct Message {
     /// The channel it was sent to, of which this is its recipient's copy;
     /// none of one sent to its recipient alone.
     pub channel: Option<String>,
+    #[serde(default)]
+    pub away: bool,
 }
 
 /// An agent reads its unread messages, at most `max` of them.
@@ -155,6 +170,54 @@ pub struct Message {
 pub struct ReadInbox {
     pub name: String,
     pub max: u32,
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub sender: Option<String>,
+    #[serde(default)]
+    pub skip: bool,
+    /// Opt in, so clients that cannot display digests still get full bodies.
+    #[serde(default)]
+    pub digest: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadMessage {
+    pub name: String,
+    pub id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retire {
+    pub name: String,
+    pub key: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Retired {
+    pub channels: u32,
+    pub holds: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DigestLine {
+    pub id: u64,
+    pub from: String,
+    pub first_line: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Digest {
+    pub channel: String,
+    pub unread: u32,
+    pub first: Vec<DigestLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AwaySummary {
+    pub channel: String,
+    pub count: u32,
+    pub senders: Vec<(String, u32)>,
 }
 
 /// Unread messages, oldest first, and how many are still unread after them.
@@ -162,6 +225,14 @@ pub struct ReadInbox {
 pub struct Inbox {
     pub messages: Vec<Message>,
     pub remaining: u32,
+    #[serde(default)]
+    pub digests: Vec<Digest>,
+    #[serde(default)]
+    pub away: Vec<AwaySummary>,
+    #[serde(default)]
+    pub read_ids: Vec<u64>,
+    #[serde(default)]
+    pub skipped: u32,
 }
 
 /// The hub that's running: an agent's command of another build may not
@@ -174,6 +245,19 @@ pub struct HubInfo {
     pub build: String,
     /// When it started, in milliseconds since the Unix epoch.
     pub started: u64,
+    #[serde(default = "default_away_after")]
+    pub away_after: u64,
+    #[serde(default = "default_forget_after")]
+    pub forget_after: u64,
+    #[serde(default)]
+    pub features: Vec<String>,
+}
+
+pub fn default_away_after() -> u64 {
+    60 * 60_000
+}
+pub fn default_forget_after() -> u64 {
+    24 * 60 * 60_000
 }
 
 /// Something one agent has at a time, by its name: `check`, say, for a long
@@ -224,11 +308,21 @@ pub struct Refusal {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Event {
     /// A message was sent.
-    Sent { message: Message },
+    Sent {
+        message: Message,
+    },
     /// An agent read these messages.
-    Read { name: String, ids: Vec<u64> },
+    Read {
+        name: String,
+        ids: Vec<u64>,
+    },
     /// An agent was seen, or started or stopped watching.
-    Agent { agent: Agent },
+    Agent {
+        agent: Agent,
+    },
+    Retired {
+        name: String,
+    },
 }
 
 /// The longest name an agent may have.
@@ -309,13 +403,34 @@ mod tests {
             read_at: None,
             person: false,
             channel: None,
+            away: false,
         };
         let event = Event::Sent { message };
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"sent","message":{"id":7,"from":"a","to":"b","body":"hi","sentAt":1,"readAt":null,"person":false,"channel":null}}"#
+            r#"{"type":"sent","message":{"id":7,"from":"a","to":"b","body":"hi","sentAt":1,"readAt":null,"person":false,"channel":null,"away":false}}"#
         );
         assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), event);
+    }
+    #[test]
+    fn legacy_json_preserves_full_inbox_behavior_and_new_fields_default() {
+        let read: ReadInbox = serde_json::from_str(r#"{"name":"a","max":20}"#).unwrap();
+        assert!(!read.digest && !read.skip && read.channel.is_none() && read.sender.is_none());
+        let register: Register = serde_json::from_str(r#"{"name":"a","machine":"m"}"#).unwrap();
+        assert!(!register.reconnect);
+        let inbox: Inbox = serde_json::from_str(r#"{"messages":[],"remaining":0}"#).unwrap();
+        assert!(inbox.away.is_empty() && inbox.digests.is_empty() && inbox.read_ids.is_empty());
+        let info: HubInfo =
+            serde_json::from_str(r#"{"version":"old","build":"old","started":1}"#).unwrap();
+        assert_eq!(info.away_after, default_away_after());
+        assert!(info.features.is_empty());
+        let agent: Agent = serde_json::from_str(
+            r#"{"name":"a","machine":"m","lastSeen":1,"watching":false,"unread":0,"person":false}"#,
+        )
+        .unwrap();
+        assert!(!agent.away && agent.retired_at.is_none());
+        let message: Message = serde_json::from_str(r#"{"id":1,"from":"a","to":"b","body":"hi","sentAt":1,"readAt":null,"person":false,"channel":null}"#).unwrap();
+        assert!(!message.away);
     }
 }

@@ -94,7 +94,7 @@ pub fn App() -> JSX::Element {
             </header>
             {problem.clone().map(|reason| jsx! { <p className="problem" role="alert">{reason}</p> })}
             <div className="layout">
-                <AgentList agents={agents} selected={selected.as_deref()} onSelect={set_selected} />
+                <AgentList agents={agents} selected={selected.as_deref()} onSelect={set_selected} me={me.as_ref()} />
                 <div className="talk">
                     <Compose
                         agents={agents}

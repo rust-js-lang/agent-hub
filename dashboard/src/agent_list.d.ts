@@ -2,10 +2,12 @@
 
 import type { JSX } from "react";
 import type { Agent } from "../../protocol/src/lib.js";
+import type { Me } from "./api.js";
 
 export interface AgentListProps {
     agents: Agent[];
     selected?: string | undefined;
+    me?: Me | undefined;
     onSelect: any;
 }
 

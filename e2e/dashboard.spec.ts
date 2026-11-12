@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { db } from "../playwright.config";
 import { expect, test } from "@playwright/test";
 import { agent, agentName, cli, hubKey, watch } from "./agents";
 
@@ -68,7 +70,7 @@ test("picking an agent shows only the messages it sent or was sent", async ({ pa
   await expect(messages(page).filter({ hasText: `${b} to ${c}` })).toHaveCount(1);
 });
 
-test("an agent shows as watching while its watch runs", async ({ page }) => {
+test("an agent shows as watching while its watch runs", async ({ page, request }) => {
   const claude = agent("claude");
   const codex = agent("codex");
   await open(page);
@@ -80,7 +82,12 @@ test("an agent shows as watching while its watch runs", async ({ page }) => {
   try {
     await expect(agentButton(page, claude)).toContainText("watching");
     cli("send", "--as", codex, claude, "Are you there?");
-    await expect.poll(() => heard).toContain(`from ${codex}: Are you there?`);
+    const tu = agentName("urgent-human");
+    await request.post("/api/person", { data: { name: tu, key: hubKey() } });
+    await request.post("/api/messages", { data: { from: tu, to: claude, body: "Urgent.", key: hubKey() } });
+    await expect.poll(() => heard).toContain(`from ${tu}, the person`);
+    expect(heard).not.toContain("Urgent.");
+    expect(heard).not.toContain("Are you there?");
   } finally {
     watcher.kill();
   }
@@ -185,4 +192,41 @@ test("the person signs in with the hub's key and writes to an agent, who reads i
   await expect(compose(page)).toContainText(`Writing as ${tu}.`);
   await compose(page).getByRole("button", { name: "Sign out" }).click();
   await expect(compose(page).getByRole("button", { name: "Sign in" })).toBeVisible();
+});
+
+
+test("away agents are collapsed and the signed-in person can retire one without losing history", async ({ page }) => {
+  const sender = agent("sender");
+  const stale = agent("stale");
+  cli("send", "--as", sender, stale, `History for ${stale}`);
+  execFileSync("python3", ["-c", "import sqlite3,sys; db=sqlite3.connect(sys.argv[1]); db.execute('UPDATE agents SET last_seen = ? WHERE name = ?', (int(sys.argv[3]),sys.argv[2])); db.commit()", db, stale, String(Date.now() - 2 * 3600_000)]);
+  await open(page);
+  const away = page.locator("details.away-agents");
+  await expect(away.locator("summary")).toContainText("Away");
+  await expect(agentButton(page, stale)).not.toBeVisible();
+  await away.locator("summary").click();
+  await expect(agentButton(page, stale)).toBeVisible();
+  await expect(page.getByRole("button", { name: `Retire ${stale}`, exact: true })).toHaveCount(0);
+  await signIn(page, agentName("tu-retire"), hubKey());
+  await expect(compose(page)).toContainText("Writing as");
+  await page.getByRole("button", { name: `Retire ${stale}`, exact: true }).click();
+  await expect(agentButton(page, stale)).toHaveCount(0);
+  await expect(messages(page).filter({ hasText: `History for ${stale}` })).toHaveCount(1);
+});
+
+test("retirement ends a running CLI watch instead of reconnecting and reviving it", async ({ page }) => {
+  const name = agent("watch-retire");
+  const watcher = watch(name);
+  let heard = "";
+  let exitCode: number | null = null;
+  watcher.stdout?.on("data", chunk => heard += chunk);
+  watcher.on("exit", code => exitCode = code);
+  try {
+    await open(page);
+    await expect(agentButton(page, name)).toContainText("watching");
+    cli("retire", "--as", name);
+    await expect.poll(() => exitCode).toBe(0);
+    expect(heard).toContain("was retired. This watch has ended.");
+    await expect(agentButton(page, name)).toHaveCount(0);
+  } finally { watcher.kill(); }
 });

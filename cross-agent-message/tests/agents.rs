@@ -357,3 +357,156 @@ fn the_dashboard_is_served_beside_the_api() {
 fn base(client: &Client) -> String {
     client.hub().to_string()
 }
+
+#[test]
+fn retirement_ends_a_watch_and_reconnect_does_not_revive_the_name() {
+    let client = hub();
+    client.register("a").unwrap();
+    client.register("b").unwrap();
+    let old = client.send("a", "b", "old life").unwrap();
+    client.take("check", "b", 30).unwrap();
+    client.join("team", "b").unwrap();
+    let mut events = client.watch("b").unwrap();
+    let retired = client.retire("b").unwrap();
+    assert_eq!((retired.channels, retired.holds), (1, 1));
+    assert!(matches!(events.next().unwrap().unwrap(), Event::Retired { name } if name == "b"));
+    assert!(events.next().is_none());
+    assert!(client.holds().unwrap().is_empty());
+    assert!(client.agents().unwrap().iter().all(|a| a.name != "b"));
+    let error = client.register_connection("b", true).unwrap_err();
+    assert!(
+        error
+            .downcast_ref::<cross_agent_message::client::RetiredAgent>()
+            .is_some()
+    );
+    assert!(client.send("a", "b", "still retired").is_err());
+    assert!(client.agents().unwrap().iter().all(|a| a.name != "b"));
+    client.register("b").unwrap();
+    assert_eq!(client.read_inbox("b", 20).unwrap().messages.len(), 0);
+    assert!(client.read_message("b", old.id).is_err());
+    let new = client.send("a", "b", "new life").unwrap();
+    assert_eq!(client.read_message("b", new.id).unwrap().body, "new life");
+    assert!(client.read_message("a", new.id).is_err());
+}
+
+#[test]
+fn http_digest_and_notice_do_not_read_mail_and_human_broadcasts_keep_priority() {
+    let (client, key) = hub_with_key();
+    client.register("a").unwrap();
+    client.register("b").unwrap();
+    client.sign_in("tu", &key).unwrap();
+    client.join("team", "b").unwrap();
+    let ordinary = client
+        .broadcast("a", "team", "short ask\nlong body", None)
+        .unwrap()[0]
+        .id;
+    let human = client
+        .broadcast("tu", "team", "urgent human ask", Some(&key))
+        .unwrap()[0]
+        .id;
+    let counts = client.notice("b", false).unwrap();
+    assert_eq!(counts, [("tu".to_string(), true, 1)]);
+    assert_eq!(
+        client
+            .notice("b", true)
+            .unwrap()
+            .iter()
+            .map(|(_, _, n)| n)
+            .sum::<u32>(),
+        2
+    );
+    assert_eq!(
+        client
+            .agents()
+            .unwrap()
+            .iter()
+            .find(|a| a.name == "b")
+            .unwrap()
+            .unread,
+        2
+    );
+    let request = protocol::ReadInbox {
+        name: "b".to_string(),
+        max: 20,
+        channel: None,
+        sender: None,
+        skip: false,
+        digest: true,
+    };
+    let digest = client.read_mail(&request).unwrap();
+    assert_eq!(
+        digest.messages.iter().map(|m| m.id).collect::<Vec<_>>(),
+        [human]
+    );
+    assert_eq!(digest.digests[0].first[0].id, ordinary);
+    assert_eq!(
+        client
+            .agents()
+            .unwrap()
+            .iter()
+            .find(|a| a.name == "b")
+            .unwrap()
+            .unread,
+        1
+    );
+    let repeat = client.read_mail(&request).unwrap();
+    assert_eq!(repeat.digests[0].unread, 1);
+    assert!(repeat.messages.is_empty());
+    assert!(client.notice("b", false).unwrap().is_empty());
+    assert_eq!(
+        client.read_message("b", ordinary).unwrap().body,
+        "short ask\nlong body"
+    );
+    assert!(client.read_mail(&request).unwrap().digests.is_empty());
+}
+
+#[test]
+fn a_new_cli_reads_an_old_hub_but_refuses_to_skip_when_filters_would_be_ignored() {
+    use axum::{
+        Json, Router,
+        routing::{get, post},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let reads = Arc::new(AtomicUsize::new(0));
+    let seen_reads = reads.clone();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route(protocol::HUB, get(|| async { Json(serde_json::json!({"version":"old", "build":"old", "started":1})) }))
+        .route(protocol::AGENTS, post(|| async { Json(serde_json::json!({"name":"a", "machine":"old", "lastSeen":1, "watching":false, "unread":1, "person":false})) }))
+        .route(protocol::INBOX, post(move || {
+            let reads = seen_reads.clone();
+            async move {
+                reads.fetch_add(1, Ordering::SeqCst);
+                Json(serde_json::json!({"messages":[{"id":1,"from":"b","to":"a","body":"legacy body must be shown","sentAt":1,"readAt":2,"person":false,"channel":null}],"remaining":0}))
+            }
+        }));
+    thread::spawn(move || runtime.block_on(async { axum::serve(listener, app).await.unwrap() }));
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_cross-agent-message"))
+            .args(["--hub", &format!("http://{address}"), "inbox", "--as", "a"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let normal = run(&[]);
+    assert!(normal.status.success());
+    assert!(String::from_utf8_lossy(&normal.stdout).contains("legacy body must be shown"));
+    assert_eq!(reads.load(Ordering::SeqCst), 1);
+    for args in [&["--skip", "#team"][..], &["#team"][..]] {
+        let refused = run(args);
+        assert!(!refused.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr)
+                .contains("does not support selective inbox reads")
+        );
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "unsupported filters must never acknowledge unseen mail"
+        );
+    }
+}

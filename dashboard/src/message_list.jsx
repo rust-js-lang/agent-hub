@@ -28,11 +28,15 @@ function shown(messages) {
     if (same != null) {
       same.copies = (same.copies + 1) >>> 0;
       same.read = (same.read + read) >>> 0;
+      same.activeRead = (same.activeRead + (message.readAt != null && !message.away ? 1 : 0)) >>> 0;
+      same.away = (same.away + (message.away ? 1 : 0)) >>> 0;
     } else {
       shown.push({
         first: message,
         copies: 1,
         read,
+        away: message.away ? 1 : 0,
+        activeRead: message.readAt != null && !message.away ? 1 : 0,
       });
     }
   }
@@ -51,7 +55,10 @@ export function MessageList({ messages }) {
         let state;
         if (message.channel != null) {
           to = `#${message.channel}`;
-          state = `read by ${group.read} of ${group.copies}`;
+          state =
+            group.away > 0
+              ? `read by ${group.activeRead} of ${(group.copies - group.away) >>> 0}, ${group.away} away`
+              : `read by ${group.read} of ${group.copies}`;
         } else if (message.readAt != null) {
           const at = message.readAt;
           to = message.to;
@@ -61,7 +68,7 @@ export function MessageList({ messages }) {
           state = "unread";
         }
         let class$;
-        if (group.read === group.copies) {
+        if (group.activeRead === (group.copies - group.away) >>> 0) {
           class$ = !message.person ? "message" : "message person";
         } else if (!message.person) {
           class$ = "message unread";

@@ -18,6 +18,13 @@ export const MESSAGES: string;
  */
 export const INBOX: string;
 
+/** `GET`: actionable unread counts by sender; never acknowledges mail. */
+export const NOTICE: string;
+
+export const READ: string;
+
+export const RETIRE: string;
+
 /**
  * `GET`: server-sent events, each an [`Event`]'s JSON. With `?agent=<name>`,
  * only the messages sent to that agent, and the agent is watching while
@@ -104,6 +111,8 @@ export interface Agent {
      * dashboard with the hub's key: only the dashboard sends as it.
      */
     person: boolean;
+    away: boolean;
+    retiredAt?: bigint | undefined;
 }
 
 /** A channel: a name, and the agents a message to it goes to. */
@@ -132,6 +141,8 @@ export interface SignIn {
 export interface Register {
     name: string;
     machine: string;
+    /** A reconnect must never revive a retired name. */
+    reconnect: boolean;
 }
 
 /** A message to send. */
@@ -166,18 +177,64 @@ export interface Message {
      * none of one sent to its recipient alone.
      */
     channel?: string | undefined;
+    away: boolean;
 }
 
 /** An agent reads its unread messages, at most `max` of them. */
 export interface ReadInbox {
     name: string;
     max: number;
+    channel?: string | undefined;
+    sender?: string | undefined;
+    skip: boolean;
+    /** Opt in, so clients that cannot display digests still get full bodies. */
+    digest: boolean;
+}
+
+export interface ReadMessage {
+    name: string;
+    id: bigint;
+}
+
+export interface Retire {
+    name: string;
+    key?: string | undefined;
+}
+
+export interface Retired {
+    channels: number;
+    holds: number;
+}
+
+export interface DigestLine {
+    id: bigint;
+    from: string;
+    firstLine: string;
+}
+
+export interface Digest {
+    channel: string;
+    unread: number;
+    first: DigestLine[];
+}
+
+export interface AwaySummary {
+    channel: string;
+    count: number;
+    senders: [
+        string,
+        number
+    ][];
 }
 
 /** Unread messages, oldest first, and how many are still unread after them. */
 export interface Inbox {
     messages: Message[];
     remaining: number;
+    digests: Digest[];
+    away: AwaySummary[];
+    readIds: bigint[];
+    skipped: number;
 }
 
 /**
@@ -191,7 +248,14 @@ export interface HubInfo {
     build: string;
     /** When it started, in milliseconds since the Unix epoch. */
     started: bigint;
+    awayAfter: bigint;
+    forgetAfter: bigint;
+    features: string[];
 }
+
+export function defaultAwayAfter(): bigint;
+
+export function defaultForgetAfter(): bigint;
 
 /**
  * Something one agent has at a time, by its name: `check`, say, for a long
@@ -246,6 +310,9 @@ export type Event = {
 } | {
     TAG: "Agent";
     agent: Agent;
+} | {
+    TAG: "Retired";
+    name: string;
 };
 
 /** The longest name an agent may have. */

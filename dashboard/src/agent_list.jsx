@@ -2,45 +2,77 @@
 
 /** The agents the hub knows, each a button that shows only its messages. */
 
+import { useState } from "react";
+
 import * as Api from "./api.js";
 
-export function AgentList({ agents, selected, onSelect }) {
+export function AgentList({ agents, selected, onSelect, me }) {
+  const [problem, setProblem] = useState(undefined);
   const class$ = (chosen) => (chosen ? "agent chosen" : "agent");
+  function row(agent) {
+    const name = agent.name;
+    const retireName = agent.name;
+    const chosen = selected === agent.name;
+    let state;
+    if (agent.person) {
+      state = "the person";
+    } else if (agent.watching) {
+      state = "watching";
+    } else {
+      state = `seen ${Api.time(agent.lastSeen)}`;
+    }
+    const me$1 = me;
+    return (
+      <div key={agent.name} className="agent-row">
+        <button type="button" className={class$(chosen)} onClick={() => onSelect(name)}>
+          <span className="name">{agent.name}</span>
+          <span className="meta">{`${agent.machine} · ${state}`}</span>
+          {agent.unread > 0 && <span className="unread">{`${agent.unread} unread`}</span>}
+        </button>
+        {agent.away && me$1 != null && (
+          <button
+            type="button"
+            className="retire"
+            aria-label={`Retire ${agent.name}`}
+            onClick={async () => {
+              if (me$1 != null) {
+                const value = await Api.retire(me$1, retireName);
+                if (value.TAG === "Ok") {
+                  setProblem(undefined);
+                } else {
+                  setProblem(value._0);
+                }
+              }
+            }}
+          >
+            Retire
+          </button>
+        )}
+      </div>
+    );
+  }
+  const away = agents.filter((agent) => agent.away).length;
+  const className = class$(selected == null);
+  const children = agents.filter((agent) => !agent.away).map(row);
   return (
     <nav className="agents" aria-label="Agents">
       <h2>Agents</h2>
-      <button
-        type="button"
-        className={class$(selected == null)}
-        onClick={() => onSelect(undefined)}
-      >
+      <button type="button" className={className} onClick={() => onSelect(undefined)}>
         <span className="name">Everyone</span>
         <span className="meta">{`${agents.length} agents`}</span>
       </button>
-      {agents.map((agent) => {
-        const name = agent.name;
-        const chosen = selected === agent.name;
-        let state;
-        if (agent.person) {
-          state = "the person";
-        } else if (agent.watching) {
-          state = "watching";
-        } else {
-          state = `seen ${Api.time(agent.lastSeen)}`;
-        }
-        return (
-          <button
-            key={agent.name}
-            type="button"
-            className={class$(chosen)}
-            onClick={() => onSelect(name)}
-          >
-            <span className="name">{agent.name}</span>
-            <span className="meta">{`${agent.machine} · ${state}`}</span>
-            {agent.unread > 0 && <span className="unread">{`${agent.unread} unread`}</span>}
-          </button>
-        );
-      })}
+      {problem != null && (
+        <p className="problem" role="alert">
+          {problem}
+        </p>
+      )}
+      {children}
+      {away > 0 && (
+        <details className="away-agents">
+          <summary>{`Away (${away})`}</summary>
+          {agents.filter((agent) => agent.away).map(row)}
+        </details>
+      )}
     </nav>
   );
 }

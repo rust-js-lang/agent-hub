@@ -125,8 +125,24 @@ pub async fn read(me: &Me) -> Result<Inbox, String> {
     let read = ReadInbox {
         name: me.name.clone(),
         max: 100,
+        channel: None,
+        sender: None,
+        skip: false,
+        digest: false,
     };
     post(INBOX, &read).await
+}
+
+pub async fn retire(me: &Me, name: &str) -> Result<(), String> {
+    let _: protocol::Retired = post(
+        protocol::RETIRE,
+        &protocol::Retire {
+            name: name.to_string(),
+            key: Some(me.key.clone()),
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 /// A time in milliseconds since the Unix epoch, in the reader's locale.
