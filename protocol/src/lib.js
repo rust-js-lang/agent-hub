@@ -49,6 +49,15 @@ export const HOLDS = "/api/holds";
  */
 export const RELEASE = "/api/holds/release";
 
+/** `GET`: the hub itself, as a [`HubInfo`]: which build is running. */
+export const HUB = "/api/hub";
+
+/**
+ * `POST`: the hub stops, so another, a newer build's, can take its place
+ * (`serve --replace`). It answers with its [`HubInfo`] first.
+ */
+export const STOP = "/api/hub/stop";
+
 /** The most messages `GET` [`MESSAGES`] gives. */
 export const HISTORY_LIMIT = 500;
 
@@ -223,6 +232,33 @@ export function inboxDeserialize_deserialize(json) {
       ["remaining", $json.u32],
     ],
     ([messages, remaining]) => ({ messages, remaining }),
+  );
+}
+
+/**
+ * The hub that's running: an agent's command of another build may not
+ * know all it does, or it all the command asks.
+ */
+export function hubInfoSerialize_serialize(hubInfo, json) {
+  json.beginObject();
+  json.key("version");
+  json.string(hubInfo.version);
+  json.key("build");
+  json.string(hubInfo.build);
+  json.key("started");
+  json.int(hubInfo.started);
+  json.endObject();
+}
+
+export function hubInfoDeserialize_deserialize(json) {
+  return json.struct(
+    "struct HubInfo",
+    [
+      ["version", $json.string],
+      ["build", $json.string],
+      ["started", $json.u64],
+    ],
+    ([version, build, started]) => ({ version, build, started }),
   );
 }
 

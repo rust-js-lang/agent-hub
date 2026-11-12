@@ -38,6 +38,15 @@ export const HOLDS: string;
  */
 export const RELEASE: string;
 
+/** `GET`: the hub itself, as a [`HubInfo`]: which build is running. */
+export const HUB: string;
+
+/**
+ * `POST`: the hub stops, so another, a newer build's, can take its place
+ * (`serve --replace`). It answers with its [`HubInfo`] first.
+ */
+export const STOP: string;
+
 /** The most messages `GET` [`MESSAGES`] gives. */
 export const HISTORY_LIMIT: number;
 
@@ -98,6 +107,19 @@ export interface ReadInbox {
 export interface Inbox {
     messages: Message[];
     remaining: number;
+}
+
+/**
+ * The hub that's running: an agent's command of another build may not
+ * know all it does, or it all the command asks.
+ */
+export interface HubInfo {
+    /** Its release, `0.1.0`. */
+    version: string;
+    /** The commit it was built from, `06dcee9`, or `unknown`. */
+    build: string;
+    /** When it started, in milliseconds since the Unix epoch. */
+    started: bigint;
 }
 
 /**

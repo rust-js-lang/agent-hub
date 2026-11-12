@@ -17,7 +17,8 @@ fn start(dashboard: PathBuf) -> Client {
         .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
         .unwrap();
     let address = listener.local_addr().unwrap();
-    let app = hub::router(Arc::new(Hub::new(Store::in_memory().unwrap())), dashboard);
+    let hub = Hub::new(Store::in_memory().unwrap()).unwrap();
+    let app = hub::router(Arc::new(hub), dashboard);
     thread::spawn(move || runtime.block_on(async { axum::serve(listener, app).await.unwrap() }));
     Client::new(&format!("http://{address}"))
 }
@@ -164,6 +165,17 @@ fn a_hold_is_one_agents_at_a_time() {
         refused(client.take("check", "codex", 0)),
         "a hold is taken for 1 to 240 minutes, not 0: take it again to keep it longer"
     );
+}
+
+#[test]
+fn the_hub_says_which_build_it_is() {
+    let client = hub();
+    let info = client.info().unwrap();
+    assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(info.build, hub::BUILD);
+    assert!(info.started > 0);
+    // Asked to stop, it answers with what it was first.
+    assert_eq!(client.stop().unwrap(), info);
 }
 
 #[test]

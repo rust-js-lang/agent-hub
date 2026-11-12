@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use protocol::{Agent, Inbox, Message, Register, Send};
+use protocol::{Agent, Hold, Inbox, Message, Register, Send};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 pub struct Store {
@@ -25,6 +25,12 @@ const SCHEMA: &str = "
         read_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS unread ON messages (recipient, read_at, id);
+    CREATE TABLE IF NOT EXISTS holds (
+        name TEXT PRIMARY KEY,
+        holder TEXT NOT NULL,
+        since INTEGER NOT NULL,
+        until INTEGER NOT NULL
+    );
 ";
 
 const MESSAGE_COLUMNS: &str = "id, sender, recipient, body, sent_at, read_at";
@@ -120,6 +126,40 @@ impl Store {
         })
     }
 
+    /// What was held when the hub last kept them: a hold is of a run that
+    /// goes on while the hub is replaced, so a hub started again has it.
+    pub fn holds(&self) -> rusqlite::Result<Vec<Hold>> {
+        let mut query = self
+            .db
+            .prepare("SELECT name, holder, since, until FROM holds ORDER BY name")?;
+        query
+            .query_map([], |row| {
+                Ok(Hold {
+                    name: row.get(0)?,
+                    holder: row.get(1)?,
+                    since: row.get(2)?,
+                    until: row.get(3)?,
+                })
+            })?
+            .collect()
+    }
+
+    /// Keeps `holds` as all that's held.
+    pub fn keep_holds<'a>(
+        &mut self,
+        holds: impl Iterator<Item = &'a Hold>,
+    ) -> rusqlite::Result<()> {
+        let transaction = self.db.transaction()?;
+        transaction.execute("DELETE FROM holds", [])?;
+        for hold in holds {
+            transaction.execute(
+                "INSERT INTO holds (name, holder, since, until) VALUES (?1, ?2, ?3, ?4)",
+                params![hold.name, hold.holder, hold.since, hold.until],
+            )?;
+        }
+        transaction.commit()
+    }
+
     /// The newest `limit` messages, newest first: all of them, or those
     /// `agent` sent or was sent.
     pub fn history(&self, agent: Option<&str>, limit: u32) -> rusqlite::Result<Vec<Message>> {
@@ -172,6 +212,26 @@ mod tests {
             body: body.to_string(),
         };
         store.send(&send, now).unwrap()
+    }
+
+    #[test]
+    fn what_is_held_is_kept_as_all_that_is() {
+        let mut store = Store::in_memory().unwrap();
+        assert!(store.holds().unwrap().is_empty());
+        let hold = |name: &str, holder: &str| Hold {
+            name: name.to_string(),
+            holder: holder.to_string(),
+            since: 1,
+            until: 9,
+        };
+        let held = [hold("deploy", "b"), hold("check", "a")];
+        store.keep_holds(held.iter()).unwrap();
+        assert_eq!(
+            store.holds().unwrap(),
+            [hold("check", "a"), hold("deploy", "b")]
+        );
+        store.keep_holds(held[..1].iter()).unwrap();
+        assert_eq!(store.holds().unwrap(), [hold("deploy", "b")]);
     }
 
     #[test]

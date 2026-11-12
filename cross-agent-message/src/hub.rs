@@ -14,12 +14,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use protocol::{
-    AGENTS, Agent, EVENTS, Event, HISTORY_LIMIT, HOLD_MINUTES_MAX, HOLDS, Hold, INBOX, Inbox,
-    MESSAGES, Message, RELEASE, ReadInbox, Refusal, Register, Release, Send, Take, Taken,
-    check_hold, check_name,
+    AGENTS, Agent, EVENTS, Event, HISTORY_LIMIT, HOLD_MINUTES_MAX, HOLDS, HUB, Hold, HubInfo,
+    INBOX, Inbox, MESSAGES, Message, RELEASE, ReadInbox, Refusal, Register, Release, STOP, Send,
+    Take, Taken, check_hold, check_name,
 };
 use serde::Deserialize;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use tokio_stream::{Stream, StreamExt, wrappers::BroadcastStream};
 use tower_http::services::ServeDir;
 
@@ -30,10 +30,17 @@ pub struct Hub {
     events: broadcast::Sender<Event>,
     /// How many `watch`es of each agent are connected.
     watchers: Mutex<HashMap<String, usize>>,
-    /// What's held now, by its name. Not kept in the store: a hold is of
-    /// what runs now, and a hub started again has none.
+    /// What's held now, by its name, kept in the store as it changes: a
+    /// hold is of a run that goes on while the hub is replaced.
     holds: Mutex<HashMap<String, Hold>>,
+    /// When it started.
+    started: u64,
+    /// Whether it was asked to stop, for another to take its place.
+    stop: watch::Sender<bool>,
 }
+
+/// The commit this build is of, as `build.rs` found it.
+pub const BUILD: &str = env!("CROSS_AGENT_BUILD");
 
 /// What a [`Take`] of `holds` at `now` comes to: the hold is `take.holder`'s
 /// where it was free, lapsed or its own already, until `take.minutes` from
@@ -114,12 +121,35 @@ fn bad_request(reason: String) -> Refused {
 }
 
 impl Hub {
-    pub fn new(store: Store) -> Hub {
-        Hub {
+    /// A hub over `store`, holding what it kept held.
+    pub fn new(store: Store) -> rusqlite::Result<Hub> {
+        let holds = (store.holds()?.into_iter())
+            .map(|hold| (hold.name.clone(), hold))
+            .collect();
+        Ok(Hub {
             store: Mutex::new(store),
             events: broadcast::channel(256).0,
             watchers: Mutex::new(HashMap::new()),
-            holds: Mutex::new(HashMap::new()),
+            holds: Mutex::new(holds),
+            started: now(),
+            stop: watch::channel(false).0,
+        })
+    }
+
+    /// What's running.
+    pub fn info(&self) -> HubInfo {
+        HubInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            build: BUILD.to_string(),
+            started: self.started,
+        }
+    }
+
+    /// Done once the hub is asked to stop (`STOP`).
+    pub fn stopped(&self) -> impl Future<Output = ()> + use<> {
+        let mut stop = self.stop.subscribe();
+        async move {
+            let _ = stop.wait_for(|stopped| *stopped).await;
         }
     }
 
@@ -177,6 +207,8 @@ pub fn router(hub: Arc<Hub>, dashboard: PathBuf) -> Router {
         .route(INBOX, post(read_inbox))
         .route(HOLDS, get(holds).post(take))
         .route(RELEASE, post(release))
+        .route(HUB, get(info))
+        .route(STOP, post(stop))
         .route(EVENTS, get(events))
         .fallback_service(ServeDir::new(dashboard))
         .with_state(hub)
@@ -261,8 +293,29 @@ async fn read_inbox(
     Ok(Json(inbox))
 }
 
+async fn info(State(hub): State<Arc<Hub>>) -> Json<HubInfo> {
+    Json(hub.info())
+}
+
+/// Stops the hub a moment after it answers, so the answer is sent.
+async fn stop(State(hub): State<Arc<Hub>>) -> Json<HubInfo> {
+    let stop = hub.stop.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let _ = stop.send(true);
+    });
+    Json(hub.info())
+}
+
 async fn holds(State(hub): State<Arc<Hub>>) -> Json<Vec<Hold>> {
     Json(held(&mut hub.holds(), now()))
+}
+
+impl Hub {
+    /// Keeps what's held now, so a hub that takes this one's place has it.
+    fn keep(&self, holds: &HashMap<String, Hold>) -> Result<(), Refused> {
+        Ok(self.store().keep_holds(holds.values())?)
+    }
 }
 
 async fn take(State(hub): State<Arc<Hub>>, Json(take): Json<Take>) -> Result<Json<Taken>, Refused> {
@@ -274,7 +327,12 @@ async fn take(State(hub): State<Arc<Hub>>, Json(take): Json<Take>) -> Result<Jso
             take.minutes
         )));
     }
-    Ok(Json(take_hold(&mut hub.holds(), &take, now())))
+    let mut holds = hub.holds();
+    let taken = take_hold(&mut holds, &take, now());
+    if taken.yours {
+        hub.keep(&holds)?;
+    }
+    Ok(Json(taken))
 }
 
 async fn release(
@@ -287,7 +345,9 @@ async fn release(
     let mut holds = hub.holds();
     release_hold(&mut holds, &release, now)
         .map_err(|reason| Refused(StatusCode::CONFLICT, reason))?;
-    Ok(Json(held(&mut holds, now)))
+    let held = held(&mut holds, now);
+    hub.keep(&holds)?;
+    Ok(Json(held))
 }
 
 #[derive(Deserialize)]

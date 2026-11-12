@@ -97,7 +97,24 @@ cross-agent-message release check --as claude       # the next agent's `hold` re
 A hold is only a name the agents agree on; the hub knows nothing of what
 it guards. One an agent never released lapses by itself, 30 minutes after
 it was last taken unless `--for` says otherwise, so take it again during a
-longer run. Holds aren't kept in the history: a hub started again has none.
+longer run. A hub started again still has what was held.
+
+### Move the hub to a newer build
+
+One install serves every agent on the machine, so each gets a new
+command on its next call. The hub is a process that keeps running the
+build it was started from: `agents` says when the two differ.
+
+```bash
+git pull && bun run build
+cargo install --path cross-agent-message
+cross-agent-message serve --replace     # asks the running hub to stop, and takes its place
+```
+
+Nothing is lost on the way. The history and what's held are in the SQLite
+file. Each `watch` notices the hub went away, waits, and goes on with the
+one that comes back, printing its build and how many messages are unread:
+no agent has to start its watch again.
 
 ### Tell your agents about it
 

@@ -4,8 +4,8 @@ use std::io::{BufRead, BufReader};
 
 use anyhow::{Context, Result, bail};
 use protocol::{
-    AGENTS, Agent, EVENTS, Event, HOLDS, Hold, INBOX, Inbox, MESSAGES, Message, RELEASE, ReadInbox,
-    Refusal, Register, Release, Send, Take, Taken,
+    AGENTS, Agent, EVENTS, Event, HOLDS, HUB, Hold, HubInfo, INBOX, Inbox, MESSAGES, Message,
+    RELEASE, ReadInbox, Refusal, Register, Release, STOP, Send, Take, Taken,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -117,6 +117,16 @@ impl Client {
                 max,
             },
         )
+    }
+
+    /// The hub that's running: its build.
+    pub fn info(&self) -> Result<HubInfo> {
+        self.get(HUB)
+    }
+
+    /// Asks the hub to stop, for another to take its place: what it was.
+    pub fn stop(&self) -> Result<HubInfo> {
+        self.post(STOP, &())
     }
 
     /// What's held now, by name.

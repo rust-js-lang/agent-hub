@@ -33,6 +33,13 @@ pub const HOLDS: &str = "/api/holds";
 /// [`Hold`]s still held.
 pub const RELEASE: &str = "/api/holds/release";
 
+/// `GET`: the hub itself, as a [`HubInfo`]: which build is running.
+pub const HUB: &str = "/api/hub";
+
+/// `POST`: the hub stops, so another, a newer build's, can take its place
+/// (`serve --replace`). It answers with its [`HubInfo`] first.
+pub const STOP: &str = "/api/hub/stop";
+
 /// The most messages `GET` [`MESSAGES`] gives.
 pub const HISTORY_LIMIT: u32 = 500;
 
@@ -99,6 +106,18 @@ pub struct ReadInbox {
 pub struct Inbox {
     pub messages: Vec<Message>,
     pub remaining: u32,
+}
+
+/// The hub that's running: an agent's command of another build may not
+/// know all it does, or it all the command asks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HubInfo {
+    /// Its release, `0.1.0`.
+    pub version: String,
+    /// The commit it was built from, `06dcee9`, or `unknown`.
+    pub build: String,
+    /// When it started, in milliseconds since the Unix epoch.
+    pub started: u64,
 }
 
 /// Something one agent has at a time, by its name: `check`, say, for a long

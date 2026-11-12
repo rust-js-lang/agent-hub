@@ -47,6 +47,11 @@ enum Command {
         /// The SQLite file that keeps the history.
         #[arg(long, default_value_os_t = default_db())]
         db: PathBuf,
+        /// Take the place of a hub already running there, a build before
+        /// this one: it's asked to stop first. Agents' `watch`es find the
+        /// new one by themselves.
+        #[arg(long)]
+        replace: bool,
     },
     /// List the other agents the hub knows, whether each is watching, and
     /// its unread messages.
@@ -125,7 +130,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let client = Client::new(&cli.hub);
     match cli.command {
-        Command::Serve { port, db } => serve(port, db),
+        Command::Serve { port, db, replace } => serve(port, db, replace),
         Command::Agents { me } => agents(&client, &me),
         Command::Send { me, to, message } => send(&client, &me, &to, &message),
         Command::Inbox { me, max } => inbox(&client, &me, max),
@@ -141,8 +146,43 @@ fn main() -> Result<()> {
     }
 }
 
+/// The hub's address on this machine.
+fn local(port: u16) -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+}
+
+/// The hub already at `address`, if one answers.
+fn running(address: SocketAddr) -> Option<(Client, protocol::HubInfo)> {
+    let client = Client::new(&format!("http://{address}"));
+    let info = client.info().ok()?;
+    Some((client, info))
+}
+
+fn serve(port: u16, db: PathBuf, replace: bool) -> Result<()> {
+    let address = local(port);
+    if let Some((client, info)) = running(address) {
+        if !replace {
+            bail!(
+                "a hub is already at http://{address}, build {}: `serve --replace` takes its place",
+                info.build
+            );
+        }
+        println!("Asking the hub of build {} to stop.", info.build);
+        let _ = client.stop();
+        // Until it has let go of the address.
+        let gone = (0..50).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::net::TcpListener::bind(address).is_ok()
+        });
+        if !gone {
+            bail!("the hub at http://{address} didn't stop");
+        }
+    }
+    serve_at(address, db)
+}
+
 #[tokio::main]
-async fn serve(port: u16, db: PathBuf) -> Result<()> {
+async fn serve_at(address: SocketAddr, db: PathBuf) -> Result<()> {
     if let Some(parent) = db.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("can't make {}", parent.display()))?;
@@ -155,20 +195,26 @@ async fn serve(port: u16, db: PathBuf) -> Result<()> {
             dashboard.join("../..").display()
         );
     }
-    let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .with_context(|| format!("can't listen on {address}"))?;
     println!(
-        "The hub is at http://{address}, keeping its history in {}.",
+        "The hub, build {}, is at http://{address}, keeping its history in {}.",
+        hub::BUILD,
         db.display()
     );
-    let app = hub::router(Arc::new(Hub::new(store)), dashboard);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    let hub = Arc::new(Hub::new(store).context("can't read what the hub kept held")?);
+    let stopped = hub.stopped();
+    let app = hub::router(hub, dashboard);
+    let served = axum::serve(listener, app).with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    });
+    tokio::select! {
+        served = served => served?,
+        // Not waited on to end its streams: an agent's `watch` finds the
+        // hub that takes its place.
+        () = stopped => println!("Stopped, for another hub to take its place."),
+    }
     Ok(())
 }
 
@@ -183,6 +229,17 @@ fn register(client: &Client, me: &Me) -> Result<Agent> {
 fn agents(client: &Client, me: &Me) -> Result<()> {
     let you = register(client, me)?;
     println!("You are {} on {}.", you.name, you.machine);
+    // A hub of another build may not know all this command asks, nor this
+    // command all it does. One too old to say its build is one.
+    let hub = client
+        .info()
+        .map_or("an older one".to_string(), |info| info.build);
+    if hub != hub::BUILD {
+        println!(
+            "The hub is build {hub}, and this command build {}: `cross-agent-message serve --replace` starts the hub again on this build.",
+            hub::BUILD
+        );
+    }
     let now = hub::now();
     let others: Vec<Agent> = client
         .agents()?
@@ -245,7 +302,7 @@ fn inbox(client: &Client, me: &Me, max: u32) -> Result<()> {
 
 fn watch(client: &Client, me: &Me) -> Result<()> {
     let you = register(client, me)?;
-    let events = client.watch(&me.name)?;
+    let mut events = client.watch(&me.name)?;
     let mut out = std::io::stdout().lock();
     writeln!(
         out,
@@ -256,25 +313,55 @@ fn watch(client: &Client, me: &Me) -> Result<()> {
         writeln!(out, "{} unread already.", you.unread)?;
     }
     out.flush()?;
-    for event in events {
-        if let Event::Sent { message } = event? {
-            let first = message.body.lines().next().unwrap_or_default();
-            let preview: String = first.chars().take(100).collect();
-            let more = if preview.len() < message.body.len() {
-                "…"
-            } else {
-                ""
+    loop {
+        for event in events {
+            let Ok(event) = event else {
+                break;
             };
-            writeln!(
-                out,
-                "Message {} from {}: {preview}{more}",
-                message.id, message.from
-            )?;
-            out.flush()?;
+            if let Event::Sent { message } = event {
+                let first = message.body.lines().next().unwrap_or_default();
+                let preview: String = first.chars().take(100).collect();
+                let more = if preview.len() < message.body.len() {
+                    "…"
+                } else {
+                    ""
+                };
+                writeln!(
+                    out,
+                    "Message {} from {}: {preview}{more}",
+                    message.id, message.from
+                )?;
+                out.flush()?;
+            }
         }
+        // The hub went away, to be started again or replaced by another
+        // build: the watch goes on with the one that comes back, which
+        // has what was sent meanwhile.
+        writeln!(out, "The hub went away. Waiting for it to come back.")?;
+        out.flush()?;
+        let (you, stream) = loop {
+            std::thread::sleep(HUB_POLL);
+            if let Ok(you) = client.register(&me.name)
+                && let Ok(stream) = client.watch(&me.name)
+            {
+                break (you, stream);
+            }
+        };
+        events = stream;
+        let build = client
+            .info()
+            .map_or("unknown".to_string(), |info| info.build);
+        let unread = match you.unread {
+            0 => "No unread messages.".to_string(),
+            unread => format!("{unread} unread: read them with `inbox`."),
+        };
+        writeln!(out, "The hub is back, build {build}. {unread}")?;
+        out.flush()?;
     }
-    bail!("the hub closed the stream")
 }
+
+/// How often a `watch` whose hub went away looks for it.
+const HUB_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How often a waiting `hold` asks again.
 const HOLD_POLL: std::time::Duration = std::time::Duration::from_secs(2);
