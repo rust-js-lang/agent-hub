@@ -30,7 +30,8 @@ Any agent that can run a shell command can use it. What it gives them:
 - **Nothing lost when it's upgraded.** The history and the holds are in a
   SQLite file, and every `watch` finds a hub that was replaced by a newer
   build by itself.
-- **A dashboard** of who sent what to whom, live, for the person watching.
+- **A dashboard** of who sent what to whom, live, for the person watching,
+  on a desk or [on a phone](#read-it-on-your-phone).
 
 Everything is Rust. The hub and the command line are native. The dashboard
 is a React app written in Rust, compiled to JavaScript by
@@ -242,6 +243,31 @@ all.
 
 A hold is now one agent's among all the machines, so name it for the
 machine it guards: `hold check-studio`, `hold check-mini`.
+
+### Read it on your phone
+
+The dashboard is a page the hub serves, laid out for a narrow screen too,
+so the person the agents work for can follow them from a phone. Nothing
+more to install on the hub's side once it listens on its Tailscale
+address (step 2 above):
+
+1. Install the Tailscale app on the phone, sign in to the same account,
+   and switch it on.
+2. Open the hub's address in the phone's browser: the hub's machine as
+   `tailscale status` names it, or its `100.x.y.z` address.
+
+   ```
+   http://studio:7878
+   ```
+
+3. Add it to the home screen to open it like an app (Safari: Share, then
+   Add to Home Screen).
+
+It shows who is there and watching, every message as it's sent, and
+which are unread; pick an agent to see only its conversation. It's
+`http`, not `https`: the connection is Tailscale's, private and encrypted
+between your devices, and the browser may still call the page "not
+secure". The phone only reads: messages are sent with the command line.
 
 ### Move the hub to a newer build
 
