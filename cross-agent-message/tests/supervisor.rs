@@ -1332,6 +1332,76 @@ fn a_read_only_installation_fails_preflight_without_draining_the_worker() {
 }
 
 #[test]
+fn a_control_ping_answers_without_restarting_the_worker() {
+    use std::os::unix::net::UnixStream;
+    let mut running = Running::new();
+    let config = cross_agent_message::supervisor::load_config(&running.db).unwrap();
+    let original = running.worker_pid();
+    let mut socket = UnixStream::connect(config.control()).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    socket.write_all(b"{\"ping\":true}\n").unwrap();
+    let mut reply = String::new();
+    std::io::BufReader::new(socket)
+        .read_line(&mut reply)
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&reply).unwrap(),
+        serde_json::json!({"pong":true})
+    );
+    assert!(running.process.try_wait().unwrap().is_none());
+    assert_eq!(running.worker_pid(), original);
+    running.client().info().unwrap();
+}
+
+#[test]
+fn a_control_client_that_connects_and_drops_cannot_stop_the_supervisor() {
+    abandoned_control_client(false);
+}
+
+#[test]
+fn a_control_client_that_drops_half_a_frame_cannot_stop_the_supervisor() {
+    abandoned_control_client(true);
+}
+
+fn abandoned_control_client(partial: bool) {
+    use std::os::unix::net::UnixStream;
+    let mut running = Running::new();
+    let config = cross_agent_message::supervisor::load_config(&running.db).unwrap();
+    let original = running.worker_pid();
+    for _ in 0..8 {
+        let mut socket = UnixStream::connect(config.control()).unwrap();
+        if partial {
+            socket.write_all(b"{\"bin").unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        drop(socket);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(
+            running.process.try_wait().unwrap().is_none(),
+            "an abandoned control client stopped the supervisor"
+        );
+        running.client().info().unwrap();
+        assert_eq!(running.worker_pid(), original);
+    }
+    // A complete subsequent frame must get its normal refusal, without
+    // changing workers or ever attempting a handoff.
+    let reply = cross_agent_message::supervisor::request(
+        &config,
+        &cross_agent_message::supervisor::Swap {
+            binary: running.binary.clone(),
+            sha256: "0".repeat(64),
+        },
+    )
+    .unwrap();
+    assert!(reply.rolled_back && reply.reason.unwrap().contains("checksum changed"));
+    assert!(running.process.try_wait().unwrap().is_none());
+    assert_eq!(running.worker_pid(), original);
+    running.client().info().unwrap();
+}
+
+#[test]
 fn a_fragmented_control_request_waits_for_its_terminating_newline() {
     use std::os::unix::net::UnixStream;
     let running = Running::new();

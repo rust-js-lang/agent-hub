@@ -153,6 +153,7 @@ fn valid_snapshot(path: &Path, config: &Config) -> bool {
 
 struct Worker {
     process: Child,
+    build: String,
     addresses: Vec<protocol::ListenAddress>,
     channel: crate::handoff::Channel,
     handoff: bool,
@@ -501,6 +502,7 @@ fn start_candidate(
     };
     let mut worker = Worker {
         process,
+        build: capability.build,
         channel,
         handoff: capability.handoff_protocol == crate::handoff::VERSION
             && config.handoff_protocol == crate::handoff::VERSION,
@@ -532,6 +534,7 @@ fn start_candidate(
         Err(error) => return Ok((worker, Err(error))),
     };
     worker.first_accepted_ns = ready.first_accepted_ns;
+    worker.build = ready.build;
     worker.addresses = ready.addresses;
     config.required_ready = crate::addresses::ready(&worker.addresses);
     eprintln!(
@@ -748,6 +751,7 @@ fn resume(worker: &mut Worker, image: &Path, config: &Config) -> Result<()> {
         "rollback",
     );
     worker.resume_from_ns.clear();
+    worker.build = ready.build;
     worker.addresses = ready.addresses;
     worker.phase = Phase::Running;
     worker.exposure_deadline = None;
@@ -996,11 +1000,9 @@ fn shutdown(
     retirement: &mut Option<Retirement>,
     listeners: &mut Vec<TcpListener>,
     pending_upgrade: &mut Option<(UnixStream, String)>,
-    image: &Path,
 ) -> Result<()> {
     if let Some((mut stream, _)) = pending_upgrade.take() {
-        let build =
-            crate::updates::inspect(image).map_or_else(|_| String::new(), |info| info.build);
+        let build = worker.build.clone();
         let reply = Swapped {
             build: build.clone(),
             previous: build,
@@ -1009,7 +1011,7 @@ fn shutdown(
             reason: Some("supervisor is stopping; queued upgrade was not started".into()),
             addresses: Vec::new(),
         };
-        let _ = writeln!(stream, "{}", serde_json::to_string(&reply)?);
+        control_reply(&mut stream, &reply);
     }
     // Attempt both children even if one shutdown fails. Dropping the owned
     // predecessor also reaps it if the graceful retirement channel failed.
@@ -1019,6 +1021,42 @@ fn shutdown(
         .map_or(Ok(()), |mut old| retire(&mut old.worker));
     listeners.clear();
     active.and(parked)
+}
+
+/// Client-specific encoding or I/O errors never leave the supervisor loop.
+fn control_reply(stream: &mut UnixStream, reply: &impl Serialize) {
+    match serde_json::to_vec(reply) {
+        Ok(mut bytes) => {
+            bytes.push(b'\n');
+            if let Err(error) = stream.write_all(&bytes) {
+                eprintln!("could not write control reply; dropping client: {error}");
+            }
+        }
+        Err(error) => eprintln!("could not encode control reply; dropping client: {error}"),
+    }
+}
+
+fn supervisor_present(path: &Path) -> bool {
+    let Ok(mut stream) = UnixStream::connect(path) else {
+        return false;
+    };
+    // A connected owner is enough to refuse a second supervisor. Wait for its
+    // reply before closing: older parents safely refuse an unknown ping, but
+    // can mishandle a client that disappears during socket setup.
+    let probe = (|| -> Result<()> {
+        stream.set_read_timeout(Some(crate::handoff::CONTROL_LIMIT))?;
+        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+        stream.write_all(b"{\"ping\":true}\n")?;
+        let mut reply = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut reply)?;
+        serde_json::from_str::<serde_json::Value>(&reply)
+            .context("invalid supervisor probe reply")?;
+        Ok(())
+    })();
+    if let Err(error) = probe {
+        eprintln!("existing supervisor probe did not complete; keeping its ownership: {error:#}");
+    }
+    true
 }
 
 pub fn request(config: &Config, swap: &Swap) -> Result<Swapped> {
@@ -1134,8 +1172,8 @@ pub fn run(mut config: Config) -> Result<()> {
     config.handoff_startup = true;
     crate::runtime::prepare(&config.db)?;
     let control = config.control();
-    if UnixStream::connect(config.db.with_extension("sock")).is_ok()
-        || UnixStream::connect(original_db.with_extension("sock")).is_ok()
+    if supervisor_present(&config.db.with_extension("sock"))
+        || supervisor_present(&original_db.with_extension("sock"))
     {
         bail!(
             "a legacy supervisor is still using this database; stop it before starting the stable-path supervisor"
@@ -1143,7 +1181,7 @@ pub fn run(mut config: Config) -> Result<()> {
     }
     if control.exists() {
         use std::os::unix::fs::FileTypeExt;
-        if UnixStream::connect(&control).is_ok() {
+        if supervisor_present(&control) {
             bail!("a supervisor is already using {}", control.display());
         }
         if !std::fs::symlink_metadata(&control)?.file_type().is_socket() {
@@ -1234,7 +1272,6 @@ pub fn run(mut config: Config) -> Result<()> {
                 &mut retirement,
                 &mut listeners,
                 &mut pending_upgrade,
-                &active.current,
             )?;
             let _ = std::fs::remove_file(&control);
             return Ok(());
@@ -1326,6 +1363,7 @@ pub fn run(mut config: Config) -> Result<()> {
                             "rollback",
                         );
                         worker.resume_from_ns.clear();
+                        worker.build = ready.build;
                         worker.addresses = ready.addresses;
                         worker.phase = Phase::Running;
                         worker.exposure_deadline = None;
@@ -1475,9 +1513,14 @@ pub fn run(mut config: Config) -> Result<()> {
                 // BSD accept can inherit O_NONBLOCK from the listening socket.
                 // A local client may send JSON and newline in separate writes;
                 // wait for the bounded complete frame instead of refusing EAGAIN.
-                stream.set_nonblocking(false)?;
-                stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-                stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+                let setup = stream
+                    .set_nonblocking(false)
+                    .and_then(|()| stream.set_read_timeout(Some(Duration::from_secs(1))))
+                    .and_then(|()| stream.set_write_timeout(Some(Duration::from_secs(1))));
+                if let Err(error) = setup {
+                    eprintln!("control client setup failed; dropping connection: {error}");
+                    continue;
+                }
                 let mut line = String::new();
                 let received = if let Some(buffered) = buffered {
                     line = buffered;
@@ -1488,10 +1531,21 @@ pub fn run(mut config: Config) -> Result<()> {
                         &mut line,
                     )
                 };
+                if let Err(error) = &received {
+                    eprintln!("could not read control request; dropping client frame: {error}");
+                }
                 let mut parsed = received
                     .map_err(anyhow::Error::from)
                     .context("cannot read complete supervisor control request")
                     .and_then(|_| serde_json::from_str::<Swap>(&line).map_err(Into::into));
+                if serde_json::from_str::<serde_json::Value>(&line)
+                    .ok()
+                    .and_then(|v| v.get("ping").and_then(|v| v.as_bool()))
+                    == Some(true)
+                {
+                    control_reply(&mut stream, &serde_json::json!({"pong": true}));
+                    continue;
+                }
                 if serde_json::from_str::<serde_json::Value>(&line)
                     .ok()
                     .and_then(|v| v.get("stop").and_then(|v| v.as_bool()))
@@ -1502,7 +1556,6 @@ pub fn run(mut config: Config) -> Result<()> {
                         &mut retirement,
                         &mut listeners,
                         &mut pending_upgrade,
-                        &active.current,
                     )?;
                     let _ = writeln!(stream, "{{\"stopped\":true}}");
                     let _ = std::fs::remove_file(&control);
@@ -1520,7 +1573,9 @@ pub fn run(mut config: Config) -> Result<()> {
                         "another upgrade is waiting for predecessor retirement; retry after it finishes"
                     ));
                 }
-                let previous_build = crate::updates::inspect(&active.current)?.build;
+                // Readiness owns the active build identity. A disconnected or
+                // malformed client must not trigger a fallible subprocess here.
+                let previous_build = worker.build.clone();
                 let result = parsed.and_then(|swap| {
                     if crate::updates::sha256(&std::fs::read(&swap.binary)?) != swap.sha256 {
                         bail!("candidate checksum changed before handoff");
@@ -1628,7 +1683,7 @@ pub fn run(mut config: Config) -> Result<()> {
                     reason: Some(format!("{error:#}")),
                     addresses: Vec::new(),
                 });
-                let _ = writeln!(stream, "{}", serde_json::to_string(&reply)?);
+                control_reply(&mut stream, &reply);
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(error)
@@ -1754,6 +1809,52 @@ mod tests {
     }
 
     #[test]
+    fn startup_probe_sends_ping_and_waits_for_current_and_legacy_replies() {
+        use std::io::BufRead;
+        let path = PathBuf::from(format!(
+            "/tmp/cam-probe-{}-{}.sock",
+            std::process::id(),
+            crate::hub::now()
+        ));
+        let listener = UnixListener::bind(&path).unwrap();
+        for response in [
+            "{\"pong\":true}\n",
+            "{\"rolled_back\":true,\"reason\":\"unknown ping\"}\n",
+        ] {
+            let server = listener.try_clone().unwrap();
+            let answer = std::thread::spawn(move || {
+                let (mut stream, _) = server.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut request = String::new();
+                std::io::BufReader::new(&stream)
+                    .read_line(&mut request)
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&request).unwrap(),
+                    serde_json::json!({"ping":true})
+                );
+                std::thread::sleep(Duration::from_millis(50));
+                // On macOS this fails if the probing peer already vanished.
+                stream
+                    .set_write_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+            let began = Instant::now();
+            assert!(supervisor_present(&path));
+            assert!(
+                began.elapsed() >= Duration::from_millis(50),
+                "probe must await the reply"
+            );
+            answer.join().unwrap();
+        }
+        drop(listener);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn first_acceptance_is_per_address_and_independent_of_readiness_completion() {
         let loopback = "127.0.0.1:12345";
         let private = "127.0.0.2:12345";
@@ -1814,6 +1915,7 @@ wire.recv(1)
             let at_ns = crate::handoff::monotonic_ns().unwrap();
             let mut worker = Worker {
                 process: command.spawn().unwrap(),
+                build: "fixture".into(),
                 channel: crate::handoff::Channel::new(parent).unwrap(),
                 handoff: true,
                 startup: true,
@@ -1942,6 +2044,7 @@ for line in lines:
         let pid = process.id();
         let mut worker = Worker {
             process,
+            build: "fixture".into(),
             channel: crate::handoff::Channel::new(parent).unwrap(),
             handoff: true,
             startup: false,
