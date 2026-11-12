@@ -339,6 +339,12 @@ pub fn event(data: &str) -> Result<Option<Event>, serde_json::Error> {
 pub trait Query: Sized {
     fn pairs(&self) -> Vec<(&'static str, String)>;
     fn parse(pairs: &[(String, String)]) -> Result<Self, String>;
+
+    /// Streams carry their protocol here because EventSource cannot set a
+    /// request header. Ordinary endpoint queries make no protocol claim.
+    fn protocol(&self) -> Option<u32> {
+        None
+    }
 }
 
 impl Query for () {
@@ -453,6 +459,9 @@ impl Events {
 }
 
 impl Query for Events {
+    fn protocol(&self) -> Option<u32> {
+        self.protocol
+    }
     fn pairs(&self) -> Vec<(&'static str, String)> {
         let mut pairs = Vec::new();
         if let Some(agent) = &self.agent {
@@ -647,6 +656,15 @@ mod tests {
 
     #[test]
     fn query_round_trips_preserve_empty_and_omitted_filters() {
+        assert_eq!(
+            Events {
+                protocol: Some(1),
+                ..Default::default()
+            }
+            .protocol(),
+            Some(1)
+        );
+        assert_eq!(History::default().protocol(), None);
         round_trip(History::default());
         round_trip(History {
             agent: Some("a + & é".to_string()),

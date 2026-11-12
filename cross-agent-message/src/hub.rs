@@ -7,19 +7,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::routes::Routes;
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, Uri, header};
-use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
 use axum::{Json, Router};
+use protocol::endpoints as api;
 use protocol::{
-    AGENTS, Agent, BROADCAST, CHANNELS, Channel, EVENTS, EVERYONE, Event, HISTORY_LIMIT,
-    HOLD_MINUTES_MAX, HOLDS, HUB, Hold, HubInfo, INBOX, Inbox, Join, LEAVE, MESSAGES, Message,
-    PERSON, READ, RELEASE, RETIRE, ReadInbox, ReadMessage, Refusal, Register, Release, Retire,
-    Retired, STOP, Send, SignIn, Take, Taken, check_channel, check_hold, check_name,
+    Agent, Channel, EVERYONE, Event, HISTORY_LIMIT, HOLD_MINUTES_MAX, Hold, HubInfo, Inbox, Join,
+    Message, ReadInbox, ReadMessage, Refusal, Register, Release, Retire, Retired, Send, SignIn,
+    Take, Taken, check_channel, check_hold, check_name,
 };
-use serde::Deserialize;
 use tokio::sync::{broadcast, watch};
 use tokio_stream::{Stream, wrappers::BroadcastStream};
 use tower_http::services::ServeDir;
@@ -63,7 +61,7 @@ pub fn now() -> u64 {
 
 /// Why a request was refused, and its status.
 #[derive(Debug)]
-pub struct Refused(StatusCode, String);
+pub struct Refused(pub(crate) StatusCode, pub(crate) String);
 
 impl IntoResponse for Refused {
     fn into_response(self) -> Response {
@@ -384,25 +382,7 @@ impl Hub {
 
 /// The hub's routes, and `dashboard`'s files at every other path.
 pub fn router(hub: Arc<Hub>, dashboard: impl Into<Dashboard>) -> Router {
-    let routes = Router::new()
-        .route(AGENTS, get(agents).post(register))
-        .route(MESSAGES, get(history).post(send))
-        .route(INBOX, post(read_inbox))
-        .route(protocol::ACK, post(acknowledge))
-        .route("/api/health", get(health))
-        .route(READ, post(read_message))
-        .route(RETIRE, post(retire))
-        .route(protocol::NOTICE, get(notice))
-        .route(protocol::BINARY, get(binary))
-        .route(HOLDS, get(holds).post(take))
-        .route(RELEASE, post(release))
-        .route(CHANNELS, get(channels).post(join))
-        .route(LEAVE, post(leave))
-        .route(BROADCAST, post(broadcast))
-        .route(PERSON, post(sign_in))
-        .route(HUB, get(info))
-        .route(STOP, post(stop))
-        .route(EVENTS, get(events));
+    let routes = api_routes().finish();
     let routes = match dashboard.into() {
         Dashboard::Embedded => routes.fallback(embedded),
         Dashboard::Dir(dir) => routes.fallback_service(ServeDir::new(dir)),
@@ -410,6 +390,33 @@ pub fn router(hub: Arc<Hub>, dashboard: impl Into<Dashboard>) -> Router {
     routes
         .layer(axum::middleware::from_fn(protocol_header))
         .with_state(hub)
+}
+
+/// The actual registry is checked against protocol::endpoints::ALL as sets.
+pub(crate) fn api_routes() -> Routes {
+    Routes::new()
+        .get(&api::AGENTS, agents)
+        .post(&api::REGISTER, register)
+        .get(&api::HISTORY, history)
+        .post(&api::SEND, send)
+        .post(&api::INBOX, read_inbox)
+        .post(&api::ACK, acknowledge)
+        .get(&api::HEALTH, health)
+        .post(&api::READ, read_message)
+        .post(&api::RETIRE, retire)
+        .get_variants(&api::NOTICE, &api::NOTICE_SNAPSHOT, notice, notice_snapshot)
+        .download(&api::BINARY, binary)
+        .get(&api::HOLDS, holds)
+        .post(&api::TAKE, take)
+        .post(&api::RELEASE, release)
+        .get(&api::CHANNELS, channels)
+        .post(&api::JOIN, join)
+        .post(&api::LEAVE, leave)
+        .post(&api::BROADCAST, broadcast)
+        .post(&api::PERSON, sign_in)
+        .get(&api::HUB, info)
+        .post_empty(&api::STOP, stop)
+        .stream(&api::EVENTS, events)
 }
 
 /// A file of the dashboard kept in this binary, or that there's none.
@@ -424,13 +431,12 @@ async fn protocol_header(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
-    let claimed = request.headers().get(protocol::PROTOCOL_HEADER);
-    let version = match claimed {
-        None => Some(1),
-        Some(value) => value.to_str().ok().and_then(|v| v.parse::<u32>().ok()),
-    };
-    if version != Some(protocol::PROTOCOL) {
-        let mut response = Refused(StatusCode::UPGRADE_REQUIRED, format!("This hub speaks protocol {}; this client claims {}. Upgrade the client: cross-agent-message upgrade-self", protocol::PROTOCOL, version.map_or("invalid".to_string(), |v|v.to_string()))).into_response();
+    // EventSource's query claim is checked by the typed stream adapter,
+    // where it can be compared with any header before opening a watch.
+    if request.uri().path() != api::EVENTS.route.path
+        && let Err(refused) = crate::routes::protocol(request.headers(), None)
+    {
+        let mut response = refused.into_response();
         response.headers_mut().insert(
             protocol::PROTOCOL_HEADER,
             axum::http::HeaderValue::from_static("1"),
@@ -473,7 +479,7 @@ async fn protocol_header(
     response
 }
 
-async fn health(State(hub): State<Arc<Hub>>) -> Result<Json<String>, Refused> {
+async fn health(State(hub): State<Arc<Hub>>, _: Query<()>) -> Result<Json<String>, Refused> {
     hub.store().health()?;
     Ok(Json(BUILD.to_string()))
 }
@@ -500,20 +506,26 @@ fn receipt(
     Ok(Some(receipt))
 }
 
-async fn binary() -> Result<Response, Refused> {
+async fn binary(
+    _: State<Arc<Hub>>,
+    _: Query<()>,
+) -> Result<(axum::http::HeaderMap, Vec<u8>), Refused> {
     let binary = crate::updates::binary()
         .map_err(|reason| Refused(StatusCode::SERVICE_UNAVAILABLE, reason.to_string()))?;
-    Ok((
-        [
-            ("content-type", "application/octet-stream"),
-            ("x-content-sha256", binary.sha256.as_str()),
-        ],
-        binary.bytes.clone(),
-    )
-        .into_response())
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        "content-type",
+        axum::http::HeaderValue::from_static("application/octet-stream"),
+    );
+    headers.insert(
+        "x-content-sha256",
+        axum::http::HeaderValue::from_str(&binary.sha256)
+            .map_err(|error| Refused(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()))?,
+    );
+    Ok((headers, binary.bytes.clone()))
 }
 
-async fn agents(State(hub): State<Arc<Hub>>) -> Result<Json<Vec<Agent>>, Refused> {
+async fn agents(State(hub): State<Arc<Hub>>, _: Query<()>) -> Result<Json<Vec<Agent>>, Refused> {
     let _lifecycle = hub.lifecycle();
     hub.forget(now())?;
     let agents = hub.store().agents()?;
@@ -534,6 +546,7 @@ async fn agents(State(hub): State<Arc<Hub>>) -> Result<Json<Vec<Agent>>, Refused
 
 async fn register(
     State(hub): State<Arc<Hub>>,
+    _headers: axum::http::HeaderMap,
     Json(agent): Json<Register>,
 ) -> Result<Json<Agent>, Refused> {
     let _lifecycle = hub.lifecycle();
@@ -590,6 +603,7 @@ fn check_key(hub: &Hub, key: &str) -> Result<(), Refused> {
 /// as: theirs from then on, where no agent has it.
 async fn sign_in(
     State(hub): State<Arc<Hub>>,
+    _headers: axum::http::HeaderMap,
     Json(sign_in): Json<SignIn>,
 ) -> Result<Json<Agent>, Refused> {
     let _lifecycle = hub.lifecycle();
@@ -616,15 +630,9 @@ async fn sign_in(
     Ok(Json(agent))
 }
 
-#[derive(Deserialize)]
-struct HistoryQuery {
-    agent: Option<String>,
-    limit: Option<u32>,
-}
-
 async fn history(
     State(hub): State<Arc<Hub>>,
-    Query(query): Query<HistoryQuery>,
+    Query(query): Query<api::History>,
 ) -> Result<Json<Vec<Message>>, Refused> {
     let limit = query.limit.unwrap_or(HISTORY_LIMIT).min(HISTORY_LIMIT);
     Ok(Json(hub.store().history(query.agent.as_deref(), limit)?))
@@ -694,7 +702,10 @@ fn channel_name(written: &str) -> Result<&str, Refused> {
     Ok(name)
 }
 
-async fn channels(State(hub): State<Arc<Hub>>) -> Result<Json<Vec<Channel>>, Refused> {
+async fn channels(
+    State(hub): State<Arc<Hub>>,
+    _: Query<()>,
+) -> Result<Json<Vec<Channel>>, Refused> {
     Ok(Json(hub.store().channels()?))
 }
 
@@ -719,6 +730,7 @@ fn joinable<'a>(hub: &Hub, join: &'a Join) -> Result<&'a str, Refused> {
 
 async fn join(
     State(hub): State<Arc<Hub>>,
+    _headers: axum::http::HeaderMap,
     Json(join): Json<Join>,
 ) -> Result<Json<Channel>, Refused> {
     let _lifecycle = hub.lifecycle();
@@ -733,6 +745,7 @@ async fn join(
 
 async fn leave(
     State(hub): State<Arc<Hub>>,
+    _headers: axum::http::HeaderMap,
     Json(join): Json<Join>,
 ) -> Result<Json<Channel>, Refused> {
     let _lifecycle = hub.lifecycle();
@@ -799,6 +812,7 @@ async fn broadcast(
 
 async fn read_inbox(
     State(hub): State<Arc<Hub>>,
+    _headers: axum::http::HeaderMap,
     Json(read): Json<ReadInbox>,
 ) -> Result<Json<Inbox>, Refused> {
     let _lifecycle = hub.lifecycle();
@@ -830,6 +844,7 @@ async fn read_inbox(
 
 async fn read_message(
     State(hub): State<Arc<Hub>>,
+    _headers: axum::http::HeaderMap,
     Json(read): Json<ReadMessage>,
 ) -> Result<Json<Message>, Refused> {
     let _lifecycle = hub.lifecycle();
@@ -855,6 +870,7 @@ async fn read_message(
 
 async fn acknowledge(
     State(hub): State<Arc<Hub>>,
+    _headers: axum::http::HeaderMap,
     Json(ack): Json<protocol::Acknowledge>,
 ) -> Result<Json<Vec<u64>>, Refused> {
     let _lifecycle = hub.lifecycle();
@@ -872,6 +888,7 @@ async fn acknowledge(
 
 async fn retire(
     State(hub): State<Arc<Hub>>,
+    _headers: axum::http::HeaderMap,
     Json(retire): Json<Retire>,
 ) -> Result<Json<Retired>, Refused> {
     let _lifecycle = hub.lifecycle();
@@ -900,41 +917,34 @@ async fn retire(
     Ok(Json(hub.retire(&retire.name, now())?))
 }
 
-#[derive(Deserialize)]
-struct NoticeQuery {
-    name: String,
-    #[serde(default)]
-    channels: bool,
-    #[serde(default)]
-    with_id: bool,
-}
-
 async fn notice(
     State(hub): State<Arc<Hub>>,
-    Query(query): Query<NoticeQuery>,
-) -> Result<Json<serde_json::Value>, Refused> {
+    Query(query): Query<api::NoticeQuery>,
+) -> Result<Json<Vec<(String, bool, u32)>>, Refused> {
+    let _lifecycle = hub.lifecycle();
+    hub.agent(&query.name)?;
+    Ok(Json(hub.store().notice(&query.name, query.channels)?))
+}
+
+async fn notice_snapshot(
+    State(hub): State<Arc<Hub>>,
+    Query(query): Query<api::NoticeSnapshot>,
+) -> Result<Json<protocol::Notice>, Refused> {
     let _lifecycle = hub.lifecycle();
     hub.agent(&query.name)?;
     let store = hub.store();
-    let senders = store.notice(&query.name, query.channels)?;
-    let value = if query.with_id {
-        serde_json::to_value(protocol::Notice {
-            senders,
-            newest_unread_id: store.newest_unread(&query.name, query.channels)?,
-        })
-    } else {
-        serde_json::to_value(senders)
-    }
-    .map_err(|e| bad_request(e.to_string()))?;
-    Ok(Json(value))
+    Ok(Json(protocol::Notice {
+        senders: store.notice(&query.name, query.channels)?,
+        newest_unread_id: store.newest_unread(&query.name, query.channels)?,
+    }))
 }
 
-async fn info(State(hub): State<Arc<Hub>>) -> Json<HubInfo> {
-    Json(hub.info())
+async fn info(State(hub): State<Arc<Hub>>, _: Query<()>) -> Result<Json<HubInfo>, Refused> {
+    Ok(Json(hub.info()))
 }
 
 /// Stops the hub a moment after it answers, so the answer is sent.
-async fn stop(State(hub): State<Arc<Hub>>) -> Json<HubInfo> {
+async fn stop(State(hub): State<Arc<Hub>>) -> Result<Json<HubInfo>, Refused> {
     let supervised = hub.supervised;
     let stop = hub.stop.clone();
     std::thread::spawn(move || {
@@ -956,10 +966,10 @@ async fn stop(State(hub): State<Arc<Hub>>) -> Json<HubInfo> {
             let _ = stop.send(true);
         }
     });
-    Json(hub.info())
+    Ok(Json(hub.info()))
 }
 
-async fn holds(State(hub): State<Arc<Hub>>) -> Result<Json<Vec<Hold>>, Refused> {
+async fn holds(State(hub): State<Arc<Hub>>, _: Query<()>) -> Result<Json<Vec<Hold>>, Refused> {
     Ok(Json(hub.store().held(hub.hold_clock())?))
 }
 
@@ -1005,12 +1015,6 @@ async fn release(
         .release_hold_receipted(&release, hub.hold_clock(), receipt.as_ref())?
         .map_err(|reason| Refused(StatusCode::CONFLICT, reason))?;
     Ok(Json(holds))
-}
-
-#[derive(Deserialize)]
-struct EventsQuery {
-    agent: Option<String>,
-    types: Option<String>,
 }
 
 /// While it's held, its agent is watching.
@@ -1069,37 +1073,32 @@ impl Drop for Watch {
 
 async fn events(
     State(hub): State<Arc<Hub>>,
-    Query(query): Query<EventsQuery>,
-) -> Result<Sse<impl Stream<Item = Result<sse::Event, Infallible>>>, Refused> {
+    Query(query): Query<api::Events>,
+) -> Result<AgentEvents, Refused> {
     // Subscribed before the watch starts, so the stream says it started.
     let events = BroadcastStream::new(hub.events.subscribe());
     let watch = query
         .agent
+        .clone()
         .map(|name| Watch::start(hub, name))
         .transpose()?;
-    Ok(Sse::new(AgentEvents {
+    Ok(AgentEvents {
         events,
         watch,
         ended: false,
-        types: query
-            .types
-            .unwrap_or_else(|| "sent,read,agent".to_string())
-            .split(',')
-            .map(str::to_string)
-            .collect(),
+        query,
     })
-    .keep_alive(KeepAlive::default()))
 }
 
 struct AgentEvents {
     events: BroadcastStream<Event>,
     watch: Option<Watch>,
     ended: bool,
-    types: Vec<String>,
+    query: api::Events,
 }
 
 impl Stream for AgentEvents {
-    type Item = Result<sse::Event, Infallible>;
+    type Item = Result<Event, Infallible>;
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -1147,14 +1146,13 @@ impl Stream for AgentEvents {
             if matches!(event, Event::Restarting) {
                 self.ended = true;
             }
-            if !self.types.iter().any(|kind| kind == event.kind()) {
+            if !self.query.accepts(&event) {
                 if self.ended {
                     return Poll::Ready(None);
                 }
                 continue;
             }
-            let json = serde_json::to_string(&event).expect("an event is JSON");
-            return Poll::Ready(Some(Ok(sse::Event::default().data(json))));
+            return Poll::Ready(Some(Ok(event)));
         }
     }
 }
@@ -1426,7 +1424,10 @@ mod tests {
             events,
             watch: Some(watch),
             ended: false,
-            types: vec!["sent".to_string(), "retired".to_string()],
+            query: api::Events {
+                types: Some(vec!["sent".to_string(), "retired".to_string()]),
+                ..Default::default()
+            },
         };
         hub.retire("a", now()).unwrap();
         let agent = hub.store().agent("a").unwrap().unwrap();
