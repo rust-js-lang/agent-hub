@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -114,6 +115,81 @@ def check(server, client, label):
             stop_process(process)
 
 
+def check_supervised_upgrades(current, previous):
+    help_text = subprocess.check_output([previous, "--help"], text=True)
+    if not any(line.strip().startswith("upgrade ") for line in help_text.splitlines()):
+        print("SKIP: previous release predates supervised upgrade commands")
+        return
+    with tempfile.TemporaryDirectory(prefix="cam-mix-", dir="/tmp") as directory:
+        root = Path(directory)
+        installed = root / "cross-agent-message"
+        shutil.copy2(current, installed)
+        database = root / "hub.db"
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        url = f"http://127.0.0.1:{port}"
+        env = {**os.environ, "CROSS_AGENT_HUB": url, "CROSS_AGENT_STATE_DIR": directory}
+        process = subprocess.Popen([installed, "serve", "--db", database, "--port", str(port)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env, start_new_session=True)
+        def info():
+            with urllib.request.urlopen(url + "/api/hub", timeout=2) as response:
+                return json.load(response)
+        def run(binary, *args):
+            result = subprocess.run([binary, *args], env=env, text=True, capture_output=True, timeout=30)
+            assert result.returncode == 0, result.stderr
+            assert "could not announce upgrade" not in result.stderr, result.stderr
+            return result.stdout
+        def upgrade(client, image):
+            expected = json.loads(subprocess.check_output([image, "build-info"], text=True))
+            run(client, "upgrade", image, "--db", str(database))
+            actual = info()
+            assert actual["build"] == expected["build"] and actual["version"] == expected["version"]
+            config = json.loads(database.with_suffix(".worker.json").read_text())
+            assert Path(config["worker_path"]) == installed.resolve()
+        try:
+            wait_for(lambda: info().get("supervised"))
+            run(previous, "agents", "--as", "skew-a")
+            run(previous, "agents", "--as", "skew-b")
+            run(previous, "send", "--as", "skew-a", "skew-b", "supervised version-skew message")
+            run(previous, "hold", "--as", "skew-a", "skew-check")
+            upgrade(previous, current)  # Previous client uses the short legacy socket aliases.
+            upgrade(current, previous)  # Previous worker reports its older readiness format.
+            upgrade(current, current)
+            assert run(previous, "inbox", "--as", "skew-b").count("supervised version-skew message") == 1
+            assert "skew-check" in run(current, "holds", "--as", "skew-a")
+            print("PASS: previous client upgrades current supervisor; previous/current workers round-trip at one installed path")
+        finally:
+            stop_process(process)
+
+    # New workers must refuse the old snapshot-path supervisor before opening
+    # the live DB, so an older upgrade command cannot silently reintroduce #6.
+    with tempfile.TemporaryDirectory(prefix="cam-old-sup-", dir="/tmp") as directory:
+        root = Path(directory)
+        installed = root / "cross-agent-message"
+        shutil.copy2(previous, installed)
+        database = root / "hub.db"
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        url = f"http://127.0.0.1:{port}"
+        env = {**os.environ, "CROSS_AGENT_HUB": url, "CROSS_AGENT_STATE_DIR": directory}
+        process = subprocess.Popen([installed, "serve", "--db", database, "--port", str(port)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env, start_new_session=True)
+        def info():
+            with urllib.request.urlopen(url + "/api/hub", timeout=2) as response:
+                return json.load(response)
+        try:
+            wait_for(lambda: info().get("supervised"))
+            before = info()
+            rejected = subprocess.run([previous, "upgrade", current, "--db", database], env=env, text=True, capture_output=True, timeout=30)
+            assert rejected.returncode != 0 and "serve --replace" in rejected.stderr, rejected.stderr
+            assert info()["version"] == before["version"] and info()["build"] == before["build"]
+            print("PASS: old snapshot supervisor refuses the new worker with cold-migration instructions and rolls back")
+        finally:
+            stop_process(process)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--current", required=True)
@@ -123,3 +199,4 @@ if __name__ == "__main__":
     check(current, previous, "previous client -> current hub")
     check(previous, current, "current client -> previous hub")
     check_migrated_data(current, previous)
+    check_supervised_upgrades(current, previous)

@@ -25,8 +25,7 @@ jobs:
         shell: bash
         run: |
           previous=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo 8cdea18)
-          mkdir -p target/compat-source
-          git archive "$previous" | tar -x -C target/compat-source
+          git worktree add --detach target/compat-source "$previous"
           rm -rf target/compat-source/rust-js
           ln -s "$PWD/rust-js" target/compat-source/rust-js
           cargo build --release --locked --manifest-path target/compat-source/Cargo.toml -p cross-agent-message --target-dir target/compat-build
