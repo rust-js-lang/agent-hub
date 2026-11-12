@@ -130,7 +130,14 @@ test("the person signs in with the hub's key and writes to an agent, who reads i
   await signIn(page, tu, "0000-0000-0000");
   await expect(compose(page).getByRole("alert")).toContainText("that isn't this hub's key");
 
-  await signIn(page, tu, hubKey());
+  // Typed as a phone's number keys type it, digits alone: the page writes
+  // the dashes.
+  const key = hubKey();
+  await compose(page).getByLabel("Your name").fill(tu);
+  await compose(page).getByLabel("The hub's key").fill("");
+  await compose(page).getByLabel("The hub's key").pressSequentially(key.replaceAll("-", ""));
+  await expect(compose(page).getByLabel("The hub's key")).toHaveValue(key);
+  await compose(page).getByRole("button", { name: "Sign in" }).click();
   await expect(compose(page)).toContainText(`Writing as ${tu}.`);
   await expect(agentButton(page, tu)).toContainText("the person");
 

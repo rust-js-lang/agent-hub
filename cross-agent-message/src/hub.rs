@@ -255,9 +255,12 @@ async fn register(
     Ok(Json(agent))
 }
 
-/// Whether `key` is the hub's, which the person signs in and sends with.
+/// Whether `key` is the hub's, which the person signs in and sends with:
+/// by its digits alone, as a phone's number keys type it, with no dash.
 fn check_key(hub: &Hub, key: &str) -> Result<(), Refused> {
-    if key.trim() == hub.store().person_key()? {
+    let digits = |key: &str| -> String { key.chars().filter(char::is_ascii_digit).collect() };
+    let given = digits(key);
+    if !given.is_empty() && given == digits(&hub.store().person_key()?) {
         return Ok(());
     }
     Err(Refused(

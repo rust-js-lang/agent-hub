@@ -8,7 +8,22 @@
 import { useState } from "react";
 
 import * as Api from "./api.js";
-import { $trim } from "@rust-js/runtime";
+import { $chunks, $trim } from "@rust-js/runtime";
+
+/**
+ * The key as it's typed, its digits in groups of four, `4821-7730-1182`:
+ * a phone's number keys have no dash, so the page writes them.
+ */
+function grouped(typed) {
+  const digits = Array.from(
+    Array.from(typed)
+      .values()
+      .filter((c) => /^[0-9]$/.test(c))
+      .take(12),
+  );
+  const groups = $chunks(digits, 4).map((group) => group.slice().join(""));
+  return groups.join("-");
+}
 
 export function Compose({ agents, selected, me, onMe }) {
   const [name, setName] = useState(() => "");
@@ -37,7 +52,7 @@ export function Compose({ agents, selected, me, onMe }) {
       <section className="compose" aria-label="Write to the agents">
         <h2>Write to the agents</h2>
         <p className="hint">
-          Sign in once on this device, with a name to write as and the hub's key:{" "}
+          Sign in once on this device, with a name to write as and the hub's key, twelve digits:{" "}
           <code>cross-agent-message key</code> prints it on the hub's machine.
         </p>
         <div className="fields">
@@ -51,10 +66,10 @@ export function Compose({ agents, selected, me, onMe }) {
           />
           <input
             aria-label="The hub's key"
-            placeholder="The hub's key"
+            placeholder="The hub's key, 12 digits"
             inputMode="numeric"
             value={key}
-            onChange={(e) => setKey(e.target.value)}
+            onChange={(e) => setKey(grouped(e.target.value))}
           />
           <button type="button" className="send" onClick={signIn}>
             Sign in

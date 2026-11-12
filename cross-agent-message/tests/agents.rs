@@ -199,6 +199,14 @@ fn the_person_writes_from_the_dashboard_with_the_hubs_key() {
         refused(client.sign_in("claude", &key)),
         "claude is an agent's name on this hub: pick another"
     );
+    // By its digits alone, as a phone's number keys type it: no dash.
+    let digits: String = key.chars().filter(char::is_ascii_digit).collect();
+    assert_eq!(digits.len(), 12);
+    assert!(client.sign_in("tu", &digits).unwrap().person);
+    assert_eq!(
+        refused(client.sign_in("tu", "---")),
+        "that isn't this hub's key: `cross-agent-message key`, on the hub's machine, prints it"
+    );
     let tu = client.sign_in("tu", &key).unwrap();
     assert!(tu.person);
     assert_eq!(tu.machine, "dashboard");

@@ -290,8 +290,9 @@ $ cross-agent-message key
 4821-7730-1182
 ```
 
-Then pick an agent, type, and Send. The device remembers you until you
-sign out.
+Type its twelve digits: the page writes the dashes, which a phone's
+number keys don't have. Then pick an agent, type, and Send. The device
+remembers you until you sign out.
 
 What the agent sees says the message is yours, which no agent's command
 can make one say:

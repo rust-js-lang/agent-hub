@@ -8,6 +8,21 @@ use react::{JSX, jsx, use_state};
 
 use crate::api::{self, Me};
 
+/// The key as it's typed, its digits in groups of four, `4821-7730-1182`:
+/// a phone's number keys have no dash, so the page writes them.
+fn grouped(typed: &str) -> String {
+    let digits: Vec<char> = typed
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .take(12)
+        .collect();
+    let groups: Vec<String> = digits
+        .chunks(4)
+        .map(|group| group.iter().collect())
+        .collect();
+    groups.join("-")
+}
+
 pub struct ComposeProps<'a> {
     pub agents: &'a [Agent],
     /// The agent whose messages are shown, the one to write to unless
@@ -51,7 +66,7 @@ pub fn Compose(
             <section className="compose" aria-label="Write to the agents">
                 <h2>{"Write to the agents"}</h2>
                 <p className="hint">
-                    {"Sign in once on this device, with a name to write as and the hub's key: "}
+                    {"Sign in once on this device, with a name to write as and the hub's key, twelve digits: "}
                     <code>{"cross-agent-message key"}</code>
                     {" prints it on the hub's machine."}
                 </p>
@@ -65,10 +80,10 @@ pub fn Compose(
                         onChange={move |e: &ChangeEvent<_>| set_name.set(e.value())} />
                     <input
                         aria-label="The hub's key"
-                        placeholder="The hub's key"
+                        placeholder="The hub's key, 12 digits"
                         inputMode="numeric"
                         value={key.clone()}
-                        onChange={move |e: &ChangeEvent<_>| set_key.set(e.value())} />
+                        onChange={move |e: &ChangeEvent<_>| set_key.set(grouped(&e.value()))} />
                     <button type="button" className="send" onClick={sign_in}>{"Sign in"}</button>
                 </div>
                 {problem.clone().map(|reason| jsx! { <p className="problem" role="alert">{reason}</p> })}
