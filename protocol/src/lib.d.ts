@@ -38,6 +38,12 @@ export const HOLDS: string;
  */
 export const RELEASE: string;
 
+/**
+ * `POST` a [`SignIn`]: the person the agents work for signs in from the
+ * dashboard, with the hub's key. The hub answers with their [`Agent`].
+ */
+export const PERSON: string;
+
 /** `GET`: the hub itself, as a [`HubInfo`]: which build is running. */
 export const HUB: string;
 
@@ -70,6 +76,20 @@ export interface Agent {
     watching: boolean;
     /** Messages sent to it that it hasn't read. */
     unread: number;
+    /**
+     * Whether it's the person the agents work for, signed in from the
+     * dashboard with the hub's key: only the dashboard sends as it.
+     */
+    person: boolean;
+}
+
+/**
+ * The person signs in from the dashboard: the name they'll write as, and
+ * the hub's key, which `cross-agent-message key` prints on its machine.
+ */
+export interface SignIn {
+    name: string;
+    key: string;
 }
 
 /** An agent says who it is, and where it runs. */
@@ -83,6 +103,11 @@ export interface Send {
     from: string;
     to: string;
     body: string;
+    /**
+     * The hub's key, of a message the person sends from the dashboard;
+     * none of an agent's.
+     */
+    key?: string | undefined;
 }
 
 /** A message the hub stored. */
@@ -95,6 +120,11 @@ export interface Message {
     sentAt: bigint;
     /** When its recipient read it, if it has. */
     readAt?: bigint | undefined;
+    /**
+     * Whether the person sent it, from the dashboard with the hub's key:
+     * no agent's command sends one that says so.
+     */
+    person: boolean;
 }
 
 /** An agent reads its unread messages, at most `max` of them. */

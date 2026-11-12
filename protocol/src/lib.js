@@ -49,6 +49,12 @@ export const HOLDS = "/api/holds";
  */
 export const RELEASE = "/api/holds/release";
 
+/**
+ * `POST` a [`SignIn`]: the person the agents work for signs in from the
+ * dashboard, with the hub's key. The hub answers with their [`Agent`].
+ */
+export const PERSON = "/api/person";
+
 /** `GET`: the hub itself, as a [`HubInfo`]: which build is running. */
 export const HUB = "/api/hub";
 
@@ -83,6 +89,8 @@ export function agentSerialize_serialize(agent, json) {
   json.bool(agent.watching);
   json.key("unread");
   json.int(agent.unread);
+  json.key("person");
+  json.bool(agent.person);
   json.endObject();
 }
 
@@ -95,14 +103,40 @@ export function agentDeserialize_deserialize(json) {
       ["lastSeen", $json.u64],
       ["watching", $json.bool],
       ["unread", $json.u32],
+      ["person", $json.bool],
     ],
-    ([name, machine, lastSeen, watching, unread]) => ({
+    ([name, machine, lastSeen, watching, unread, person]) => ({
       name,
       machine,
       lastSeen,
       watching,
       unread,
+      person,
     }),
+  );
+}
+
+/**
+ * The person signs in from the dashboard: the name they'll write as, and
+ * the hub's key, which `cross-agent-message key` prints on its machine.
+ */
+export function signInSerialize_serialize(signIn, json) {
+  json.beginObject();
+  json.key("name");
+  json.string(signIn.name);
+  json.key("key");
+  json.string(signIn.key);
+  json.endObject();
+}
+
+export function signInDeserialize_deserialize(json) {
+  return json.struct(
+    "struct SignIn",
+    [
+      ["name", $json.string],
+      ["key", $json.string],
+    ],
+    ([name, key]) => ({ name, key }),
   );
 }
 
@@ -136,6 +170,12 @@ export function sendSerialize_serialize(send, json) {
   json.string(send.to);
   json.key("body");
   json.string(send.body);
+  json.key("key");
+  if (send.key == null) {
+    json.null();
+  } else {
+    json.string(send.key);
+  }
   json.endObject();
 }
 
@@ -146,8 +186,9 @@ export function sendDeserialize_deserialize(json) {
       ["from", $json.string],
       ["to", $json.string],
       ["body", $json.string],
+      ["key", $json.option($json.string)],
     ],
-    ([from, to, body]) => ({ from, to, body }),
+    ([from, to, body, key]) => ({ from, to, body, key }),
   );
 }
 
@@ -170,6 +211,8 @@ export function messageSerialize_serialize(message, json) {
   } else {
     json.int(message.readAt);
   }
+  json.key("person");
+  json.bool(message.person);
   json.endObject();
 }
 
@@ -183,8 +226,17 @@ export function messageDeserialize_deserialize(json) {
       ["body", $json.string],
       ["sentAt", $json.u64],
       ["readAt", $json.option($json.u64)],
+      ["person", $json.bool],
     ],
-    ([id, from, to, body, sentAt, readAt]) => ({ id, from, to, body, sentAt, readAt }),
+    ([id, from, to, body, sentAt, readAt, person]) => ({
+      id,
+      from,
+      to,
+      body,
+      sentAt,
+      readAt,
+      person,
+    }),
   );
 }
 

@@ -3,6 +3,8 @@
 
 use std::path::Path;
 
+use std::hash::{BuildHasher, Hasher};
+
 use protocol::{Agent, Hold, Inbox, Message, Register, Send};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
@@ -25,6 +27,10 @@ const SCHEMA: &str = "
         read_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS unread ON messages (recipient, read_at, id);
+    CREATE TABLE IF NOT EXISTS settings (
+        name TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS holds (
         name TEXT PRIMARY KEY,
         holder TEXT NOT NULL,
@@ -33,13 +39,33 @@ const SCHEMA: &str = "
     );
 ";
 
-const MESSAGE_COLUMNS: &str = "id, sender, recipient, body, sent_at, read_at";
+const MESSAGE_COLUMNS: &str = "id, sender, recipient, body, sent_at, read_at, person";
 
 const AGENT_QUERY: &str = "
     SELECT name, machine, last_seen,
-        (SELECT count(*) FROM messages WHERE recipient = agents.name AND read_at IS NULL)
+        (SELECT count(*) FROM messages WHERE recipient = agents.name AND read_at IS NULL),
+        person
     FROM agents
 ";
+
+/// Columns a store made by a build before this one lacks: who is the
+/// person, and which messages they sent.
+const ADDED: &[(&str, &str)] = &[("agents", "person"), ("messages", "person")];
+
+/// A key no one would guess, twelve digits in three groups, `4821-7730-1182`:
+/// of the randomness std seeds each `RandomState` with.
+fn new_key() -> String {
+    let random = || {
+        std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish()
+    };
+    let digits = format!(
+        "{:012}",
+        (random() ^ random().rotate_left(32)) % 1_000_000_000_000
+    );
+    format!("{}-{}-{}", &digits[..4], &digits[4..8], &digits[8..])
+}
 
 impl Store {
     /// The store in the file at `path`, made with its tables if it's new.
@@ -54,7 +80,51 @@ impl Store {
 
     fn with(db: Connection) -> rusqlite::Result<Store> {
         db.execute_batch(SCHEMA)?;
+        for (table, column) in ADDED {
+            let has: bool = db.query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info(?1) WHERE name = ?2",
+                params![table, column],
+                |row| row.get(0),
+            )?;
+            if !has {
+                db.execute_batch(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
+                ))?;
+            }
+        }
         Ok(Store { db })
+    }
+
+    /// The key the person signs in to the dashboard with, made the first
+    /// time it's asked and kept: what makes a message theirs.
+    pub fn person_key(&self) -> rusqlite::Result<String> {
+        let kept: Option<String> = self
+            .db
+            .query_row(
+                "SELECT value FROM settings WHERE name = 'person_key'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(key) = kept {
+            return Ok(key);
+        }
+        let key = new_key();
+        self.db.execute(
+            "INSERT INTO settings (name, value) VALUES ('person_key', ?1)",
+            [&key],
+        )?;
+        Ok(key)
+    }
+
+    /// `name` is the person, seen now on the dashboard.
+    pub fn see_person(&self, name: &str, now: u64) -> rusqlite::Result<()> {
+        self.db.execute(
+            "INSERT INTO agents (name, machine, last_seen, person) VALUES (?1, 'dashboard', ?2, 1)
+             ON CONFLICT (name) DO UPDATE SET machine = 'dashboard', last_seen = ?2, person = 1",
+            params![name, now],
+        )?;
+        Ok(())
     }
 
     /// The agent is seen now, on its machine.
@@ -81,11 +151,11 @@ impl Store {
         query.query_map([], agent)?.collect()
     }
 
-    /// Stores the message, sent now.
-    pub fn send(&self, send: &Send, now: u64) -> rusqlite::Result<Message> {
+    /// Stores the message, sent now, the person's where `person` says.
+    pub fn send(&self, send: &Send, now: u64, person: bool) -> rusqlite::Result<Message> {
         self.db.execute(
-            "INSERT INTO messages (sender, recipient, body, sent_at) VALUES (?1, ?2, ?3, ?4)",
-            params![send.from, send.to, send.body, now],
+            "INSERT INTO messages (sender, recipient, body, sent_at, person) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![send.from, send.to, send.body, now, person],
         )?;
         Ok(Message {
             id: self.db.last_insert_rowid() as u64,
@@ -94,6 +164,7 @@ impl Store {
             body: send.body.clone(),
             sent_at: now,
             read_at: None,
+            person,
         })
     }
 
@@ -179,6 +250,7 @@ fn agent(row: &Row) -> rusqlite::Result<Agent> {
         last_seen: row.get(2)?,
         watching: false,
         unread: row.get(3)?,
+        person: row.get(4)?,
     })
 }
 
@@ -190,6 +262,7 @@ fn message(row: &Row) -> rusqlite::Result<Message> {
         body: row.get(3)?,
         sent_at: row.get(4)?,
         read_at: row.get(5)?,
+        person: row.get(6)?,
     })
 }
 
@@ -210,8 +283,57 @@ mod tests {
             from: from.to_string(),
             to: to.to_string(),
             body: body.to_string(),
+            key: None,
         };
-        store.send(&send, now).unwrap()
+        store.send(&send, now, false).unwrap()
+    }
+
+    #[test]
+    fn the_persons_key_is_made_once_and_kept() {
+        let store = Store::in_memory().unwrap();
+        let key = store.person_key().unwrap();
+        assert_eq!(key.len(), 14);
+        assert!(
+            key.split('-')
+                .all(|group| group.len() == 4 && group.chars().all(|c| c.is_ascii_digit()))
+        );
+        assert_eq!(store.person_key().unwrap(), key);
+        assert_ne!(new_key(), new_key());
+
+        store.see_person("tu", 5).unwrap();
+        register(&store, "a", 6);
+        let tu = store.agent("tu").unwrap().unwrap();
+        assert!(tu.person);
+        assert_eq!(tu.machine, "dashboard");
+        assert!(!store.agent("a").unwrap().unwrap().person);
+        let sent = Send {
+            from: "tu".to_string(),
+            to: "a".to_string(),
+            body: "from me".to_string(),
+            key: None,
+        };
+        assert!(store.send(&sent, 7, true).unwrap().person);
+        assert!(store.history(None, 10).unwrap()[0].person);
+    }
+
+    #[test]
+    fn a_store_of_a_build_before_gains_what_was_added() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE agents (name TEXT PRIMARY KEY, machine TEXT NOT NULL, last_seen INTEGER NOT NULL);
+             CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL,
+                 recipient TEXT NOT NULL, body TEXT NOT NULL, sent_at INTEGER NOT NULL, read_at INTEGER);
+             INSERT INTO agents VALUES ('a', 'm1', 1), ('b', 'm1', 1);
+             INSERT INTO messages (sender, recipient, body, sent_at) VALUES ('a', 'b', 'old', 2);",
+        )
+        .unwrap();
+        let store = Store::with(db).unwrap();
+        assert!(!store.agent("a").unwrap().unwrap().person);
+        let history = store.history(None, 10).unwrap();
+        assert_eq!(
+            (history[0].body.as_str(), history[0].person),
+            ("old", false)
+        );
     }
 
     #[test]

@@ -7,6 +7,7 @@
  */
 
 import { AgentList } from "./agent_list.jsx";
+import { Compose } from "./compose.jsx";
 import { MessageList } from "./message_list.jsx";
 import { EVENTS } from "../../protocol/src/lib.js";
 import { useEffect, useState } from "react";
@@ -18,6 +19,8 @@ export function App() {
   const [selected, setSelected] = useState(undefined);
   const [live, setLive] = useState(false);
   const [problem, setProblem] = useState(undefined);
+  // The person, where they signed in on this device: they write here.
+  const [me, setMe] = useState(Api.me);
 
   // Every event says something changed: fetch the agents and the history
   // again, so the page is the hub's own answer, whatever it missed.
@@ -44,6 +47,20 @@ export function App() {
     return () => source.close();
   }, []);
 
+  // What's sent to the person is read once it's on their page: asked
+  // again of each change, as the hub's answer changes with it.
+  const holds = (me) =>
+    messages.some((message) => message.to === me.name && message.readAt == null);
+  const unread = me != null && holds(me);
+  useEffect(() => {
+    if (unread && me != null) {
+      const me$1 = me;
+      (async () => {
+        await Api.read(me$1);
+      })();
+    }
+  }, [unread]);
+
   const shown = messages.filter(
     (message) => selected == null || message.from === selected || message.to === selected,
   );
@@ -60,7 +77,10 @@ export function App() {
       )}
       <div className="layout">
         <AgentList agents={agents} selected={selected} onSelect={setSelected} />
-        <MessageList messages={shown} />
+        <div className="talk">
+          <Compose agents={agents} selected={selected} me={me} onMe={setMe} />
+          <MessageList messages={shown} />
+        </div>
       </div>
     </div>
   );

@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader};
 use anyhow::{Context, Result, bail};
 use protocol::{
     AGENTS, Agent, EVENTS, Event, HOLDS, HUB, Hold, HubInfo, INBOX, Inbox, MESSAGES, Message,
-    RELEASE, ReadInbox, Refusal, Register, Release, STOP, Send, Take, Taken,
+    PERSON, RELEASE, ReadInbox, Refusal, Register, Release, STOP, Send, SignIn, Take, Taken,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -105,6 +105,33 @@ impl Client {
                 from: from.to_string(),
                 to: to.to_string(),
                 body: body.to_string(),
+                key: None,
+            },
+        )
+    }
+
+    /// The person signs in as `name` with the hub's `key`, as the
+    /// dashboard does: their agent.
+    pub fn sign_in(&self, name: &str, key: &str) -> Result<Agent> {
+        self.post(
+            PERSON,
+            &SignIn {
+                name: name.to_string(),
+                key: key.to_string(),
+            },
+        )
+    }
+
+    /// The person's message, sent with the hub's `key`, as the dashboard
+    /// sends it.
+    pub fn send_as_person(&self, from: &str, to: &str, body: &str, key: &str) -> Result<Message> {
+        self.post(
+            MESSAGES,
+            &Send {
+                from: from.to_string(),
+                to: to.to_string(),
+                body: body.to_string(),
+                key: Some(key.to_string()),
             },
         )
     }

@@ -33,6 +33,10 @@ pub const HOLDS: &str = "/api/holds";
 /// [`Hold`]s still held.
 pub const RELEASE: &str = "/api/holds/release";
 
+/// `POST` a [`SignIn`]: the person the agents work for signs in from the
+/// dashboard, with the hub's key. The hub answers with their [`Agent`].
+pub const PERSON: &str = "/api/person";
+
 /// `GET`: the hub itself, as a [`HubInfo`]: which build is running.
 pub const HUB: &str = "/api/hub";
 
@@ -63,6 +67,17 @@ pub struct Agent {
     pub watching: bool,
     /// Messages sent to it that it hasn't read.
     pub unread: u32,
+    /// Whether it's the person the agents work for, signed in from the
+    /// dashboard with the hub's key: only the dashboard sends as it.
+    pub person: bool,
+}
+
+/// The person signs in from the dashboard: the name they'll write as, and
+/// the hub's key, which `cross-agent-message key` prints on its machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignIn {
+    pub name: String,
+    pub key: String,
 }
 
 /// An agent says who it is, and where it runs.
@@ -78,6 +93,9 @@ pub struct Send {
     pub from: String,
     pub to: String,
     pub body: String,
+    /// The hub's key, of a message the person sends from the dashboard;
+    /// none of an agent's.
+    pub key: Option<String>,
 }
 
 /// A message the hub stored.
@@ -92,6 +110,9 @@ pub struct Message {
     pub sent_at: u64,
     /// When its recipient read it, if it has.
     pub read_at: Option<u64>,
+    /// Whether the person sent it, from the dashboard with the hub's key:
+    /// no agent's command sends one that says so.
+    pub person: bool,
 }
 
 /// An agent reads its unread messages, at most `max` of them.
@@ -246,12 +267,13 @@ mod tests {
             body: "hi".to_string(),
             sent_at: 1,
             read_at: None,
+            person: false,
         };
         let event = Event::Sent { message };
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"sent","message":{"id":7,"from":"a","to":"b","body":"hi","sentAt":1,"readAt":null}}"#
+            r#"{"type":"sent","message":{"id":7,"from":"a","to":"b","body":"hi","sentAt":1,"readAt":null,"person":false}}"#
         );
         assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), event);
     }

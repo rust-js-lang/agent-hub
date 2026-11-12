@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { agent, agentName, cli, watch } from "./agents";
+import { agent, agentName, cli, hubKey, watch } from "./agents";
 
 /** The dashboard, connected to the hub's live events. */
 async function open(page: import("@playwright/test").Page) {
@@ -107,4 +107,59 @@ test("the hub refuses a message to an agent it hasn't seen, and nothing is shown
   expect(() => cli("send", "--as", codex, nobody, "Lost?")).toThrow(/no agent is named/);
   await expect(agentButton(page, codex)).toBeVisible();
   await expect(messages(page).filter({ hasText: "Lost?" })).toHaveCount(0);
+});
+
+function compose(page: import("@playwright/test").Page) {
+  return page.getByRole("region", { name: "Write to the agents" });
+}
+
+/** Signs the person in on this page, as `name`, with `key`. */
+async function signIn(page: import("@playwright/test").Page, name: string, key: string) {
+  await compose(page).getByLabel("Your name").fill(name);
+  await compose(page).getByLabel("The hub's key").fill(key);
+  await compose(page).getByRole("button", { name: "Sign in" }).click();
+}
+
+test("the person signs in with the hub's key and writes to an agent, who reads it as theirs", async ({ page }) => {
+  const claude = agent("claude");
+  const codex = agent("codex");
+  const tu = agentName("tu");
+  await open(page);
+
+  // A key that isn't the hub's signs no one in.
+  await signIn(page, tu, "0000-0000-0000");
+  await expect(compose(page).getByRole("alert")).toContainText("that isn't this hub's key");
+
+  await signIn(page, tu, hubKey());
+  await expect(compose(page)).toContainText(`Writing as ${tu}.`);
+  await expect(agentButton(page, tu)).toContainText("the person");
+
+  // Sent to the one picked: nothing is sent while there's nothing to say.
+  await expect(compose(page).getByRole("button", { name: "Send" })).toBeDisabled();
+  await compose(page).getByLabel("To").selectOption(claude);
+  await compose(page).getByLabel("Message").fill("Ship it when the tests pass.");
+  await compose(page).getByRole("button", { name: "Send" }).click();
+
+  const message = messages(page).filter({ hasText: "Ship it when the tests pass." });
+  await expect(message).toHaveCount(1);
+  await expect(message.locator(".from")).toHaveText(tu);
+  await expect(message.locator(".to")).toHaveText(claude);
+  await expect(message.locator(".badge")).toHaveText("the person");
+  await expect(compose(page).getByLabel("Message")).toHaveValue("");
+
+  // The agent reads who it's from; no agent's command writes as them.
+  expect(cli("inbox", "--as", claude)).toContain(`from ${tu}, the person`);
+  expect(() => cli("send", "--as", tu, codex, "As them.")).toThrow(/is the person's name on this hub/);
+
+  // An answer to the person is read once it's on their page.
+  cli("send", "--as", claude, tu, "Shipping.");
+  const answer = messages(page).filter({ hasText: "Shipping." });
+  await expect(answer.locator(".state")).toContainText("read ");
+  await expect(answer).not.toHaveClass(/\bunread\b/);
+
+  // Signed in on this device still, after a reload; and out when asked.
+  await page.reload();
+  await expect(compose(page)).toContainText(`Writing as ${tu}.`);
+  await compose(page).getByRole("button", { name: "Sign out" }).click();
+  await expect(compose(page).getByRole("button", { name: "Sign in" })).toBeVisible();
 });

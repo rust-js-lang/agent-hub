@@ -15,8 +15,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use protocol::{
     AGENTS, Agent, EVENTS, Event, HISTORY_LIMIT, HOLD_MINUTES_MAX, HOLDS, HUB, Hold, HubInfo,
-    INBOX, Inbox, MESSAGES, Message, RELEASE, ReadInbox, Refusal, Register, Release, STOP, Send,
-    Take, Taken, check_hold, check_name,
+    INBOX, Inbox, MESSAGES, Message, PERSON, RELEASE, ReadInbox, Refusal, Register, Release, STOP,
+    Send, SignIn, Take, Taken, check_hold, check_name,
 };
 use serde::Deserialize;
 use tokio::sync::{broadcast, watch};
@@ -207,6 +207,7 @@ pub fn router(hub: Arc<Hub>, dashboard: PathBuf) -> Router {
         .route(INBOX, post(read_inbox))
         .route(HOLDS, get(holds).post(take))
         .route(RELEASE, post(release))
+        .route(PERSON, post(sign_in))
         .route(HUB, get(info))
         .route(STOP, post(stop))
         .route(EVENTS, get(events))
@@ -232,8 +233,63 @@ async fn register(
     Json(agent): Json<Register>,
 ) -> Result<Json<Agent>, Refused> {
     check_name(&agent.name).map_err(bad_request)?;
+    // The person's name is theirs: no agent's command takes it.
+    if hub
+        .store()
+        .agent(&agent.name)?
+        .is_some_and(|known| known.person)
+    {
+        return Err(Refused(
+            StatusCode::CONFLICT,
+            format!(
+                "{} is the person's name on this hub, who signs in from the dashboard: pick another",
+                agent.name
+            ),
+        ));
+    }
     hub.store().see(&agent, now())?;
     let agent = hub.agent(&agent.name)?;
+    hub.tell(Event::Agent {
+        agent: agent.clone(),
+    });
+    Ok(Json(agent))
+}
+
+/// Whether `key` is the hub's, which the person signs in and sends with.
+fn check_key(hub: &Hub, key: &str) -> Result<(), Refused> {
+    if key.trim() == hub.store().person_key()? {
+        return Ok(());
+    }
+    Err(Refused(
+        StatusCode::FORBIDDEN,
+        "that isn't this hub's key: `cross-agent-message key`, on the hub's machine, prints it"
+            .to_string(),
+    ))
+}
+
+/// The person signs in from the dashboard, under the name they'll write
+/// as: theirs from then on, where no agent has it.
+async fn sign_in(
+    State(hub): State<Arc<Hub>>,
+    Json(sign_in): Json<SignIn>,
+) -> Result<Json<Agent>, Refused> {
+    check_name(&sign_in.name).map_err(bad_request)?;
+    check_key(&hub, &sign_in.key)?;
+    if hub
+        .store()
+        .agent(&sign_in.name)?
+        .is_some_and(|known| !known.person)
+    {
+        return Err(Refused(
+            StatusCode::CONFLICT,
+            format!(
+                "{} is an agent's name on this hub: pick another",
+                sign_in.name
+            ),
+        ));
+    }
+    hub.store().see_person(&sign_in.name, now())?;
+    let agent = hub.agent(&sign_in.name)?;
     hub.tell(Event::Agent {
         agent: agent.clone(),
     });
@@ -258,8 +314,32 @@ async fn send(
     State(hub): State<Arc<Hub>>,
     Json(send): Json<Send>,
 ) -> Result<Json<Message>, Refused> {
-    hub.agent(&send.from)?;
+    let from = hub.agent(&send.from)?;
     hub.agent(&send.to)?;
+    // A message is the person's where it comes with the hub's key, from
+    // the name they signed in under; and nothing else is sent as them.
+    let person = match &send.key {
+        Some(key) => {
+            check_key(&hub, key)?;
+            if !from.person {
+                return Err(bad_request(format!(
+                    "{} isn't the person's name: sign in from the dashboard first",
+                    send.from
+                )));
+            }
+            true
+        }
+        None if from.person => {
+            return Err(Refused(
+                StatusCode::FORBIDDEN,
+                format!(
+                    "{} is the person's name on this hub: only the dashboard, with the hub's key, sends as them",
+                    send.from
+                ),
+            ));
+        }
+        None => false,
+    };
     if send.from == send.to {
         return Err(bad_request(format!(
             "{} can't send a message to itself",
@@ -269,7 +349,7 @@ async fn send(
     if send.body.trim().is_empty() {
         return Err(bad_request("a message can't be empty".to_string()));
     }
-    let message = hub.store().send(&send, now())?;
+    let message = hub.store().send(&send, now(), person)?;
     hub.tell(Event::Sent {
         message: message.clone(),
     });

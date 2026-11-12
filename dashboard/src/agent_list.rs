@@ -31,7 +31,9 @@ pub fn AgentList(
                 .map(|agent| {
                     let name = agent.name.clone();
                     let chosen = selected == Some(agent.name.as_str());
-                    let state = if agent.watching {
+                    let state = if agent.person {
+                        "the person".to_string()
+                    } else if agent.watching {
                         "watching".to_string()
                     } else {
                         format!("seen {}", api::time(agent.last_seen))

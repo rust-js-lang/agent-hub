@@ -167,6 +167,72 @@ fn a_hold_is_one_agents_at_a_time() {
     );
 }
 
+/// A hub and its key, as `cross-agent-message key` reads it of its file.
+fn hub_with_key() -> (Client, String) {
+    let store = Store::in_memory().unwrap();
+    let key = store.person_key().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = hub::router(
+        Arc::new(Hub::new(store).unwrap()),
+        PathBuf::from("no-dashboard"),
+    );
+    thread::spawn(move || runtime.block_on(async { axum::serve(listener, app).await.unwrap() }));
+    (Client::new(&format!("http://{address}")), key)
+}
+
+#[test]
+fn the_person_writes_from_the_dashboard_with_the_hubs_key() {
+    let (client, key) = hub_with_key();
+    client.register("claude").unwrap();
+    let refused = |result: anyhow::Result<protocol::Agent>| result.unwrap_err().to_string();
+
+    // Signing in takes the hub's key, and a name no agent has.
+    assert_eq!(
+        refused(client.sign_in("tu", "0000-0000-0000")),
+        "that isn't this hub's key: `cross-agent-message key`, on the hub's machine, prints it"
+    );
+    assert_eq!(
+        refused(client.sign_in("claude", &key)),
+        "claude is an agent's name on this hub: pick another"
+    );
+    let tu = client.sign_in("tu", &key).unwrap();
+    assert!(tu.person);
+    assert_eq!(tu.machine, "dashboard");
+
+    // Their message says it's theirs; an agent's never does.
+    let sent = client
+        .send_as_person("tu", "claude", "Ship it.", &key)
+        .unwrap();
+    assert!(sent.person);
+    let inbox = client.read_inbox("claude", 20).unwrap();
+    assert!(inbox.messages[0].person);
+    let back = client.send("claude", "tu", "Shipping.").unwrap();
+    assert!(!back.person);
+
+    // Nothing else is sent as the person, and no agent takes their name.
+    let refused = |result: anyhow::Result<protocol::Message>| result.unwrap_err().to_string();
+    assert_eq!(
+        refused(client.send("tu", "claude", "As them, without the key.")),
+        "tu is the person's name on this hub: only the dashboard, with the hub's key, sends as them"
+    );
+    assert_eq!(
+        refused(client.send_as_person("tu", "claude", "A wrong key.", "1111-1111-1111")),
+        "that isn't this hub's key: `cross-agent-message key`, on the hub's machine, prints it"
+    );
+    assert_eq!(
+        refused(client.send_as_person("claude", "tu", "An agent with the key.", &key)),
+        "claude isn't the person's name: sign in from the dashboard first"
+    );
+    assert_eq!(
+        client.register("tu").unwrap_err().to_string(),
+        "tu is the person's name on this hub, who signs in from the dashboard: pick another"
+    );
+}
+
 #[test]
 fn the_hub_says_which_build_it_is() {
     let client = hub();

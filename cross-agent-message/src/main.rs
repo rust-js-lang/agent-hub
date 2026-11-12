@@ -120,6 +120,14 @@ enum Command {
         #[command(flatten)]
         me: Me,
     },
+    /// Print the hub's key, which the person the agents work for signs in
+    /// to the dashboard with, to write to them from there. Run it on the
+    /// hub's machine: it reads the hub's file, not the hub.
+    Key {
+        /// The SQLite file the hub keeps its history in.
+        #[arg(long, default_value_os_t = default_db())]
+        db: PathBuf,
+    },
 }
 
 fn default_db() -> PathBuf {
@@ -160,6 +168,7 @@ fn main() -> Result<()> {
         } => hold(&client, &me, &name, minutes, wait),
         Command::Release { me, hold: name } => release(&client, &me, &name),
         Command::Holds { me } => holds(&client, &me),
+        Command::Key { db } => key(&db),
     }
 }
 
@@ -249,6 +258,22 @@ async fn serve_at(addresses: &[SocketAddr], db: PathBuf) -> Result<()> {
     Ok(())
 }
 
+fn key(db: &std::path::Path) -> Result<()> {
+    if !db.exists() {
+        bail!(
+            "no hub has kept its history in {}: run this on the hub's machine, with its `--db` if it has one",
+            db.display()
+        );
+    }
+    let store = Store::open(db).with_context(|| format!("can't open {}", db.display()))?;
+    let key = store.person_key().context("can't read the hub's key")?;
+    println!("{key}");
+    eprintln!(
+        "The hub's key: the person signs in to the dashboard with it, once on each device. A message sent with it is marked theirs. Keep it from what isn't theirs."
+    );
+    Ok(())
+}
+
 /// `me` is seen now, and checked first.
 fn register(client: &Client, me: &Me) -> Result<Agent> {
     if let Err(reason) = check_name(&me.name) {
@@ -286,7 +311,9 @@ fn agents(client: &Client, me: &Me) -> Result<()> {
     }
     println!("\nAgents ({}):", others.len());
     for agent in others {
-        let state = if agent.watching {
+        let state = if agent.person {
+            "the person".to_string()
+        } else if agent.watching {
             "watching".to_string()
         } else {
             format!("seen {}", ago(now, agent.last_seen))
@@ -319,7 +346,7 @@ fn inbox(client: &Client, me: &Me, max: u32) -> Result<()> {
         println!(
             "Message {} from {}, {}:",
             message.id,
-            message.from,
+            sender(message),
             ago(now, message.sent_at)
         );
         println!("{}\n", message.body);
@@ -360,7 +387,8 @@ fn watch(client: &Client, me: &Me) -> Result<()> {
                 writeln!(
                     out,
                     "Message {} from {}: {preview}{more}",
-                    message.id, message.from
+                    message.id,
+                    sender(&message)
                 )?;
                 out.flush()?;
             }
@@ -388,6 +416,15 @@ fn watch(client: &Client, me: &Me) -> Result<()> {
         };
         writeln!(out, "The hub is back, build {build}. {unread}")?;
         out.flush()?;
+    }
+}
+
+/// Who sent `message`, as an agent reads it: its name, and that it's the
+/// person where the hub says so, who signed it with the hub's key.
+fn sender(message: &protocol::Message) -> String {
+    match message.person {
+        true => format!("{}, the person", message.from),
+        false => message.from.clone(),
     }
 }
 

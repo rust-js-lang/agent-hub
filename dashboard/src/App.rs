@@ -4,9 +4,11 @@
 
 mod agent_list;
 mod api;
+mod compose;
 mod message_list;
 
 use agent_list::AgentList;
+use compose::Compose;
 use js::spawn;
 use message_list::MessageList;
 use protocol::{Agent, EVENTS, Message};
@@ -19,6 +21,8 @@ pub fn App() -> JSX::Element {
     let (selected, set_selected) = use_state(|| None::<String>);
     let (live, set_live) = use_state(|| false);
     let (problem, set_problem) = use_state(|| None::<String>);
+    // The person, where they signed in on this device: they write here.
+    let (me, set_me) = use_state(api::me);
 
     // Every event says something changed: fetch the agents and the history
     // again, so the page is the hub's own answer, whatever it missed.
@@ -52,6 +56,24 @@ pub fn App() -> JSX::Element {
         Some(&()),
     );
 
+    // What's sent to the person is read once it's on their page: asked
+    // again of each change, as the hub's answer changes with it.
+    let unread = me.as_ref().is_some_and(|me| {
+        messages
+            .iter()
+            .any(|message| message.to == me.name && message.read_at.is_none())
+    });
+    use_effect(
+        move || {
+            if let (true, Some(me)) = (unread, me.clone()) {
+                spawn(Box::new(async move {
+                    let _ = api::read(&me).await;
+                }));
+            }
+        },
+        Some(&(unread,)),
+    );
+
     let shown: Vec<&Message> = messages
         .iter()
         .filter(|message| {
@@ -71,7 +93,10 @@ pub fn App() -> JSX::Element {
             {problem.clone().map(|reason| jsx! { <p className="problem" role="alert">{reason}</p> })}
             <div className="layout">
                 <AgentList agents={agents} selected={selected.as_deref()} onSelect={set_selected} />
-                <MessageList messages={shown} />
+                <div className="talk">
+                    <Compose agents={agents} selected={selected.as_deref()} me={me.as_ref()} onMe={set_me} />
+                    <MessageList messages={shown} />
+                </div>
             </div>
         </div>
     }

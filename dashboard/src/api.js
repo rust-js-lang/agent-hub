@@ -4,16 +4,25 @@
 
 import {
   AGENTS,
+  INBOX,
   MESSAGES,
+  PERSON,
   agentDeserialize_deserialize,
+  inboxDeserialize_deserialize,
   messageDeserialize_deserialize,
+  readInboxSerialize_serialize,
   refusalDeserialize_deserialize,
+  sendSerialize_serialize,
+  signInSerialize_serialize,
 } from "../../protocol/src/lib.js";
-import { $displayJsonError, $fromJson, $json, $settle } from "@rust-js/runtime";
+import { $displayJsonError, $fromJson, $json, $settle, $toJson, $try } from "@rust-js/runtime";
 
-/** The JSON the hub answers at `path`, or why there's none. */
-async function get(path, readT) {
-  const value = await $settle(window.fetch(path));
+/**
+ * The JSON the hub answers at `path`, asked as `init` says, or why
+ * there's none.
+ */
+async function ask(path, init, readT) {
+  const value = await $settle(window.fetch(path, init));
   if (value.TAG !== "Ok") {
     return { TAG: "Err", _0: "The hub can't be reached: is `cross-agent-message serve` running?" };
   }
@@ -33,19 +42,134 @@ async function get(path, readT) {
     : result;
 }
 
+/** The JSON the hub answers a `POST` of `body` to `path`. */
+async function post(path, body, readT, writeimpl_Serialize) {
+  const result = $toJson(body, writeimpl_Serialize, false);
+  const result$1 =
+    result.TAG === "Err"
+      ? { TAG: "Err", _0: `This page can't write what it sends: ${$displayJsonError(result._0)}` }
+      : result;
+  if (result$1.TAG === "Err") {
+    return result$1;
+  }
+  const json = result$1._0;
+  const headers = new Headers();
+  headers.append("content-type", "application/json");
+  const init = {
+    method: "POST",
+    headers,
+    body: json,
+  };
+  return await ask(path, init, readT);
+}
+
 /** Every agent, and the history, newest first. */
 export async function load() {
-  const result = await get(AGENTS, $json.vec(agentDeserialize_deserialize));
+  const result = await ask(AGENTS, undefined, $json.vec(agentDeserialize_deserialize));
   if (result.TAG === "Err") {
     return result;
   }
   const agents = result._0;
-  const result$1 = await get(MESSAGES, $json.vec(messageDeserialize_deserialize));
+  const result$1 = await ask(MESSAGES, undefined, $json.vec(messageDeserialize_deserialize));
   if (result$1.TAG === "Err") {
     return result$1;
   }
   const messages = result$1._0;
   return { TAG: "Ok", _0: [agents, messages] };
+}
+
+const NAME = "cross-agent-message.name";
+const KEY = "cross-agent-message.key";
+
+/**
+ * Who signed in on this device before, if anyone: kept in the browser,
+ * where it may keep data.
+ */
+export function me() {
+  const result = $try(() => window.localStorage);
+  const storage = result.TAG === "Ok" ? result._0 : undefined;
+  if (storage == null) {
+    return;
+  }
+  const value = storage.getItem(NAME);
+  if (value != null) {
+    const value$1 = storage.getItem(KEY);
+    if (value$1 != null) {
+      return {
+        name: value,
+        key: value$1,
+      };
+    }
+  }
+  return;
+}
+
+/**
+ * Signs the person in as `name` with the hub's `key`, and remembers them
+ * on this device.
+ */
+export async function signIn(name, key) {
+  const signIn = {
+    name,
+    key,
+  };
+  const result = await post(
+    PERSON,
+    signIn,
+    agentDeserialize_deserialize,
+    signInSerialize_serialize,
+  );
+  if (result.TAG === "Err") {
+    return result;
+  }
+  const agent = result._0;
+  const me = {
+    name: agent.name,
+    key,
+  };
+  const localStorage = $try(() => window.localStorage);
+  if (localStorage.TAG === "Ok") {
+    const storage = localStorage._0;
+    try {
+      storage.setItem(NAME, me.name);
+    } catch {}
+    try {
+      storage.setItem(KEY, me.key);
+    } catch {}
+  }
+  return { TAG: "Ok", _0: me };
+}
+
+/** Forgets who signed in on this device. */
+export function signOut() {
+  let storage;
+  try {
+    storage = window.localStorage;
+  } catch {
+    return;
+  }
+  storage.removeItem(NAME);
+  storage.removeItem(KEY);
+}
+
+/** Sends `body` to `to` as the person. */
+export async function send(me, to, body) {
+  const send = {
+    from: me.name,
+    to,
+    body,
+    key: me.key,
+  };
+  return await post(MESSAGES, send, messageDeserialize_deserialize, sendSerialize_serialize);
+}
+
+/** The person has read what was sent to them: it's on the page. */
+export async function read(me) {
+  const read = {
+    name: me.name,
+    max: 100,
+  };
+  return await post(INBOX, read, inboxDeserialize_deserialize, readInboxSerialize_serialize);
 }
 
 /** A time in milliseconds since the Unix epoch, in the reader's locale. */

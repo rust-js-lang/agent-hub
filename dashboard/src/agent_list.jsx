@@ -20,7 +20,14 @@ export function AgentList({ agents, selected, onSelect }) {
       {agents.map((agent) => {
         const name = agent.name;
         const chosen = selected === agent.name;
-        const state = agent.watching ? "watching" : `seen ${Api.time(agent.lastSeen)}`;
+        let state;
+        if (agent.person) {
+          state = "the person";
+        } else if (agent.watching) {
+          state = "watching";
+        } else {
+          state = `seen ${Api.time(agent.lastSeen)}`;
+        }
         return (
           <button
             key={agent.name}

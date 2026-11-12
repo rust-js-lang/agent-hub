@@ -2,7 +2,7 @@
 
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { hub } from "../playwright.config";
+import { db, hub } from "../playwright.config";
 
 // The binary `cargo run` built for the test hub.
 const binary = "target/debug/cross-agent-message";
@@ -28,4 +28,9 @@ export function agent(base: string): string {
 /** `watch` as `name`, running until it's killed. */
 export function watch(name: string): ChildProcess {
   return spawn(binary, ["watch", "--as", name], { env, stdio: "pipe" });
+}
+
+/** The hub's key, as the person reads it on the hub's machine. */
+export function hubKey(): string {
+  return cli("key", "--db", db).trim();
 }

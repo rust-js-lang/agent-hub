@@ -12,11 +12,19 @@ export function MessageList({ messages }) {
     <section className="messages" aria-label="Messages">
       {messages.map((message) => {
         const read = message.readAt != null ? `read ${Api.time(message.readAt)}` : "unread";
-        const class$ = message.readAt != null ? "message" : "message unread";
+        let class$;
+        if (message.readAt != null) {
+          class$ = !message.person ? "message" : "message person";
+        } else if (!message.person) {
+          class$ = "message unread";
+        } else {
+          class$ = "message person unread";
+        }
         return (
           <article key={message.id} className={class$}>
             <div className="route">
               <span className="from">{message.from}</span>
+              {message.person && <span className="badge">the person</span>}
               <span className="arrow">→</span>
               <span className="to">{message.to}</span>
               <span className="when">{Api.time(message.sentAt)}</span>

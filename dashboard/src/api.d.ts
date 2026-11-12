@@ -3,5 +3,35 @@
 /** Every agent, and the history, newest first. */
 export function load(): any;
 
+/**
+ * The person the agents work for, as this device remembers them: the
+ * name they write as, and the hub's key.
+ */
+export interface Me {
+    name: string;
+    key: string;
+}
+
+/**
+ * Who signed in on this device before, if anyone: kept in the browser,
+ * where it may keep data.
+ */
+export function me(): Me | null | undefined;
+
+/**
+ * Signs the person in as `name` with the hub's `key`, and remembers them
+ * on this device.
+ */
+export function signIn(name: string, key: string): any;
+
+/** Forgets who signed in on this device. */
+export function signOut(): void;
+
+/** Sends `body` to `to` as the person. */
+export function send(me: Me, to: string, body: string): any;
+
+/** The person has read what was sent to them: it's on the page. */
+export function read(me: Me): any;
+
 /** A time in milliseconds since the Unix epoch, in the reader's locale. */
 export function time(at: bigint): string;

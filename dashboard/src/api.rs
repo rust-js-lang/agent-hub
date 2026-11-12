@@ -1,13 +1,17 @@
 //! The dashboard's calls to the hub, and how it shows a time.
 
 use js::{date, settle};
-use protocol::{AGENTS, Agent, MESSAGES, Message, Refusal};
+use protocol::{
+    AGENTS, Agent, INBOX, Inbox, MESSAGES, Message, PERSON, ReadInbox, Refusal, Send, SignIn,
+};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use webapi::window;
+use webapi::{BodyInit, RequestInit, headers, window};
 
-/// The JSON the hub answers at `path`, or why there's none.
-async fn get<T: DeserializeOwned>(path: &str) -> Result<T, String> {
-    let response = match settle(window.fetch(path, None)).await {
+/// The JSON the hub answers at `path`, asked as `init` says, or why
+/// there's none.
+async fn ask<T: DeserializeOwned>(path: &str, init: Option<RequestInit<'_>>) -> Result<T, String> {
+    let response = match settle(window.fetch(path, init)).await {
         Ok(response) => response,
         Err(_) => {
             return Err(
@@ -27,11 +31,94 @@ async fn get<T: DeserializeOwned>(path: &str) -> Result<T, String> {
         .map_err(|error| format!("The hub's answer isn't what this page reads: {error}"))
 }
 
+/// The JSON the hub answers a `POST` of `body` to `path`.
+async fn post<T: DeserializeOwned>(path: &str, body: &impl Serialize) -> Result<T, String> {
+    let json = serde_json::to_string(body)
+        .map_err(|error| format!("This page can't write what it sends: {error}"))?;
+    let headers = headers::new(None);
+    headers.append("content-type", "application/json");
+    let init = RequestInit {
+        method: Some("POST"),
+        headers: Some(headers),
+        body: Some(Some(BodyInit::Str(&json))),
+        ..Default::default()
+    };
+    ask(path, Some(init)).await
+}
+
 /// Every agent, and the history, newest first.
 pub async fn load() -> Result<(Vec<Agent>, Vec<Message>), String> {
-    let agents = get(AGENTS).await?;
-    let messages = get(MESSAGES).await?;
+    let agents = ask(AGENTS, None).await?;
+    let messages = ask(MESSAGES, None).await?;
     Ok((agents, messages))
+}
+
+/// The person the agents work for, as this device remembers them: the
+/// name they write as, and the hub's key.
+#[derive(Clone, PartialEq)]
+pub struct Me {
+    pub name: String,
+    pub key: String,
+}
+
+const NAME: &str = "cross-agent-message.name";
+const KEY: &str = "cross-agent-message.key";
+
+/// Who signed in on this device before, if anyone: kept in the browser,
+/// where it may keep data.
+pub fn me() -> Option<Me> {
+    let storage = window.local_storage().ok()?;
+    Some(Me {
+        name: storage.get_item(NAME)?,
+        key: storage.get_item(KEY)?,
+    })
+}
+
+/// Signs the person in as `name` with the hub's `key`, and remembers them
+/// on this device.
+pub async fn sign_in(name: &str, key: &str) -> Result<Me, String> {
+    let sign_in = SignIn {
+        name: name.to_string(),
+        key: key.to_string(),
+    };
+    let agent: Agent = post(PERSON, &sign_in).await?;
+    let me = Me {
+        name: agent.name,
+        key: key.to_string(),
+    };
+    if let Ok(storage) = window.local_storage() {
+        let _ = storage.set_item(NAME, &me.name);
+        let _ = storage.set_item(KEY, &me.key);
+    }
+    Ok(me)
+}
+
+/// Forgets who signed in on this device.
+pub fn sign_out() {
+    if let Ok(storage) = window.local_storage() {
+        storage.remove_item(NAME);
+        storage.remove_item(KEY);
+    }
+}
+
+/// Sends `body` to `to` as the person.
+pub async fn send(me: &Me, to: &str, body: &str) -> Result<Message, String> {
+    let send = Send {
+        from: me.name.clone(),
+        to: to.to_string(),
+        body: body.to_string(),
+        key: Some(me.key.clone()),
+    };
+    post(MESSAGES, &send).await
+}
+
+/// The person has read what was sent to them: it's on the page.
+pub async fn read(me: &Me) -> Result<Inbox, String> {
+    let read = ReadInbox {
+        name: me.name.clone(),
+        max: 100,
+    };
+    post(INBOX, &read).await
 }
 
 /// A time in milliseconds since the Unix epoch, in the reader's locale.

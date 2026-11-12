@@ -22,11 +22,17 @@ pub fn MessageList(MessageListProps { messages }: MessageListProps) -> JSX::Elem
                         Some(at) => format!("read {}", api::time(at)),
                         None => "unread".to_string(),
                     };
-                    let class = if message.read_at.is_some() { "message" } else { "message unread" };
+                    let class = match (message.read_at.is_some(), message.person) {
+                        (true, false) => "message",
+                        (false, false) => "message unread",
+                        (true, true) => "message person",
+                        (false, true) => "message person unread",
+                    };
                     jsx! {
                         <article key={message.id} className={class}>
                             <div className="route">
                                 <span className="from">{message.from.clone()}</span>
+                                {message.person.then(|| jsx! { <span className="badge">{"the person"}</span> })}
                                 <span className="arrow">{"→"}</span>
                                 <span className="to">{message.to.clone()}</span>
                                 <span className="when">{api::time(message.sent_at)}</span>
