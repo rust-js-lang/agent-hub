@@ -17,7 +17,9 @@ import { $byteLen, $debugStr, $json } from "@rust-js/std";
  */
 export const PROTOCOL = 1;
 export const PROTOCOL_HEADER = "cross-agent-protocol";
-export const EVENT_TYPES = "sent,read,agent,retired";
+export const EVENT_TYPES = "sent,read,agent,retired,restarting";
+export const WRITE_NONCE_HEADER = "cross-agent-nonce";
+export const ACK = "/api/ack";
 export const BINARY = "/api/binary";
 
 export const AGENTS = "/api/agents";
@@ -315,6 +317,8 @@ export function messageSerialize_serialize(message, json) {
   }
   json.key("away");
   json.bool(message.away);
+  json.key("urgent");
+  json.bool(message.urgent);
   json.endObject();
 }
 
@@ -331,8 +335,9 @@ export function messageDeserialize_deserialize(json) {
       ["person", $json.bool],
       ["channel", $json.option($json.string)],
       ["away", $json.bool, () => false],
+      ["urgent", $json.bool, () => false],
     ],
-    ([id, from, to, body, sentAt, readAt, person, channel, away]) => ({
+    ([id, from, to, body, sentAt, readAt, person, channel, away, urgent]) => ({
       id,
       from,
       to,
@@ -342,6 +347,7 @@ export function messageDeserialize_deserialize(json) {
       person,
       channel,
       away,
+      urgent,
     }),
   );
 }
@@ -369,6 +375,14 @@ export function readInboxSerialize_serialize(readInbox, json) {
   json.bool(readInbox.skip);
   json.key("digest");
   json.bool(readInbox.digest);
+  json.key("defer_ack");
+  json.bool(readInbox.deferAck);
+  json.key("up_to");
+  if (readInbox.upTo == null) {
+    json.null();
+  } else {
+    json.int(readInbox.upTo);
+  }
   json.endObject();
 }
 
@@ -382,8 +396,19 @@ export function readInboxDeserialize_deserialize(json) {
       ["sender", $json.option($json.string), () => undefined],
       ["skip", $json.bool, () => false],
       ["digest", $json.bool, () => false],
+      ["defer_ack", $json.bool, () => false],
+      ["up_to", $json.option($json.u64), () => undefined],
     ],
-    ([name, max, channel, sender, skip, digest]) => ({ name, max, channel, sender, skip, digest }),
+    ([name, max, channel, sender, skip, digest, deferAck, upTo]) => ({
+      name,
+      max,
+      channel,
+      sender,
+      skip,
+      digest,
+      deferAck,
+      upTo,
+    }),
   );
 }
 
@@ -393,6 +418,8 @@ export function readMessageSerialize_serialize(readMessage, json) {
   json.string(readMessage.name);
   json.key("id");
   json.int(readMessage.id);
+  json.key("defer_ack");
+  json.bool(readMessage.deferAck);
   json.endObject();
 }
 
@@ -402,8 +429,9 @@ export function readMessageDeserialize_deserialize(json) {
     [
       ["name", $json.string],
       ["id", $json.u64],
+      ["defer_ack", $json.bool, () => false],
     ],
-    ([name, id]) => ({ name, id }),
+    ([name, id, deferAck]) => ({ name, id, deferAck }),
   );
 }
 
@@ -487,6 +515,8 @@ export function digestSerialize_serialize(digest, json) {
     digestLineSerialize_serialize(item, json);
   }
   json.endArray();
+  json.key("newest_id");
+  json.int(digest.newestId);
   json.endObject();
 }
 
@@ -497,8 +527,9 @@ export function digestDeserialize_deserialize(json) {
       ["channel", $json.string],
       ["unread", $json.u32],
       ["first", $json.vec(digestLineDeserialize_deserialize)],
+      ["newest_id", $json.u64, () => 0n],
     ],
-    ([channel, unread, first]) => ({ channel, unread, first }),
+    ([channel, unread, first, newestId]) => ({ channel, unread, first, newestId }),
   );
 }
 
@@ -628,6 +659,8 @@ export function hubInfoSerialize_serialize(hubInfo, json) {
   } else {
     json.string(hubInfo.binarySha256);
   }
+  json.key("supervised");
+  json.bool(hubInfo.supervised);
   json.endObject();
 }
 
@@ -644,6 +677,7 @@ export function hubInfoDeserialize_deserialize(json) {
       ["protocol", $json.u32, () => defaultProtocol()],
       ["target", $json.string, () => ""],
       ["binary_sha256", $json.option($json.string), () => undefined],
+      ["supervised", $json.bool, () => false],
     ],
     ([
       version,
@@ -655,6 +689,7 @@ export function hubInfoDeserialize_deserialize(json) {
       protocol,
       target,
       binarySha256,
+      supervised,
     ]) => ({
       version,
       build,
@@ -665,6 +700,7 @@ export function hubInfoDeserialize_deserialize(json) {
       protocol,
       target,
       binarySha256,
+      supervised,
     }),
   );
 }
@@ -842,6 +878,11 @@ export function eventSerialize_serialize(event, json) {
     json.key("name");
     json.string(event.name);
     json.endObject();
+  } else if (event === "Restarting") {
+    json.beginObject();
+    json.key("type");
+    json.string("restarting");
+    json.endObject();
   } else {
     json.beginObject();
     json.key("type");
@@ -854,7 +895,7 @@ export function eventDeserialize_deserialize(json) {
   return json.internallyTagged(
     "type",
     "internally tagged enum Event",
-    ["sent", "read", "agent", "retired", "unknown"],
+    ["sent", "read", "agent", "retired", "restarting", "unknown"],
     (variant, content) => {
       if (variant === "sent") {
         return content.struct(
@@ -887,6 +928,10 @@ export function eventDeserialize_deserialize(json) {
           ([name]) => ({ TAG: "Retired", name }),
         );
       }
+      if (variant === "restarting") {
+        content.taggedUnit("unit variant Event::Restarting");
+        return "Restarting";
+      }
       content.taggedUnit("unit variant Event::Unknown");
       return "Unknown";
     },
@@ -908,9 +953,69 @@ export const Event = {
     if (event.TAG === "Retired") {
       return "retired";
     }
+    if (event === "Restarting") {
+      return "restarting";
+    }
     return "unknown";
   },
 };
+
+export function acknowledgeSerialize_serialize(acknowledge, json) {
+  json.beginObject();
+  json.key("name");
+  json.string(acknowledge.name);
+  json.key("ids");
+  json.beginArray();
+  for (const item of acknowledge.ids) {
+    json.element();
+    json.int(item);
+  }
+  json.endArray();
+  json.endObject();
+}
+
+export function acknowledgeDeserialize_deserialize(json) {
+  return json.struct(
+    "struct Acknowledge",
+    [
+      ["name", $json.string],
+      ["ids", $json.vec($json.u64)],
+    ],
+    ([name, ids]) => ({ name, ids }),
+  );
+}
+
+export function noticeSerialize_serialize(notice, json) {
+  json.beginObject();
+  json.key("senders");
+  json.beginArray();
+  for (const item of notice.senders) {
+    json.element();
+    json.beginTuple();
+    json.element();
+    json.string(item[0]);
+    json.element();
+    json.bool(item[1]);
+    json.element();
+    json.int(item[2]);
+    json.endArray();
+  }
+  json.endArray();
+  json.key("newest_unread_id");
+  json.int(notice.newestUnreadId);
+  json.endObject();
+}
+
+export function noticeDeserialize_deserialize(json) {
+  return json.struct(
+    "struct Notice",
+    [
+      ["senders", $json.vec($json.tuple($json.string, $json.bool, $json.u32))],
+      ["newest_unread_id", $json.u64],
+    ],
+    ([senders, newestUnreadId]) => ({ senders, newestUnreadId }),
+  );
+}
 
 /** The longest name an agent may have. */
 export const NAME_MAX = 64;
@@ -920,6 +1025,9 @@ export const NAME_MAX = 64;
  * `-`, `_` and `.`, so it's the same in a URL, a shell and a terminal.
  */
 export function checkName(name) {
+  if (name === "hub") {
+    return { TAG: "Err", _0: "hub is reserved for upgrade announcements" };
+  }
   return check(name, "an agent's name");
 }
 

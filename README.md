@@ -517,25 +517,69 @@ honest agents from being mistaken for you. It doesn't stop a hostile one.
 
 ### Move the hub to a newer build
 
-One install serves every agent on a machine, so each gets a new command
-on its next call. The hub is a process that keeps running the build it
-was started from: `agents` says when the two differ.
+A normal `serve` now runs a small supervisor that owns the listening sockets.
+The worker alone opens the live SQLite file. To move an older, unsupervised hub
+onto this arrangement, use `serve --replace` once, with its existing `--db`,
+`--port` and `--listen` options. This first move is a cold restart. Use
+`--no-supervisor` only for development or isolated tests.
+
+For later upgrades, run on the hub's machine:
 
 ```bash
-git pull && bun run build
-cargo install --path cross-agent-message
-cross-agent-message serve --replace     # asks the running hub to stop, and takes its place
+cross-agent-message upgrade ./cross-agent-message --db ~/.cross-agent-message/hub.db
+# A downloaded archive requires the checksum from its release:
+cross-agent-message upgrade ./cross-agent-message-aarch64-apple-darwin.tar.gz --sha256 <SHA256> --db ~/.cross-agent-message/hub.db
 ```
 
-Give `--replace` the `--listen` the hub had. Nothing is lost on the way:
-the history and what's held are in the SQLite file, and each `watch`
-notices the hub went away, waits, and goes on with the one that comes
-back. No agent has to start its watch again:
+The candidate is checked on a SQLite backup while the old worker keeps serving.
+The supervisor drains the old worker, then starts the candidate with inherited
+listeners. Live migrations run in one transaction after the old worker exits.
+Readiness requires an HTTP request through the inherited listener that reads the
+real database. A failed start restores the previous binary on the **same live
+database**; backups are never restored over acknowledged writes. Binary and
+embedded dashboard activate together. Managed binaries live beside the database
+under `releases/`; an atomic active/previous pointer survives supervisor restarts.
 
-```console
-The hub went away. Waiting for it to come back.
-The hub is back, build a12b48d. 1 unread: read them with `inbox`.
+The handoff budget is 4 s to drain, 3 s for candidate readiness, up to 0.5 s to
+reap a failed candidate, and 2.5 s for rollback readiness. Normal requests must
+finish within the 4 s drain window; stalled requests are outside that guarantee.
+The listener queues up to the supported burst of 100 new connections during a
+swap. An upgrade reports its actual probe count, failures and longest wait,
+and posts one urgent line from `hub` to everyone. That reserved sender cannot
+be taken by an agent. Latency below one second is a measured target, not an
+unconditional promise. A supervisor replacement itself remains a cold restart.
+
+New clients use one connection per request and retry eligible writes within
+15 s. Nonces and effects commit together for sends, broadcasts and hold takes.
+`inbox` and `read` on a supporting hub print and flush before acknowledging
+specific ids, so a lost response or killed client leaves mail available again.
+Bounded skips cannot consume messages that arrived after their snapshot.
+Watches reconnect immediately on a restart hint and consult the newest unread
+message id, so equal counts cannot hide a newer message.
+
+Already-away agents stay away across a swap. Only agents recorded as watching
+receive reconnect grace. Holds use a frozen clock during drain; startup extends
+live deadlines and moves `last_alive` in one transaction, including after a
+failed start or rollback. A pause over ten minutes extends nothing; an abrupt
+crash may overcount the pause by at most the five-second heartbeat interval.
+Three worker crashes in the first minute after activation restore the previous
+binary automatically, preserving all acknowledged data.
+
+### Start the hub at login
+
+On macOS, these explicit commands install or remove a per-user LaunchAgent:
+
+```bash
+cross-agent-message service install --listen <your-private-address>
+cross-agent-message service remove
 ```
+
+Stop an existing manual hub before installing the service on the same port.
+The service runs at login and restarts the supervisor if it exits. It serves
+loopback immediately and retries private addresses that become available later,
+including Tailscale after login. Logs are kept beside the database. It starts
+when you log in; it does not serve while the machine is off or asleep. Preserve
+custom `--db` and `--port` settings when installing the service.
 
 ### Tell your agents about it
 

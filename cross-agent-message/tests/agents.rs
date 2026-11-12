@@ -432,6 +432,10 @@ fn http_digest_and_notice_do_not_read_mail_and_human_broadcasts_keep_priority() 
         sender: None,
         skip: false,
         digest: true,
+
+        defer_ack: false,
+
+        up_to: None,
     };
     let digest = client.read_mail(&request).unwrap();
     assert_eq!(
@@ -559,25 +563,44 @@ fn a_hub_serves_the_dashboard_kept_in_its_binary() {
 fn incompatible_protocols_are_refused_before_any_command_and_legacy_headers_work() {
     let client = hub();
     for version in ["0", "99", "not-a-number"] {
-        let http: ureq::Agent = ureq::Agent::config_builder().http_status_as_error(false).build().into();
+        let http: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build()
+            .into();
         let mut response = http
-            .get(format!("{}/api/hub", client.hub())).header(protocol::PROTOCOL_HEADER, version).call().unwrap();
+            .get(format!("{}/api/hub", client.hub()))
+            .header(protocol::PROTOCOL_HEADER, version)
+            .call()
+            .unwrap();
         assert_eq!(response.status().as_u16(), 426);
         let refusal: protocol::Refusal = response.body_mut().read_json().unwrap();
         assert_eq!(refusal.code.as_deref(), Some("upgrade-required"));
     }
-    let response = ureq::get(format!("{}/api/hub", client.hub())).call().unwrap();
-    assert_eq!(response.headers().get(protocol::PROTOCOL_HEADER).unwrap(), "1");
+    let response = ureq::get(format!("{}/api/hub", client.hub()))
+        .call()
+        .unwrap();
+    assert_eq!(
+        response.headers().get(protocol::PROTOCOL_HEADER).unwrap(),
+        "1"
+    );
 }
 
 #[test]
 fn legacy_event_subscriptions_never_receive_new_event_types() {
     use std::io::BufRead;
-    let client = hub(); client.register("a").unwrap(); client.register("b").unwrap();
-    let response = ureq::get(format!("{}/api/events?agent=b", client.hub())).call().unwrap();
+    let client = hub();
+    client.register("a").unwrap();
+    client.register("b").unwrap();
+    let response = ureq::get(format!("{}/api/events?agent=b", client.hub()))
+        .call()
+        .unwrap();
     client.send("a", "b", "known event").unwrap();
     client.retire("b").unwrap();
-    let rows: Vec<String> = std::io::BufReader::new(response.into_body().into_reader()).lines().map(Result::unwrap).filter(|line| line.starts_with("data:")).collect();
+    let rows: Vec<String> = std::io::BufReader::new(response.into_body().into_reader())
+        .lines()
+        .map(Result::unwrap)
+        .filter(|line| line.starts_with("data:"))
+        .collect();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].contains("known event"));
     assert!(!rows[0].contains("retired"));
@@ -587,7 +610,9 @@ fn legacy_event_subscriptions_never_receive_new_event_types() {
 fn an_unknown_sse_event_is_skipped_without_reopening_the_connection() {
     use axum::{Router, routing::get};
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
     let address = listener.local_addr().unwrap();
     let app = Router::new().route(protocol::EVENTS, get(|| async {
         ([("content-type", "text/event-stream")], "data: {\"type\":\"future-event\",\"payload\":123}\n\ndata: {\"type\":\"retired\",\"name\":\"a\"}\n\n")
@@ -595,7 +620,12 @@ fn an_unknown_sse_event_is_skipped_without_reopening_the_connection() {
     thread::spawn(move || runtime.block_on(async { axum::serve(listener, app).await.unwrap() }));
     let client = Client::new(&format!("http://{address}"));
     let mut events = client.watch("a").unwrap();
-    assert_eq!(events.next().unwrap().unwrap(), protocol::Event::Retired { name: "a".to_string() });
+    assert_eq!(
+        events.next().unwrap().unwrap(),
+        protocol::Event::Retired {
+            name: "a".to_string()
+        }
+    );
     assert!(events.next().is_none());
 }
 
@@ -608,12 +638,56 @@ fn self_update_verifies_and_stages_before_changing_the_executable() {
     use cross_agent_message::updates::{install, sha256};
     assert!(install(b"bad download", "wrong checksum", &destination).is_err());
     assert_eq!(std::fs::read(&destination).unwrap(), b"old executable");
-    assert!(install(b"not an executable", &sha256(b"not an executable"), &destination).is_err());
+    assert!(
+        install(
+            b"not an executable",
+            &sha256(b"not an executable"),
+            &destination
+        )
+        .is_err()
+    );
     assert_eq!(std::fs::read(&destination).unwrap(), b"old executable");
     let binary = std::fs::read(env!("CARGO_BIN_EXE_cross-agent-message")).unwrap();
     let info = install(&binary, &sha256(&binary), &destination).unwrap();
     assert_eq!(info.protocol, protocol::PROTOCOL);
-    assert_eq!(std::fs::read(destination.with_extension("prev")).unwrap(), b"old executable");
+    assert_eq!(
+        std::fs::read(destination.with_extension("prev")).unwrap(),
+        b"old executable"
+    );
     assert_eq!(std::fs::read(&destination).unwrap(), binary);
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn a_cli_that_cannot_print_its_inbox_never_acknowledges_the_mail() {
+    let client = hub();
+    client.register("a").unwrap();
+    client.register("b").unwrap();
+    client
+        .send("a", "b", "must be printable before acknowledgement")
+        .unwrap();
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cross-agent-message"));
+    let mut child = command
+        .args(["--hub", client.hub(), "inbox", "--as", "b"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let result = child.wait_with_output().unwrap();
+    assert!(!result.status.success());
+    assert_eq!(
+        client
+            .agents()
+            .unwrap()
+            .iter()
+            .find(|a| a.name == "b")
+            .unwrap()
+            .unread,
+        1
+    );
+    assert_eq!(
+        client.read_inbox("b", 20).unwrap().messages[0].body,
+        "must be printable before acknowledgement"
+    );
 }

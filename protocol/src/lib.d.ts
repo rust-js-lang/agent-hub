@@ -10,6 +10,10 @@ export const PROTOCOL_HEADER: string;
 
 export const EVENT_TYPES: string;
 
+export const WRITE_NONCE_HEADER: string;
+
+export const ACK: string;
+
 export const BINARY: string;
 
 export const AGENTS: string;
@@ -186,6 +190,7 @@ export interface Message {
      */
     channel?: string | undefined;
     away: boolean;
+    urgent: boolean;
 }
 
 /** An agent reads its unread messages, at most `max` of them. */
@@ -197,11 +202,14 @@ export interface ReadInbox {
     skip: boolean;
     /** Opt in, so clients that cannot display digests still get full bodies. */
     digest: boolean;
+    deferAck: boolean;
+    upTo?: bigint | undefined;
 }
 
 export interface ReadMessage {
     name: string;
     id: bigint;
+    deferAck: boolean;
 }
 
 export interface Retire {
@@ -224,6 +232,7 @@ export interface Digest {
     channel: string;
     unread: number;
     first: DigestLine[];
+    newestId: bigint;
 }
 
 export interface AwaySummary {
@@ -262,6 +271,7 @@ export interface HubInfo {
     protocol: number;
     target: string;
     binarySha256?: string | undefined;
+    supervised: boolean;
 }
 
 export function defaultProtocol(): number;
@@ -327,11 +337,25 @@ export type Event = {
 } | {
     TAG: "Retired";
     name: string;
-} | "Unknown";
+} | "Restarting" | "Unknown";
 
 export const Event: {
     kind(event: Event): string;
 };
+
+export interface Acknowledge {
+    name: string;
+    ids: bigint[];
+}
+
+export interface Notice {
+    senders: [
+        string,
+        boolean,
+        number
+    ][];
+    newestUnreadId: bigint;
+}
 
 /** The longest name an agent may have. */
 export const NAME_MAX: number;

@@ -25,6 +25,7 @@ impl std::error::Error for RetiredAgent {}
 pub struct Client {
     hub: String,
     http: ureq::Agent,
+    metadata: std::sync::OnceLock<HubInfo>,
 }
 
 impl Client {
@@ -32,11 +33,14 @@ impl Client {
     pub fn new(hub: &str) -> Client {
         let http = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            .max_idle_connections(0)
+            .timeout_global(Some(std::time::Duration::from_secs(15)))
             .build()
             .into();
         Client {
             hub: hub.trim_end_matches('/').to_string(),
             http,
+            metadata: std::sync::OnceLock::new(),
         }
     }
 
@@ -90,13 +94,60 @@ impl Client {
     }
 
     fn post<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> Result<T> {
-        let response = self
-            .http
-            .post(self.url(path))
-            .header(protocol::PROTOCOL_HEADER, "1")
-            .send_json(body)
-            .with_context(|| self.unreachable())?;
-        Client::answer(response)
+        static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nonce = format!("{}-{}-{sequence}", std::process::id(), crate::hub::now());
+        let value = serde_json::to_value(body)?;
+        let safe = match path {
+            AGENTS | CHANNELS | LEAVE | PERSON | protocol::ACK => true,
+            MESSAGES | BROADCAST | HOLDS | RELEASE => self.has_feature("write-nonce")?,
+            INBOX => {
+                if value.get("skip").and_then(|v| v.as_bool()) == Some(true) {
+                    value.get("up_to").is_some_and(|v| !v.is_null())
+                        && self.has_feature("bounded-skip")?
+                } else {
+                    value.get("defer_ack").and_then(|v| v.as_bool()) == Some(true)
+                        && self.has_feature("read-ack")?
+                }
+            }
+            READ => value.get("defer_ack").and_then(|v| v.as_bool()) == Some(true),
+            RETIRE => true,
+            _ => false,
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let attempts = if safe { 3 } else { 1 };
+        for attempt in 0..attempts {
+            let response = self
+                .http
+                .post(self.url(path))
+                .header(protocol::PROTOCOL_HEADER, "1")
+                .header(protocol::WRITE_NONCE_HEADER, &nonce)
+                .config()
+                .timeout_global(Some(
+                    deadline.saturating_duration_since(std::time::Instant::now()),
+                ))
+                .build()
+                .send_json(&value);
+            match response {
+                Ok(response) => return Client::answer(response),
+                Err(error) if attempt + 1 == attempts || std::time::Instant::now() >= deadline => {
+                    return Err(error).with_context(|| self.unreachable());
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(100)),
+            }
+        }
+        bail!("request retry budget exhausted")
+    }
+
+    pub fn has_feature(&self, feature: &str) -> Result<bool> {
+        if self.metadata.get().is_none() {
+            let info = self.check_protocol()?;
+            let _ = self.metadata.set(info);
+        }
+        Ok(self
+            .metadata
+            .get()
+            .is_some_and(|info| info.features.iter().any(|f| f == feature)))
     }
 
     /// `name` is seen now, on this machine.
@@ -218,6 +269,10 @@ impl Client {
                 sender: None,
                 skip: false,
                 digest: false,
+
+                defer_ack: false,
+
+                up_to: None,
             },
         )
     }
@@ -233,6 +288,8 @@ impl Client {
             &ReadMessage {
                 name: name.to_string(),
                 id,
+
+                defer_ack: false,
             },
         )
     }
@@ -254,6 +311,33 @@ impl Client {
         ))
     }
 
+    pub fn read_message_deferred(&self, name: &str, id: u64, defer_ack: bool) -> Result<Message> {
+        self.require("inbox-digests")?;
+        self.post(
+            READ,
+            &ReadMessage {
+                name: name.to_string(),
+                id,
+                defer_ack,
+            },
+        )
+    }
+    pub fn acknowledge(&self, name: &str, ids: &[u64]) -> Result<Vec<u64>> {
+        self.post(
+            protocol::ACK,
+            &protocol::Acknowledge {
+                name: name.to_string(),
+                ids: ids.to_vec(),
+            },
+        )
+    }
+    pub fn notice_snapshot(&self, name: &str, channels: bool) -> Result<protocol::Notice> {
+        self.get(&format!(
+            "{}?name={name}&channels={channels}&with_id=true",
+            protocol::NOTICE
+        ))
+    }
+
     /// The hub that's running: its build.
     pub fn info(&self) -> Result<HubInfo> {
         self.get(HUB)
@@ -270,6 +354,7 @@ impl Client {
                 protocol::PROTOCOL
             );
         }
+        let _ = self.metadata.set(info.clone());
         Ok(info)
     }
 
@@ -337,8 +422,12 @@ impl Client {
     /// The messages sent to `name` from now on, as they arrive. `name` is
     /// watching until the iterator is dropped.
     pub fn watch(&self, name: &str) -> Result<impl Iterator<Item = Result<Event>>> {
-        let response = self
-            .http
+        let http: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .max_idle_connections(0)
+            .build()
+            .into();
+        let response = http
             .get(self.url(EVENTS))
             .query("agent", name)
             .query("types", protocol::EVENT_TYPES)

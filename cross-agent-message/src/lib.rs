@@ -14,3 +14,9 @@ pub mod store;
 mod holds;
 
 pub mod updates;
+
+pub mod supervisor;
+pub mod worker;
+
+pub mod upgrade;
+pub mod service;

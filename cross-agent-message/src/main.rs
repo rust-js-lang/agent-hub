@@ -46,6 +46,30 @@ enum Command {
     /// Print machine-readable executable identity.
     #[command(hide = true)]
     BuildInfo,
+    /// Test migrations and a write/read round trip on a disposable database.
+    #[command(hide = true)]
+    SelfCheck {
+        #[arg(long)]
+        db: PathBuf,
+    },
+    #[command(hide = true)]
+    Worker {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Upgrade a locally supervised hub with preflight and rollback.
+    Upgrade {
+        binary: PathBuf,
+        #[arg(long, default_value_os_t = default_db())]
+        db: PathBuf,
+        #[arg(long)]
+        sha256: Option<String>,
+    },
+    /// Explicitly install or remove the per-user macOS login service.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     /// Explicitly download and atomically replace this executable.
     UpgradeSelf {
         #[arg(long)]
@@ -70,6 +94,9 @@ enum Command {
         /// new one by themselves.
         #[arg(long)]
         replace: bool,
+        /// Run one process, for development and compatibility tests.
+        #[arg(long)]
+        no_supervisor: bool,
         /// Minutes without a watch or a command before an agent is away.
         #[arg(long, default_value_t = 60)]
         away_after: u64,
@@ -191,6 +218,19 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum ServiceCommand {
+    Install {
+        #[arg(long, default_value_os_t = default_db())]
+        db: PathBuf,
+        #[arg(long, default_value_t = 7878)]
+        port: u16,
+        #[arg(long)]
+        listen: Vec<IpAddr>,
+    },
+    Remove,
+}
+
 fn default_db() -> PathBuf {
     std::env::home_dir()
         .unwrap_or_default()
@@ -219,7 +259,13 @@ fn main() -> Result<()> {
     let client = Client::new(&cli.hub);
     if !matches!(
         &cli.command,
-        Command::Serve { .. } | Command::Key { .. } | Command::BuildInfo
+        Command::Serve { .. }
+            | Command::Key { .. }
+            | Command::BuildInfo
+            | Command::SelfCheck { .. }
+            | Command::Worker { .. }
+            | Command::Upgrade { .. }
+            | Command::Service { .. }
     ) {
         let info = client.check_protocol()?;
         let _ = cross_agent_message::updates::warn_if_behind(
@@ -230,6 +276,30 @@ fn main() -> Result<()> {
         );
     }
     match cli.command {
+        Command::SelfCheck { db } => cross_agent_message::upgrade::self_check(&db),
+        Command::Worker { config } => {
+            let config = serde_json::from_slice(&std::fs::read(config)?)?;
+            cross_agent_message::worker::run(config, dashboard())
+        }
+        Command::Upgrade { binary, db, sha256 } => {
+            cross_agent_message::upgrade::run(&binary, &db, sha256.as_deref())
+        }
+        Command::Service { command } => match command {
+            ServiceCommand::Remove => cross_agent_message::service::remove(),
+            ServiceCommand::Install { db, port, listen } => {
+                let addresses = std::iter::once(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+                    .chain(listen.into_iter().map(|ip| SocketAddr::from((ip, port))))
+                    .collect();
+                cross_agent_message::service::install(&cross_agent_message::supervisor::Config {
+                    addresses,
+                    db,
+                    away_after: protocol::default_away_after(),
+                    forget_after: protocol::default_forget_after(),
+                    reconnect_grace: 30_000,
+                    activate_current: false,
+                })
+            }
+        },
         Command::BuildInfo => {
             println!(
                 "{}",
@@ -245,6 +315,7 @@ fn main() -> Result<()> {
             db,
             listen,
             replace,
+            no_supervisor,
             away_after,
             forget_after,
             reconnect_grace,
@@ -269,6 +340,7 @@ fn main() -> Result<()> {
                 reconnect_grace
                     .checked_mul(1000)
                     .context("reconnect-grace is too large")?,
+                no_supervisor,
             )
         }
         Command::Agents { me } => agents(&client, &me),
@@ -281,7 +353,12 @@ fn main() -> Result<()> {
         } => inbox(&client, &me, max, channel.as_deref(), skip.as_deref()),
         Command::Read { me, id } => {
             register(&client, &me)?;
-            print_message(&client.read_message(&me.name, id)?);
+            let deferred = client.has_feature("read-ack")?;
+            print_message(&client.read_message_deferred(&me.name, id, deferred)?);
+            std::io::stdout().flush()?;
+            if deferred {
+                client.acknowledge(&me.name, &[id])?;
+            }
             Ok(())
         }
         Command::Retire { me } => {
@@ -324,6 +401,7 @@ fn serve(
     away_after: u64,
     forget_after: u64,
     reconnect_grace: u64,
+    no_supervisor: bool,
 ) -> Result<()> {
     let address = addresses[0];
     if let Some((client, info)) = running(address) {
@@ -334,17 +412,32 @@ fn serve(
             );
         }
         println!("Asking the hub of build {} to stop.", info.build);
-        let _ = client.stop();
+        if info.supervised {
+            cross_agent_message::supervisor::stop(&db)?;
+        } else {
+            let _ = client.stop();
+        }
         // Until it has let go of the address.
         let gone = (0..50).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            std::net::TcpListener::bind(address).is_ok()
+            cross_agent_message::supervisor::bind_listener(address).is_ok()
         });
         if !gone {
             bail!("the hub at http://{address} didn't stop");
         }
     }
-    serve_at(addresses, db, away_after, forget_after, reconnect_grace)
+    if !no_supervisor {
+        cross_agent_message::supervisor::run(cross_agent_message::supervisor::Config {
+            addresses: addresses.to_vec(),
+            db,
+            away_after,
+            forget_after,
+            reconnect_grace,
+            activate_current: replace,
+        })
+    } else {
+        serve_at(addresses, db, away_after, forget_after, reconnect_grace)
+    }
 }
 
 #[tokio::main]
@@ -360,6 +453,7 @@ async fn serve_at(
             .with_context(|| format!("can't make {}", parent.display()))?;
     }
     let store = Store::open(&db).with_context(|| format!("can't open {}", db.display()))?;
+    store.person_key()?;
     let dashboard = dashboard();
     let mut listeners = Vec::new();
     for address in addresses {
@@ -410,8 +504,15 @@ fn key(db: &std::path::Path) -> Result<()> {
             db.display()
         );
     }
-    let store = Store::open(db).with_context(|| format!("can't open {}", db.display()))?;
-    let key = store.person_key().context("can't read the hub's key")?;
+    let connection =
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let key: String = connection
+        .query_row(
+            "SELECT value FROM settings WHERE name='person_key'",
+            [],
+            |row| row.get(0),
+        )
+        .context("the hub has not initialized its key yet")?;
     println!("{key}");
     eprintln!(
         "The hub's key: the person signs in to the dashboard with it, once on each device. A message sent with it is marked theirs. Keep it from what isn't theirs."
@@ -601,6 +702,31 @@ fn inbox(
     let skipped_sender = skip
         .filter(|name| !name.starts_with('#'))
         .map(str::to_string);
+    let deferred = client.has_feature("read-ack")?;
+    let up_to = if skip.is_some() && client.has_feature("bounded-skip")? {
+        let preview = client.read_mail(&protocol::ReadInbox {
+            name: me.name.clone(),
+            max: 0,
+            channel: None,
+            sender: None,
+            skip: false,
+            digest: true,
+            defer_ack: true,
+            up_to: None,
+        })?;
+        let maximum = preview
+            .digests
+            .iter()
+            .map(|d| d.newest_id)
+            .chain(preview.read_ids.iter().copied())
+            .max()
+            .unwrap_or(0);
+        println!("Skipping ordinary channel mail through message {maximum}.");
+        std::io::stdout().flush()?;
+        Some(maximum)
+    } else {
+        None
+    };
     let inbox = client.read_mail(&protocol::ReadInbox {
         name: me.name.clone(),
         max,
@@ -608,6 +734,10 @@ fn inbox(
         sender: skipped_sender.clone(),
         skip: skip.is_some(),
         digest: true,
+
+        defer_ack: deferred,
+
+        up_to,
     })?;
     if skip.is_some() {
         let scope = match (selected, skipped_sender) {
@@ -659,6 +789,10 @@ fn inbox(
     } else if inbox.messages.is_empty() && inbox.away.is_empty() && inbox.digests.is_empty() {
         println!("No unread messages.");
     }
+    std::io::stdout().flush()?;
+    if deferred && !inbox.read_ids.is_empty() {
+        client.acknowledge(&me.name, &inbox.read_ids)?;
+    }
     Ok(())
 }
 
@@ -674,9 +808,9 @@ impl Burst {
         self.last = at;
     }
     fn observe(&mut self, at: u64, message: &protocol::Message, channels: bool) -> bool {
-        if message.person || message.channel.is_none() || channels {
+        if message.person || message.urgent || message.channel.is_none() || channels {
             self.arrive(at);
-            message.person
+            message.person || message.urgent
         } else {
             false
         }
@@ -697,9 +831,20 @@ enum WatchInput {
     Retired,
 }
 
-fn notice(client: &Client, name: &str, channels: bool) -> Result<(u32, String)> {
-    match client.notice(name, channels) {
-        Ok(groups) => {
+fn notice(client: &Client, name: &str, channels: bool) -> Result<(u32, u64, String)> {
+    let snapshot = if client.has_feature("notice-id").unwrap_or(false) {
+        client.notice_snapshot(name, channels)
+    } else {
+        client
+            .notice(name, channels)
+            .map(|senders| protocol::Notice {
+                senders,
+                newest_unread_id: 0,
+            })
+    };
+    match snapshot {
+        Ok(snapshot) => {
+            let groups = snapshot.senders;
             let total: u32 = groups.iter().map(|(_, _, count)| count).sum();
             let mut parts: Vec<String> = groups
                 .iter()
@@ -715,7 +860,11 @@ fn notice(client: &Client, name: &str, channels: bool) -> Result<(u32, String)> 
             if rest > 0 {
                 parts.push(format!("{rest} from others"));
             }
-            Ok((total, format!("{total} unread: {}.", parts.join("; "))))
+            Ok((
+                total,
+                snapshot.newest_unread_id,
+                format!("{total} unread: {}.", parts.join("; ")),
+            ))
         }
         Err(_) => {
             // Older hubs have no grouped-count endpoint.
@@ -724,7 +873,7 @@ fn notice(client: &Client, name: &str, channels: bool) -> Result<(u32, String)> 
                 .iter()
                 .find(|agent| agent.name == name)
                 .map_or(0, |agent| agent.unread);
-            Ok((total, format!("{total} unread.")))
+            Ok((total, 0, format!("{total} unread.")))
         }
     }
 }
@@ -746,11 +895,16 @@ fn watch(client: &Client, me: &Me, channels: bool) -> Result<()> {
                     if tx.send(WatchInput::Connected).is_err() {
                         return;
                     }
+                    let mut restarting = false;
                     for event in events {
                         match event {
                             Ok(Event::Retired { name: retired }) if retired == name => {
                                 let _ = tx.send(WatchInput::Retired);
                                 return;
+                            }
+                            Ok(Event::Restarting) => {
+                                restarting = true;
+                                break;
                             }
                             Ok(event) => {
                                 if tx.send(WatchInput::Event(event)).is_err() {
@@ -759,6 +913,9 @@ fn watch(client: &Client, me: &Me, channels: bool) -> Result<()> {
                             }
                             Err(_) => break,
                         }
+                    }
+                    if restarting {
+                        continue;
                     }
                 }
                 Err(error)
@@ -780,6 +937,7 @@ fn watch(client: &Client, me: &Me, channels: bool) -> Result<()> {
     let epoch = std::time::Instant::now();
     let mut burst = Burst::default();
     let mut previous = 0;
+    let mut told = 0;
     let mut out = std::io::stdout().lock();
     loop {
         let at = epoch.elapsed().as_millis() as u64;
@@ -796,10 +954,13 @@ fn watch(client: &Client, me: &Me, channels: bool) -> Result<()> {
                 return Ok(());
             }
             Ok(WatchInput::Connected) => {
-                if let Ok((count, line)) = notice(client, &me.name, channels) {
-                    if count > 0 && count != previous {
+                if let Ok((count, newest, line)) = notice(client, &me.name, channels) {
+                    if count > 0
+                        && ((newest > 0 && newest > told) || (newest == 0 && count != previous))
+                    {
                         writeln!(out, "{line}")?;
                         out.flush()?;
+                        told = told.max(newest);
                     }
                     previous = count;
                 }
@@ -820,10 +981,11 @@ fn watch(client: &Client, me: &Me, channels: bool) -> Result<()> {
             report = true;
         }
         if report {
-            if let Ok((count, line)) = notice(client, &me.name, channels) {
-                if count > 0 {
+            if let Ok((count, newest, line)) = notice(client, &me.name, channels) {
+                if count > 0 && (newest == 0 || newest > told) {
                     writeln!(out, "{line}")?;
                     out.flush()?;
+                    told = told.max(newest);
                 }
                 previous = count;
             }
@@ -988,6 +1150,8 @@ mod tests {
             person: false,
             channel: Some("team".to_string()),
             away: false,
+
+            urgent: false,
         };
         assert!(!burst.observe(0, &message, false));
         assert_eq!(burst.deadline(), None);

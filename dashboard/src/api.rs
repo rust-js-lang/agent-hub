@@ -38,11 +38,22 @@ async fn ask<T: DeserializeOwned>(path: &str, init: Option<RequestInit<'_>>) -> 
 
 /// The JSON the hub answers a `POST` of `body` to `path`.
 async fn post<T: DeserializeOwned>(path: &str, body: &impl Serialize) -> Result<T, String> {
+    post_nonce(path, body, None).await
+}
+
+async fn post_nonce<T: DeserializeOwned>(
+    path: &str,
+    body: &impl Serialize,
+    nonce: Option<&str>,
+) -> Result<T, String> {
     let json = serde_json::to_string(body)
         .map_err(|error| format!("This page can't write what it sends: {error}"))?;
     let headers = headers::new(None);
     headers.append("content-type", "application/json");
     headers.append(protocol::PROTOCOL_HEADER, "1");
+    if let Some(nonce) = nonce {
+        headers.append(protocol::WRITE_NONCE_HEADER, nonce);
+    }
     let init = RequestInit {
         method: Some("POST"),
         headers: Some(headers),
@@ -117,12 +128,32 @@ pub async fn send(me: &Me, to: &str, body: &str) -> Result<(), String> {
         body: body.to_string(),
         key: Some(me.key.clone()),
     };
-    if to.starts_with('#') {
-        let _: Vec<Message> = post(BROADCAST, &send).await?;
-    } else {
-        let _: Message = post(MESSAGES, &send).await?;
+    let supported = hub()
+        .await
+        .is_ok_and(|info| info.features.iter().any(|f| f == "write-nonce"));
+    let nonce = format!("{}-{}", date::now(), js::math::random());
+    let attempts = if supported { 3 } else { 1 };
+    let mut problem = "The message could not be sent.".to_string();
+    for _ in 0..attempts {
+        let result = if to.starts_with('#') {
+            post_nonce::<Vec<Message>>(
+                BROADCAST,
+                &send,
+                if supported { Some(&nonce) } else { None },
+            )
+            .await
+            .map(|_| ())
+        } else {
+            post_nonce::<Message>(MESSAGES, &send, if supported { Some(&nonce) } else { None })
+                .await
+                .map(|_| ())
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(reason) => problem = reason,
+        }
     }
-    Ok(())
+    Err(problem)
 }
 
 /// The person has read what was sent to them: it's on the page.
@@ -134,6 +165,10 @@ pub async fn read(me: &Me) -> Result<Inbox, String> {
         sender: None,
         skip: false,
         digest: false,
+
+        defer_ack: false,
+
+        up_to: None,
     };
     post(INBOX, &read).await
 }

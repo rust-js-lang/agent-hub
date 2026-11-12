@@ -1,8 +1,9 @@
 //! The hub: the HTTP API every agent and the dashboard use, and the
 //! dashboard's files.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,6 +34,9 @@ pub struct Hub {
     forget_after: u64,
     reconnect_grace: u64,
     store: Mutex<Store>,
+    graced: HashSet<String>,
+    draining: AtomicU64,
+    supervised: bool,
     events: broadcast::Sender<Event>,
     /// How many `watch`es of each agent are connected.
     watchers: Mutex<HashMap<String, usize>>,
@@ -82,6 +86,11 @@ impl IntoResponse for Refused {
 
 impl From<rusqlite::Error> for Refused {
     fn from(error: rusqlite::Error) -> Refused {
+        if let rusqlite::Error::InvalidParameterName(reason) = &error
+            && reason.starts_with("nonce")
+        {
+            return Refused(StatusCode::CONFLICT, reason.clone());
+        }
         eprintln!("hub SQLite operation failed: {error}");
         Refused(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -109,9 +118,13 @@ impl Hub {
         away_after: u64,
         forget_after: u64,
     ) -> rusqlite::Result<Hub> {
+        let graced = store.watched()?.into_iter().collect();
         let _ = crate::updates::binary();
         Ok(Hub {
             lifecycle: Mutex::new(()),
+            graced,
+            draining: AtomicU64::new(0),
+            supervised: false,
             away_after,
             forget_after,
             reconnect_grace: 30_000,
@@ -128,20 +141,34 @@ impl Hub {
         self
     }
 
+    pub fn supervised(mut self, supervised: bool) -> Self {
+        self.supervised = supervised;
+        self
+    }
+
     /// What's running.
     pub fn info(&self) -> HubInfo {
+        let mut features = vec![
+            "inbox-digests",
+            "agent-lifecycle",
+            "event-types",
+            "binary-download",
+            "write-nonce",
+            "read-ack",
+            "bounded-skip",
+            "notice-id",
+        ];
+        if self.supervised {
+            features.push("live-upgrade");
+        }
         HubInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             build: BUILD.to_string(),
             started: self.started,
             away_after: self.away_after,
             forget_after: self.forget_after,
-            features: vec![
-                "inbox-digests".to_string(),
-                "agent-lifecycle".to_string(),
-                "event-types".to_string(),
-                "binary-download".to_string(),
-            ],
+            features: features.into_iter().map(str::to_string).collect(),
+            supervised: self.supervised,
             protocol: protocol::PROTOCOL,
             target: env!("CROSS_AGENT_TARGET").to_string(),
             binary_sha256: crate::updates::binary()
@@ -170,7 +197,7 @@ impl Hub {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn watching(&self, name: &str) -> bool {
+    fn connected(&self, name: &str) -> bool {
         self.watchers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -178,10 +205,61 @@ impl Hub {
             .is_some_and(|&count| count > 0)
     }
 
+    fn watching(&self, name: &str) -> bool {
+        self.watching_at(name, now())
+    }
+
+    fn watching_at(&self, name: &str, at: u64) -> bool {
+        self.connected(name)
+            || (self.graced.contains(name)
+                && at.saturating_sub(self.started) < self.reconnect_grace)
+    }
+
+    pub fn hold_clock(&self) -> u64 {
+        let frozen = self.draining.load(Ordering::SeqCst);
+        if frozen == 0 { now() } else { frozen }
+    }
+
+    pub fn begin_drain(&self) -> Result<(), Refused> {
+        let _lifecycle = self.lifecycle();
+        let at = now();
+        self.store().note_alive(at)?;
+        self.draining.store(at, Ordering::SeqCst);
+        self.tell(Event::Restarting);
+        Ok(())
+    }
+
+    pub fn heartbeat(&self) -> Result<(), Refused> {
+        let _lifecycle = self.lifecycle();
+        if self.draining.load(Ordering::SeqCst) != 0 {
+            return Ok(());
+        }
+        let at = now();
+        let store = self.store();
+        store.note_alive(at)?;
+        if at.saturating_sub(self.started) >= self.reconnect_grace {
+            for name in &self.graced {
+                if !self.connected(name) {
+                    store.set_watching(name, false)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn announcement(&self, body: &str) -> Result<(), Refused> {
+        let _lifecycle = self.lifecycle();
+        self.forget(now())?;
+        let messages = self.store().announce(body, now())?;
+        for message in messages {
+            self.tell(Event::Sent { message });
+        }
+        Ok(())
+    }
+
     fn away_at(&self, agent: &Agent, at: u64) -> bool {
         !agent.person
-            && !self.watching(&agent.name)
-            && at.saturating_sub(self.started) >= self.reconnect_grace
+            && !self.watching_at(&agent.name, at)
             && at.saturating_sub(agent.last_seen) >= self.away_after
     }
 
@@ -228,12 +306,12 @@ impl Hub {
     }
 
     fn forget(&self, at: u64) -> Result<(), Refused> {
-        if at < self.forget_after || at.saturating_sub(self.started) < self.reconnect_grace {
+        if at < self.forget_after {
             return Ok(());
         }
         let names = self.store().forgettable(at - self.forget_after)?;
         for name in names {
-            if !self.watching(&name) {
+            if !self.watching_at(&name, at) {
                 self.retire(&name, at)?;
             }
         }
@@ -258,6 +336,8 @@ pub fn router(hub: Arc<Hub>, dashboard: impl Into<Dashboard>) -> Router {
         .route(AGENTS, get(agents).post(register))
         .route(MESSAGES, get(history).post(send))
         .route(INBOX, post(read_inbox))
+        .route(protocol::ACK, post(acknowledge))
+        .route("/api/health", get(health))
         .route(READ, post(read_message))
         .route(RETIRE, post(retire))
         .route(protocol::NOTICE, get(notice))
@@ -297,16 +377,75 @@ async fn protocol_header(
         None => Some(1),
         Some(value) => value.to_str().ok().and_then(|v| v.parse::<u32>().ok()),
     };
-    let mut response = if version == Some(protocol::PROTOCOL) {
-        next.run(request).await
-    } else {
-        Refused(StatusCode::UPGRADE_REQUIRED, format!("This hub speaks protocol {}; this client claims {}. Upgrade the client: cross-agent-message upgrade-self", protocol::PROTOCOL, version.map_or("invalid".to_string(), |v| v.to_string()))).into_response()
-    };
+    if version != Some(protocol::PROTOCOL) {
+        let mut response = Refused(StatusCode::UPGRADE_REQUIRED, format!("This hub speaks protocol {}; this client claims {}. Upgrade the client: cross-agent-message upgrade-self", protocol::PROTOCOL, version.map_or("invalid".to_string(), |v|v.to_string()))).into_response();
+        response.headers_mut().insert(
+            protocol::PROTOCOL_HEADER,
+            axum::http::HeaderValue::from_static("1"),
+        );
+        return response;
+    }
+    let mut request = request;
+    if request.headers().contains_key(protocol::WRITE_NONCE_HEADER) {
+        let (mut parts, body) = request.into_parts();
+        let bytes = match tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            axum::body::to_bytes(body, 2 * 1024 * 1024),
+        )
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(_)) => return StatusCode::PAYLOAD_TOO_LARGE.into_response(),
+            Err(_) => return StatusCode::REQUEST_TIMEOUT.into_response(),
+        };
+        // Fingerprint the wire request, not a Rust struct that a later release
+        // may extend with defaulted fields during the same retry window.
+        let mut fingerprint = parts.uri.path().as_bytes().to_vec();
+        fingerprint.push(0);
+        fingerprint.extend_from_slice(&bytes);
+        let hash = crate::updates::sha256(&fingerprint);
+        if let Ok(value) = axum::http::HeaderValue::from_str(&hash) {
+            parts.headers.insert("cross-agent-fingerprint", value);
+        }
+        request = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
+    }
+    let mut response =
+        match tokio::time::timeout(std::time::Duration::from_secs(4), next.run(request)).await {
+            Ok(response) => response,
+            Err(_) => StatusCode::REQUEST_TIMEOUT.into_response(),
+        };
     response.headers_mut().insert(
         protocol::PROTOCOL_HEADER,
         axum::http::HeaderValue::from_static("1"),
     );
     response
+}
+
+async fn health(State(hub): State<Arc<Hub>>) -> Result<Json<String>, Refused> {
+    hub.store().health()?;
+    Ok(Json(BUILD.to_string()))
+}
+
+fn receipt(
+    headers: &axum::http::HeaderMap,
+    actor: &str,
+    operation: &str,
+    body: &impl serde::Serialize,
+) -> Result<Option<crate::store::Receipt>, Refused> {
+    let Some(nonce) = headers.get(protocol::WRITE_NONCE_HEADER) else {
+        return Ok(None);
+    };
+    let nonce = nonce
+        .to_str()
+        .map_err(|_| bad_request("invalid nonce header".to_string()))?;
+    let mut receipt = crate::store::Receipt::new(actor, nonce, operation, body)?;
+    if let Some(hash) = headers
+        .get("cross-agent-fingerprint")
+        .and_then(|v| v.to_str().ok())
+    {
+        receipt.fingerprint = hash.to_string();
+    }
+    Ok(Some(receipt))
 }
 
 async fn binary() -> Result<Response, Refused> {
@@ -467,9 +606,14 @@ fn sent_by_person(hub: &Hub, send: &Send) -> Result<bool, Refused> {
 
 async fn send(
     State(hub): State<Arc<Hub>>,
+    headers: axum::http::HeaderMap,
     Json(send): Json<Send>,
 ) -> Result<Json<Message>, Refused> {
     let _lifecycle = hub.lifecycle();
+    let receipt = receipt(&headers, &send.from, "send", &send)?;
+    if let Some(answer) = hub.store().replay_receipt(receipt.as_ref())? {
+        return Ok(Json(answer));
+    }
     let person = sent_by_person(&hub, &send)?;
     hub.agent(&send.to)?;
     if send.from == send.to {
@@ -481,7 +625,9 @@ async fn send(
     if send.body.trim().is_empty() {
         return Err(bad_request("a message can't be empty".to_string()));
     }
-    let message = hub.store().send(&send, now(), person)?;
+    let message = hub
+        .store()
+        .send_receipted(&send, now(), person, receipt.as_ref())?;
     hub.tell(Event::Sent {
         message: message.clone(),
     });
@@ -550,9 +696,14 @@ async fn leave(
 /// A message to a channel: a copy to each agent in it but its sender.
 async fn broadcast(
     State(hub): State<Arc<Hub>>,
+    headers: axum::http::HeaderMap,
     Json(send): Json<Send>,
 ) -> Result<Json<Vec<Message>>, Refused> {
     let _lifecycle = hub.lifecycle();
+    let receipt = receipt(&headers, &send.from, "broadcast", &send)?;
+    if let Some(answer) = hub.store().replay_receipt(receipt.as_ref())? {
+        return Ok(Json(answer));
+    }
     hub.forget(now())?;
     let person = sent_by_person(&hub, &send)?;
     let channel = channel_name(&send.to)?;
@@ -581,7 +732,7 @@ async fn broadcast(
                 Ok((name, away))
             })
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        store.broadcast_with_away(&send, channel, &recipients, at, person)?
+        store.broadcast_receipted(&send, channel, &recipients, at, person, receipt.as_ref())?
     };
     for message in &messages {
         hub.tell(Event::Sent {
@@ -609,8 +760,13 @@ async fn read_inbox(
     if read.skip && read.channel.is_none() && read.sender.is_none() {
         return Err(bad_request("skip needs a channel or sender".to_string()));
     }
+    if read.skip && read.defer_ack && read.up_to.is_none() {
+        return Err(bad_request(
+            "a retryable skip needs an up_to message id".to_string(),
+        ));
+    }
     let inbox = hub.store().read_mail(&read, now())?;
-    if !inbox.read_ids.is_empty() {
+    if (!read.defer_ack || read.skip) && !inbox.read_ids.is_empty() {
         hub.tell(Event::Read {
             name: read.name.clone(),
             ids: inbox.read_ids.clone(),
@@ -628,19 +784,38 @@ async fn read_message(
     hub.agent(&read.name)?;
     let message = hub
         .store()
-        .read_message(&read.name, read.id, now())?
+        .read_message_deferred(&read.name, read.id, now(), read.defer_ack)?
         .ok_or_else(|| {
             Refused(
                 StatusCode::NOT_FOUND,
                 format!("No message {} to you.", read.id),
             )
         })?;
-    hub.tell(Event::Read {
-        name: read.name.clone(),
-        ids: vec![message.id],
-    });
-    hub.tell_agent(&read.name)?;
+    if !read.defer_ack {
+        hub.tell(Event::Read {
+            name: read.name.clone(),
+            ids: vec![message.id],
+        });
+        hub.tell_agent(&read.name)?;
+    }
     Ok(Json(message))
+}
+
+async fn acknowledge(
+    State(hub): State<Arc<Hub>>,
+    Json(ack): Json<protocol::Acknowledge>,
+) -> Result<Json<Vec<u64>>, Refused> {
+    let _lifecycle = hub.lifecycle();
+    hub.agent(&ack.name)?;
+    let ids = hub.store().acknowledge(&ack.name, &ack.ids, now())?;
+    if !ids.is_empty() {
+        hub.tell(Event::Read {
+            name: ack.name.clone(),
+            ids: ids.clone(),
+        });
+        hub.tell_agent(&ack.name)?;
+    }
+    Ok(Json(ids))
 }
 
 async fn retire(
@@ -651,6 +826,20 @@ async fn retire(
     check_name(&retire.name).map_err(bad_request)?;
     if let Some(key) = &retire.key {
         check_key(&hub, key)?;
+    }
+    if hub
+        .store()
+        .agent(&retire.name)?
+        .is_some_and(|agent| agent.retired_at.is_some())
+    {
+        return Ok(Json(
+            hub.store()
+                .retirement_result(&retire.name)?
+                .unwrap_or(Retired {
+                    channels: 0,
+                    holds: 0,
+                }),
+        ));
     }
     let agent = hub.agent(&retire.name)?;
     if agent.person {
@@ -664,15 +853,28 @@ struct NoticeQuery {
     name: String,
     #[serde(default)]
     channels: bool,
+    #[serde(default)]
+    with_id: bool,
 }
 
 async fn notice(
     State(hub): State<Arc<Hub>>,
     Query(query): Query<NoticeQuery>,
-) -> Result<Json<Vec<(String, bool, u32)>>, Refused> {
+) -> Result<Json<serde_json::Value>, Refused> {
     let _lifecycle = hub.lifecycle();
     hub.agent(&query.name)?;
-    Ok(Json(hub.store().notice(&query.name, query.channels)?))
+    let store = hub.store();
+    let senders = store.notice(&query.name, query.channels)?;
+    let value = if query.with_id {
+        serde_json::to_value(protocol::Notice {
+            senders,
+            newest_unread_id: store.newest_unread(&query.name, query.channels)?,
+        })
+    } else {
+        serde_json::to_value(senders)
+    }
+    .map_err(|e| bad_request(e.to_string()))?;
+    Ok(Json(value))
 }
 
 async fn info(State(hub): State<Arc<Hub>>) -> Json<HubInfo> {
@@ -681,20 +883,44 @@ async fn info(State(hub): State<Arc<Hub>>) -> Json<HubInfo> {
 
 /// Stops the hub a moment after it answers, so the answer is sent.
 async fn stop(State(hub): State<Arc<Hub>>) -> Json<HubInfo> {
+    let supervised = hub.supervised;
     let stop = hub.stop.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(200));
-        let _ = stop.send(true);
+        if supervised {
+            if let Some(path) = std::env::var_os("CROSS_AGENT_CONTROL_SOCK") {
+                use std::io::Write;
+                if let Ok(mut control) = std::os::unix::net::UnixStream::connect(path) {
+                    let _ = control.write_all(b"{\"stop\":true}\n");
+                    let _ = control.set_read_timeout(Some(std::time::Duration::from_secs(6)));
+                    let mut reply = String::new();
+                    let _ = std::io::BufRead::read_line(
+                        &mut std::io::BufReader::new(control),
+                        &mut reply,
+                    );
+                }
+            }
+        } else {
+            let _ = stop.send(true);
+        }
     });
     Json(hub.info())
 }
 
 async fn holds(State(hub): State<Arc<Hub>>) -> Result<Json<Vec<Hold>>, Refused> {
-    Ok(Json(hub.store().held(now())?))
+    Ok(Json(hub.store().held(hub.hold_clock())?))
 }
 
-async fn take(State(hub): State<Arc<Hub>>, Json(take): Json<Take>) -> Result<Json<Taken>, Refused> {
+async fn take(
+    State(hub): State<Arc<Hub>>,
+    headers: axum::http::HeaderMap,
+    Json(take): Json<Take>,
+) -> Result<Json<Taken>, Refused> {
     let _lifecycle = hub.lifecycle();
+    let receipt = receipt(&headers, &take.holder, "take", &take)?;
+    if let Some(answer) = hub.store().replay_receipt(receipt.as_ref())? {
+        return Ok(Json(answer));
+    }
     check_hold(&take.name).map_err(bad_request)?;
     hub.agent(&take.holder)?;
     if take.minutes == 0 || take.minutes > HOLD_MINUTES_MAX {
@@ -703,19 +929,28 @@ async fn take(State(hub): State<Arc<Hub>>, Json(take): Json<Take>) -> Result<Jso
             take.minutes
         )));
     }
-    Ok(Json(hub.store().take_hold(&take, now())?))
+    Ok(Json(hub.store().take_hold_receipted(
+        &take,
+        hub.hold_clock(),
+        receipt.as_ref(),
+    )?))
 }
 
 async fn release(
     State(hub): State<Arc<Hub>>,
+    headers: axum::http::HeaderMap,
     Json(release): Json<Release>,
 ) -> Result<Json<Vec<Hold>>, Refused> {
     let _lifecycle = hub.lifecycle();
+    let receipt = receipt(&headers, &release.holder, "release", &release)?;
+    if let Some(answer) = hub.store().replay_receipt(receipt.as_ref())? {
+        return Ok(Json(answer));
+    }
     check_hold(&release.name).map_err(bad_request)?;
     hub.agent(&release.holder)?;
     let holds = hub
         .store()
-        .release_hold(&release, now())?
+        .release_hold_receipted(&release, hub.hold_clock(), receipt.as_ref())?
         .map_err(|reason| Refused(StatusCode::CONFLICT, reason))?;
     Ok(Json(holds))
 }
@@ -745,6 +980,7 @@ impl Watch {
         let lifecycle = hub.lifecycle();
         hub.agent(&name)?;
         hub.store().touch(&name, now())?;
+        hub.store().set_watching(&name, true)?;
         *hub.watchers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -769,7 +1005,12 @@ impl Drop for Watch {
         {
             *count = count.saturating_sub(1);
         }
-        let _ = self.hub.store().touch(&self.name, now());
+        if self.hub.draining.load(Ordering::SeqCst) == 0 && !self.hub.connected(&self.name) {
+            let _ = self.hub.store().set_watching(&self.name, false);
+        }
+        if self.hub.draining.load(Ordering::SeqCst) == 0 {
+            let _ = self.hub.store().touch(&self.name, now());
+        }
         let _ = self.hub.tell_agent(&self.name);
     }
 }
@@ -834,10 +1075,10 @@ impl Stream for AgentEvents {
                                 name: watch.name.clone(),
                             }
                         } else {
-                            continue;
+                            Event::Restarting
                         }
                     } else {
-                        continue;
+                        Event::Restarting
                     }
                 }
                 Poll::Ready(None) => return Poll::Ready(None),
@@ -847,8 +1088,12 @@ impl Stream for AgentEvents {
                 match &event {
                     Event::Sent { message } if message.to == watch.name && !message.away => {}
                     Event::Retired { name } if *name == watch.name => self.ended = true,
+                    Event::Restarting => self.ended = true,
                     _ => continue,
                 }
+            }
+            if matches!(event, Event::Restarting) {
+                self.ended = true;
             }
             if !self.types.iter().any(|kind| kind == event.kind()) {
                 if self.ended {
@@ -1056,6 +1301,7 @@ mod tests {
                 1,
             )
             .unwrap();
+        store.set_watching("a", true).unwrap();
         let mut hub = Hub::with_timeouts(store, 10, 100).unwrap();
         hub.started = 1_000_000;
         let agent = hub.store().agent("a").unwrap().unwrap();

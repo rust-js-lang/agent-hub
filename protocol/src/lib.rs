@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 /// the agent is seen now, and the hub answers with its [`Agent`].
 pub const PROTOCOL: u32 = 1;
 pub const PROTOCOL_HEADER: &str = "cross-agent-protocol";
-pub const EVENT_TYPES: &str = "sent,read,agent,retired";
+pub const EVENT_TYPES: &str = "sent,read,agent,retired,restarting";
+pub const WRITE_NONCE_HEADER: &str = "cross-agent-nonce";
+pub const ACK: &str = "/api/ack";
 pub const BINARY: &str = "/api/binary";
 
 pub const AGENTS: &str = "/api/agents";
@@ -168,6 +170,8 @@ pub struct Message {
     pub channel: Option<String>,
     #[serde(default)]
     pub away: bool,
+    #[serde(default)]
+    pub urgent: bool,
 }
 
 /// An agent reads its unread messages, at most `max` of them.
@@ -184,12 +188,18 @@ pub struct ReadInbox {
     /// Opt in, so clients that cannot display digests still get full bodies.
     #[serde(default)]
     pub digest: bool,
+    #[serde(default)]
+    pub defer_ack: bool,
+    #[serde(default)]
+    pub up_to: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadMessage {
     pub name: String,
     pub id: u64,
+    #[serde(default)]
+    pub defer_ack: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,6 +226,8 @@ pub struct Digest {
     pub channel: String,
     pub unread: u32,
     pub first: Vec<DigestLine>,
+    #[serde(default)]
+    pub newest_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +274,8 @@ pub struct HubInfo {
     pub target: String,
     #[serde(default)]
     pub binary_sha256: Option<String>,
+    #[serde(default)]
+    pub supervised: bool,
 }
 
 pub fn default_protocol() -> u32 {
@@ -340,6 +354,7 @@ pub enum Event {
     Retired {
         name: String,
     },
+    Restarting,
     #[serde(other)]
     Unknown,
 }
@@ -351,9 +366,22 @@ impl Event {
             Self::Read { .. } => "read",
             Self::Agent { .. } => "agent",
             Self::Retired { .. } => "retired",
+            Self::Restarting => "restarting",
             Self::Unknown => "unknown",
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Acknowledge {
+    pub name: String,
+    pub ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notice {
+    pub senders: Vec<(String, bool, u32)>,
+    pub newest_unread_id: u64,
 }
 
 /// The longest name an agent may have.
@@ -362,6 +390,9 @@ pub const NAME_MAX: usize = 64;
 /// Whether `name` may name an agent: 1 to [`NAME_MAX`] ASCII letters, digits,
 /// `-`, `_` and `.`, so it's the same in a URL, a shell and a terminal.
 pub fn check_name(name: &str) -> Result<(), String> {
+    if name == "hub" {
+        return Err("hub is reserved for upgrade announcements".to_string());
+    }
     check(name, "an agent's name")
 }
 
@@ -435,12 +466,13 @@ mod tests {
             person: false,
             channel: None,
             away: false,
+            urgent: false,
         };
         let event = Event::Sent { message };
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"sent","message":{"id":7,"from":"a","to":"b","body":"hi","sentAt":1,"readAt":null,"person":false,"channel":null,"away":false}}"#
+            r#"{"type":"sent","message":{"id":7,"from":"a","to":"b","body":"hi","sentAt":1,"readAt":null,"person":false,"channel":null,"away":false,"urgent":false}}"#
         );
         assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), event);
     }
@@ -501,6 +533,14 @@ mod tests {
                 )
             });
         }
+        accepts::<Agent>(
+            serde_json::json!({"name":"a","machine":"m","lastSeen":1,"watching":false,"unread":0,"person":false}),
+        );
+        accepts::<Message>(
+            serde_json::json!({"id":1,"from":"a","to":"b","body":"hi","sentAt":1,"readAt":null,"person":false,"channel":null}),
+        );
+        accepts::<Acknowledge>(serde_json::json!({"name":"a","ids":[]}));
+        accepts::<Notice>(serde_json::json!({"senders":[],"newest_unread_id":0}));
         accepts::<Register>(serde_json::json!({"name":"a","machine":"m"}));
         accepts::<Send>(serde_json::json!({"from":"a","to":"b","body":"hi"}));
         accepts::<ReadInbox>(serde_json::json!({"name":"a","max":20}));

@@ -24,17 +24,68 @@ def wait_for(predicate, timeout=15):
     raise RuntimeError("compatibility hub/watch did not become ready")
 
 
-def check(server, client):
+def stop_process(process):
+    if process.poll() is not None:
+        return
+    os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=6)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+
+
+def start_process(server, directory, port):
+    args = [server, "serve", "--port", str(port), "--db", str(Path(directory) / "hub.db")]
+    help_text = subprocess.check_output([server, "serve", "--help"], text=True)
+    if "--no-supervisor" in help_text:
+        args += ["--no-supervisor"]
+    return subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
+
+
+def check_migrated_data(current, previous):
+    with tempfile.TemporaryDirectory(prefix="cam-schema-") as directory:
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        url = f"http://127.0.0.1:{port}"
+        env = {**os.environ, "CROSS_AGENT_HUB": url, "CROSS_AGENT_STATE_DIR": directory}
+        process = start_process(current, directory, port)
+        def ready():
+            with urllib.request.urlopen(url + "/api/hub", timeout=2) as response:
+                return response.status == 200
+        def run(binary, *args):
+            return subprocess.check_output([binary, *args], env=env, text=True, timeout=15)
+        try:
+            wait_for(ready)
+            run(current, "agents", "--as", "schema-a")
+            run(current, "agents", "--as", "schema-b")
+            run(current, "send", "--as", "schema-a", "schema-b", "written by the new release")
+            run(current, "hold", "--as", "schema-a", "schema-check")
+            stop_process(process)
+            # A fresh port avoids relying on the previous release's cold-bind
+            # policy; the database and all acknowledged data stay the same.
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+            url = f"http://127.0.0.1:{port}"
+            env["CROSS_AGENT_HUB"] = url
+            process = start_process(previous, directory, port)
+            wait_for(ready)
+            assert "written by the new release" in run(previous, "inbox", "--as", "schema-b")
+            assert "schema-check" in run(previous, "holds", "--as", "schema-a")
+            print("PASS: previous hub reads the schema, messages and holds written by current")
+        finally:
+            stop_process(process)
+
+
+def check(server, client, label):
     with tempfile.TemporaryDirectory(prefix="cam-compat-") as directory:
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         url = f"http://127.0.0.1:{port}"
-        args = [server, "serve", "--port", str(port), "--db", str(Path(directory) / "hub.db")]
-        help_text = subprocess.check_output([server, "serve", "--help"], text=True)
-        if "--no-supervisor" in help_text:
-            args += ["--no-supervisor"]
-        process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True)
+        process = start_process(server, directory, port)
         watcher = None
         env = {**os.environ, "CROSS_AGENT_HUB": url, "CROSS_AGENT_STATE_DIR": directory}
         def run(*command):
@@ -55,17 +106,12 @@ def check(server, client):
             run("send", "--as", "compat-a", "compat-b", "mail with a watch connected")
             assert "mail with a watch connected" in run("inbox", "--as", "compat-b")
             assert watcher.poll() is None
-            print(f"PASS: {Path(client).parent.name} client -> {Path(server).parent.name} hub")
+            print(f"PASS: {label}")
         finally:
             if watcher:
                 watcher.terminate()
                 watcher.wait(timeout=5)
-            os.killpg(process.pid, signal.SIGTERM)
-            try:
-                process.wait(timeout=6)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=5)
+            stop_process(process)
 
 
 if __name__ == "__main__":
@@ -73,5 +119,7 @@ if __name__ == "__main__":
     parser.add_argument("--current", required=True)
     parser.add_argument("--previous", required=True)
     options = parser.parse_args()
-    check(str(Path(options.current).resolve()), str(Path(options.previous).resolve()))
-    check(str(Path(options.previous).resolve()), str(Path(options.current).resolve()))
+    current, previous = str(Path(options.current).resolve()), str(Path(options.previous).resolve())
+    check(current, previous, "previous client -> current hub")
+    check(previous, current, "current client -> previous hub")
+    check_migrated_data(current, previous)

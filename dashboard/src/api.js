@@ -22,7 +22,15 @@ import {
   signInSerialize_serialize,
 } from "../../protocol/src/lib.js";
 import * as Protocol from "../../protocol/src/lib.js";
-import { $displayJsonError, $fromJson, $json, $settle, $toJson, $try } from "@rust-js/std";
+import {
+  $displayF64,
+  $displayJsonError,
+  $fromJson,
+  $json,
+  $settle,
+  $toJson,
+  $try,
+} from "@rust-js/std";
 
 /**
  * The JSON the hub answers at `path`, asked as `init` says, or why
@@ -55,6 +63,10 @@ async function ask(path, init, readT) {
 
 /** The JSON the hub answers a `POST` of `body` to `path`. */
 async function post(path, body, readT, writeimpl_Serialize) {
+  return await postNonce(path, body, undefined, readT, writeimpl_Serialize);
+}
+
+async function postNonce(path, body, nonce, readT, writeimpl_Serialize) {
   const result = $toJson(body, writeimpl_Serialize, false);
   const result$1 =
     result.TAG === "Err"
@@ -67,6 +79,9 @@ async function post(path, body, readT, writeimpl_Serialize) {
   const headers = new Headers();
   headers.append("content-type", "application/json");
   headers.append(Protocol.PROTOCOL_HEADER, "1");
+  if (nonce != null) {
+    headers.append(Protocol.WRITE_NONCE_HEADER, nonce);
+  }
   const init = {
     method: "POST",
     headers,
@@ -180,28 +195,41 @@ export async function send(me, to, body) {
     body,
     key: me.key,
   };
-  if (to.startsWith("#")) {
-    const result = await post(
-      BROADCAST,
-      send,
-      $json.vec(messageDeserialize_deserialize),
-      sendSerialize_serialize,
-    );
-    if (result.TAG === "Err") {
-      return result;
+  const result = await hub();
+  const supported = result.TAG === "Ok" && result._0.features.includes("write-nonce");
+  const nonce = `${$displayF64(Date.now())}-${$displayF64(Math.random())}`;
+  const attempts = supported ? 3 : 1;
+  let problem = "The message could not be sent.";
+  for (let i = 0; i < attempts; i++) {
+    let result;
+    if (to.startsWith("#")) {
+      const result$1 = await postNonce(
+        BROADCAST,
+        send,
+        supported ? nonce : undefined,
+        $json.vec(messageDeserialize_deserialize),
+        sendSerialize_serialize,
+      );
+      function map() {}
+      result = result$1.TAG === "Ok" ? { TAG: "Ok", _0: map(result$1._0) } : result$1;
+    } else {
+      const result$1 = await postNonce(
+        MESSAGES,
+        send,
+        supported ? nonce : undefined,
+        messageDeserialize_deserialize,
+        sendSerialize_serialize,
+      );
+      function map() {}
+      result = result$1.TAG === "Ok" ? { TAG: "Ok", _0: map(result$1._0) } : result$1;
     }
-  } else {
-    const result = await post(
-      MESSAGES,
-      send,
-      messageDeserialize_deserialize,
-      sendSerialize_serialize,
-    );
-    if (result.TAG === "Err") {
-      return result;
+    if (result.TAG === "Ok") {
+      return { TAG: "Ok" };
     }
+    const reason = result._0;
+    problem = reason;
   }
-  return { TAG: "Ok" };
+  return { TAG: "Err", _0: problem };
 }
 
 /** The person has read what was sent to them: it's on the page. */
@@ -211,6 +239,8 @@ export async function read(me) {
     max: 100,
     skip: false,
     digest: false,
+
+    deferAck: false,
   };
   return await post(INBOX, read, inboxDeserialize_deserialize, readInboxSerialize_serialize);
 }

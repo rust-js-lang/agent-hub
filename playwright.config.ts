@@ -22,7 +22,7 @@ export default defineConfig({
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
-    command: `cargo run -q -p cross-agent-message -- serve --port ${port} --db ${db} --reconnect-grace 0`,
+    command: `cargo run -q -p cross-agent-message -- serve --port ${port} --db ${db} --reconnect-grace 0 --no-supervisor`,
     url: `${hub}/api/agents`,
     reuseExistingServer: false,
     // The first run builds the hub.
