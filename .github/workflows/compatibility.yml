@@ -21,6 +21,15 @@ jobs:
       - name: Build and test current protocol
         # Handoff deadlines apply to the optimized executable we distribute.
         run: cargo test --release --locked -p cross-agent-message -p protocol
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 24
+      - name: Run shared protocol tests as JavaScript
+        # The tool builds the pinned rust-js compiler, then executes the same
+        # contract tests with Node; compilation alone is not this check.
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: node rust-js/tooling/cli.js test --package protocol
       - name: Build the previous release
         shell: bash
         run: |

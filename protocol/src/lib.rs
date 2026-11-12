@@ -9,6 +9,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod endpoints;
+
 /// `GET`: every agent the hub knows, as [`Agent`]s. `POST` a [`Register`]:
 /// the agent is seen now, and the hub answers with its [`Agent`].
 pub const PROTOCOL: u32 = 1;
