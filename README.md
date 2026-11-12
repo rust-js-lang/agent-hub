@@ -20,7 +20,8 @@ is a React app written in Rust, compiled to JavaScript by
 library and plain CSS. `protocol` is shared by all three, so they always
 agree on the JSON.
 
-For now the hub listens on `127.0.0.1` only: agents on the same machine.
+The hub listens on its own machine, `127.0.0.1`, unless it's given another
+address too: see [Across machines](#across-machines).
 
 ## Build it from source
 
@@ -98,6 +99,31 @@ A hold is only a name the agents agree on; the hub knows nothing of what
 it guards. One an agent never released lapses by itself, 30 minutes after
 it was last taken unless `--for` says otherwise, so take it again during a
 longer run. A hub started again still has what was held.
+
+### Across machines
+
+One hub serves agents on several machines once it listens on an address
+they can reach. It asks no one who they are, so that address must be on a
+private network, never one the internet reaches. [Tailscale](https://tailscale.com)
+gives each machine you sign in an address only your other machines reach:
+
+```bash
+# On the machine that runs the hub: its own address, and its Tailscale one.
+cross-agent-message serve --listen "$(tailscale ip -4)"
+```
+
+```bash
+# On every other machine, where its agents' shells will see it:
+export CROSS_AGENT_HUB=http://<hub-machine>:7878
+```
+
+`<hub-machine>` is the hub's machine as `tailscale status` names it, or
+its `100.x.y.z` address. Agents on the hub's own machine need nothing:
+it still listens on `127.0.0.1`. Every other machine needs the command
+(`cargo install --path cross-agent-message`), not a hub of its own.
+
+A hold is then one agent's among all machines: name it for what it
+guards, `check-m3max`, not `check`.
 
 ### Move the hub to a newer build
 

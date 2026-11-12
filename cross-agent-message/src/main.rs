@@ -1,7 +1,7 @@
 //! `cross-agent-message`: run the hub, or use it as an agent.
 
 use std::io::Write;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -47,6 +47,13 @@ enum Command {
         /// The SQLite file that keeps the history.
         #[arg(long, default_value_os_t = default_db())]
         db: PathBuf,
+        /// Another address to listen on, beside this machine's own
+        /// (`127.0.0.1`), any number of times: the machine's address on a
+        /// private network, its Tailscale one (`tailscale ip -4`), so
+        /// agents on other machines reach it. The hub asks no one who they
+        /// are: never an address the internet reaches.
+        #[arg(long, value_name = "ADDRESS")]
+        listen: Vec<IpAddr>,
         /// Take the place of a hub already running there, a build before
         /// this one: it's asked to stop first. Agents' `watch`es find the
         /// new one by themselves.
@@ -130,7 +137,17 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let client = Client::new(&cli.hub);
     match cli.command {
-        Command::Serve { port, db, replace } => serve(port, db, replace),
+        Command::Serve {
+            port,
+            db,
+            listen,
+            replace,
+        } => {
+            let local = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+            let others = listen.into_iter().map(|ip| SocketAddr::from((ip, port)));
+            let addresses: Vec<SocketAddr> = std::iter::once(local).chain(others).collect();
+            serve(&addresses, db, replace)
+        }
         Command::Agents { me } => agents(&client, &me),
         Command::Send { me, to, message } => send(&client, &me, &to, &message),
         Command::Inbox { me, max } => inbox(&client, &me, max),
@@ -146,11 +163,6 @@ fn main() -> Result<()> {
     }
 }
 
-/// The hub's address on this machine.
-fn local(port: u16) -> SocketAddr {
-    SocketAddr::from((Ipv4Addr::LOCALHOST, port))
-}
-
 /// The hub already at `address`, if one answers.
 fn running(address: SocketAddr) -> Option<(Client, protocol::HubInfo)> {
     let client = Client::new(&format!("http://{address}"));
@@ -158,8 +170,10 @@ fn running(address: SocketAddr) -> Option<(Client, protocol::HubInfo)> {
     Some((client, info))
 }
 
-fn serve(port: u16, db: PathBuf, replace: bool) -> Result<()> {
-    let address = local(port);
+/// The hub at `addresses`, this machine's own first, in place of one
+/// already there where `replace` says.
+fn serve(addresses: &[SocketAddr], db: PathBuf, replace: bool) -> Result<()> {
+    let address = addresses[0];
     if let Some((client, info)) = running(address) {
         if !replace {
             bail!(
@@ -178,11 +192,11 @@ fn serve(port: u16, db: PathBuf, replace: bool) -> Result<()> {
             bail!("the hub at http://{address} didn't stop");
         }
     }
-    serve_at(address, db)
+    serve_at(addresses, db)
 }
 
 #[tokio::main]
-async fn serve_at(address: SocketAddr, db: PathBuf) -> Result<()> {
+async fn serve_at(addresses: &[SocketAddr], db: PathBuf) -> Result<()> {
     if let Some(parent) = db.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("can't make {}", parent.display()))?;
@@ -195,22 +209,39 @@ async fn serve_at(address: SocketAddr, db: PathBuf) -> Result<()> {
             dashboard.join("../..").display()
         );
     }
-    let listener = tokio::net::TcpListener::bind(address)
-        .await
-        .with_context(|| format!("can't listen on {address}"))?;
+    let mut listeners = Vec::new();
+    for address in addresses {
+        let listener = tokio::net::TcpListener::bind(address)
+            .await
+            .with_context(|| format!("can't listen on {address}"))?;
+        listeners.push(listener);
+    }
+    let at: Vec<String> = (addresses.iter())
+        .map(|address| format!("http://{address}"))
+        .collect();
     println!(
-        "The hub, build {}, is at http://{address}, keeping its history in {}.",
+        "The hub, build {}, is at {}, keeping its history in {}.",
         hub::BUILD,
+        at.join(" and "),
         db.display()
     );
     let hub = Arc::new(Hub::new(store).context("can't read what the hub kept held")?);
     let stopped = hub.stopped();
     let app = hub::router(hub, dashboard);
-    let served = axum::serve(listener, app).with_graceful_shutdown(async {
-        let _ = tokio::signal::ctrl_c().await;
-    });
+    let mut served = tokio::task::JoinSet::new();
+    for listener in listeners {
+        let app = app.clone();
+        served.spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = tokio::signal::ctrl_c().await;
+                })
+                .await
+        });
+    }
     tokio::select! {
-        served = served => served?,
+        // One address's serving ended, by Ctrl-C or an error: the hub's.
+        Some(ended) = served.join_next() => ended.context("the hub's serving failed")??,
         // Not waited on to end its streams: an agent's `watch` finds the
         // hub that takes its place.
         () = stopped => println!("Stopped, for another hub to take its place."),
