@@ -7,6 +7,7 @@
 //! it through the command line, whose calls are [`client`]'s.
 
 pub mod client;
+pub mod dashboard;
 pub mod hub;
 pub mod store;
 

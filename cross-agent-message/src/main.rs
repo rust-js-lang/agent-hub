@@ -10,6 +10,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use cross_agent_message::client::Client;
+use cross_agent_message::dashboard::{self, Dashboard};
 use cross_agent_message::hub::{self, Hub};
 use cross_agent_message::store::Store;
 use protocol::{Agent, Event, HOLD_MINUTES, Hold, check_channel, check_hold, check_name};
@@ -188,9 +189,21 @@ fn default_db() -> PathBuf {
         .join(".cross-agent-message/hub.db")
 }
 
-/// The dashboard this checkout builds, `bun run build`'s `web/dist`.
-fn dashboard() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web/dist")
+/// Where the dashboard is: the files this binary was built with, a hub
+/// built after `bun run build`, a release's among them; else this
+/// checkout's `web/dist`, which `bun run build` makes.
+fn dashboard() -> Dashboard {
+    if dashboard::embedded() {
+        return Dashboard::Embedded;
+    }
+    let dist = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web/dist");
+    if !dist.join("index.html").exists() {
+        eprintln!(
+            "The dashboard isn't built: run `bun run build` in {}.",
+            dist.join("../..").display()
+        );
+    }
+    Dashboard::Dir(dist)
 }
 
 fn main() -> Result<()> {
@@ -318,12 +331,6 @@ async fn serve_at(
     }
     let store = Store::open(&db).with_context(|| format!("can't open {}", db.display()))?;
     let dashboard = dashboard();
-    if !dashboard.join("index.html").exists() {
-        eprintln!(
-            "The dashboard isn't built: run `bun run build` in {}.",
-            dashboard.join("../..").display()
-        );
-    }
     let mut listeners = Vec::new();
     for address in addresses {
         let listener = tokio::net::TcpListener::bind(address)

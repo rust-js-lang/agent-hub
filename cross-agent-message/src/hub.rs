@@ -3,12 +3,11 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, Uri, header};
 use axum::response::sse::{self, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -24,6 +23,7 @@ use tokio::sync::{broadcast, watch};
 use tokio_stream::{Stream, wrappers::BroadcastStream};
 use tower_http::services::ServeDir;
 
+use crate::dashboard::{self, Dashboard};
 use crate::store::Store;
 
 pub struct Hub {
@@ -227,8 +227,8 @@ impl Hub {
 }
 
 /// The hub's routes, and `dashboard`'s files at every other path.
-pub fn router(hub: Arc<Hub>, dashboard: PathBuf) -> Router {
-    Router::new()
+pub fn router(hub: Arc<Hub>, dashboard: impl Into<Dashboard>) -> Router {
+    let routes = Router::new()
         .route(AGENTS, get(agents).post(register))
         .route(MESSAGES, get(history).post(send))
         .route(INBOX, post(read_inbox))
@@ -243,9 +243,20 @@ pub fn router(hub: Arc<Hub>, dashboard: PathBuf) -> Router {
         .route(PERSON, post(sign_in))
         .route(HUB, get(info))
         .route(STOP, post(stop))
-        .route(EVENTS, get(events))
-        .fallback_service(ServeDir::new(dashboard))
-        .with_state(hub)
+        .route(EVENTS, get(events));
+    let routes = match dashboard.into() {
+        Dashboard::Embedded => routes.fallback(embedded),
+        Dashboard::Dir(dir) => routes.fallback_service(ServeDir::new(dir)),
+    };
+    routes.with_state(hub)
+}
+
+/// A file of the dashboard kept in this binary, or that there's none.
+async fn embedded(uri: Uri) -> Response {
+    match dashboard::find(dashboard::FILES, uri.path()) {
+        Some((kind, bytes)) => ([(header::CONTENT_TYPE, kind)], bytes).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn agents(State(hub): State<Arc<Hub>>) -> Result<Json<Vec<Agent>>, Refused> {

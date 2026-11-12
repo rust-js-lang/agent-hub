@@ -510,3 +510,47 @@ fn a_new_cli_reads_an_old_hub_but_refuses_to_skip_when_filters_would_be_ignored(
         );
     }
 }
+
+/// A hub serving the dashboard kept in its binary answers its own address
+/// with the page, where it was built with one, and what isn't a file of it
+/// with none: a release needs no checkout beside it.
+#[test]
+fn a_hub_serves_the_dashboard_kept_in_its_binary() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let hub = Hub::new(Store::in_memory().unwrap()).unwrap();
+    let app = hub::router(
+        Arc::new(hub),
+        cross_agent_message::dashboard::Dashboard::Embedded,
+    );
+    thread::spawn(move || runtime.block_on(async { axum::serve(listener, app).await.unwrap() }));
+    let page = ureq::get(&format!("http://{address}/")).call();
+    match cross_agent_message::dashboard::embedded() {
+        true => {
+            let page = page.unwrap();
+            assert_eq!(page.status(), 200);
+            let kind = page
+                .headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap();
+            assert_eq!(kind, "text/html; charset=utf-8");
+        }
+        false => assert!(page.is_err()),
+    }
+    assert!(
+        ureq::get(&format!("http://{address}/no-such-file"))
+            .call()
+            .is_err()
+    );
+    // The API is the hub's whatever the dashboard is.
+    assert!(
+        ureq::get(&format!("http://{address}/api/hub"))
+            .call()
+            .is_ok()
+    );
+}

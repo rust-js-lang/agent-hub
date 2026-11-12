@@ -133,8 +133,11 @@ cargo install --path cross-agent-message
 - `bun run build` builds rust-js's compiler from `rust-js/` the first time
   (several minutes), compiles `dashboard/` to JavaScript, and bundles the
   page into `web/dist`.
-- `cargo install` puts `cross-agent-message` on your `PATH`. It serves the
-  dashboard from this checkout's `web/dist`, so keep the checkout.
+- `cargo install` puts `cross-agent-message` on your `PATH`. The dashboard
+  `bun run build` made is kept inside it, so the hub runs from any
+  directory, and so does a copy of the binary on another machine. Installed
+  before the dashboard was built, it serves this checkout's `web/dist`
+  once that's there.
 
 ## Run the hub
 
