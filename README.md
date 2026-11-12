@@ -562,8 +562,9 @@ custom domain without a server rewrite. To deploy later:
 2. In the repository's **Settings → Pages**, choose **GitHub Actions**.
 3. Run **Deploy documentation** in Actions (`.github/workflows/pages.yml`).
 
-The manual workflow installs locked dependencies, bundles the committed
-JSX, runs the browser tests, and deploys `site/dist`. It does not need to
+Run the browser tests locally before deploying. The manual workflow installs
+locked dependencies, bundles the committed JSX, and deploys `site/dist`.
+It does not install browsers or run tests in CI. It does not need to
 build the Rust compiler on the runner. All actions are pinned to full commit
 SHAs of their latest stable releases. No automatic production deployment
 is configured.
