@@ -606,6 +606,7 @@ fn worker_crash_restarts_without_losing_committed_state() {
 #[test]
 fn queued_burst_and_reused_keep_alive_connections_survive_a_drain() {
     let running = Running::new();
+    let original = running.worker_pid();
     let pooled = ureq::Agent::new_with_defaults();
     pooled
         .get(format!("{}/api/hub", running.url))
@@ -646,10 +647,12 @@ fn queued_burst_and_reused_keep_alive_connections_survive_a_drain() {
     }
     let result = command.wait_with_output().unwrap();
     assert!(
-        result.status.success(),
+        result.status.code() == Some(75),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    assert!(String::from_utf8_lossy(&result.stdout).contains("Upgrade deferred"));
+    assert_eq!(running.worker_pid(), original);
     for request in requests {
         assert!(request.join().unwrap().supervised);
     }
@@ -789,42 +792,77 @@ fn legacy_stop_shuts_down_the_supervisor_and_releases_the_listener() {
 }
 
 #[test]
-fn a_fresh_connection_can_send_its_first_request_after_drain_starts() {
+fn a_short_drain_upgrades_and_serves_a_fresh_connections_first_request() {
+    fresh_request_during_drain(Duration::from_millis(50), false);
+}
+
+#[test]
+fn a_slow_drain_serves_the_request_and_defers_without_launching_a_candidate() {
+    fresh_request_during_drain(Duration::from_secs(3), true);
+}
+
+fn fresh_request_during_drain(delay: Duration, deferred: bool) {
     use std::io::Read;
     let running = Running::new();
+    let original = running.worker_pid();
     let client = running.client();
     client.register("observer").unwrap();
     let mut events = client.watch("observer").unwrap();
-    let config =
-        cross_agent_message::supervisor::load_config(&running.root.join("hub.db")).unwrap();
-    let candidate = cross_agent_message::supervisor::snapshot(&running.binary, &config).unwrap();
-    let sha256 = cross_agent_message::updates::sha256(&std::fs::read(&candidate).unwrap());
+    let probe = Availability::start(&running.url);
     let mut connection =
         std::net::TcpStream::connect(running.url.trim_start_matches("http://")).unwrap();
     connection
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let upgrade = std::thread::spawn(move || {
-        cross_agent_message::supervisor::request(
-            &config,
-            &cross_agent_message::supervisor::Swap {
-                binary: candidate,
-                sha256,
-            },
-        )
+    std::thread::scope(|scope| {
+        let upgrade = scope.spawn(|| running.upgrade(&running.binary));
+        assert_eq!(events.next().unwrap().unwrap(), protocol::Event::Restarting);
+        let exposed = Instant::now();
+        std::thread::sleep(delay);
+        connection
+            .write_all(b"GET /api/hub HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        connection.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "fresh request failed during drain: {response}"
+        );
+        let output = upgrade.join().unwrap();
+        assert!(exposed.elapsed() < Duration::from_secs(10));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if deferred {
+            assert_eq!(
+                output.status.code(),
+                Some(75),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                stdout.contains("Upgrade deferred") && stdout.contains("outgoing drain took"),
+                "{stdout}"
+            );
+            assert!(!stdout.contains("hub moved"));
+            assert_eq!(running.worker_pid(), original);
+            let log = std::fs::read_to_string(running.root.join("log")).unwrap();
+            assert_eq!(
+                log.lines()
+                    .filter(|line| line.starts_with("Worker ") && line.contains(" is ready at "))
+                    .count(),
+                1,
+                "deferral must not launch a candidate"
+            );
+        } else {
+            assert!(
+                output.status.success(),
+                "{stdout}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(!stdout.contains("Upgrade deferred"));
+            assert_ne!(running.worker_pid(), original);
+        }
     });
-    assert_eq!(events.next().unwrap().unwrap(), protocol::Event::Restarting);
-    connection
-        .write_all(b"GET /api/hub HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-        .unwrap();
-    let mut response = String::new();
-    connection.read_to_string(&mut response).unwrap();
-    assert!(
-        response.starts_with("HTTP/1.1 200"),
-        "fresh connection failed during drain: {response}"
-    );
-    let output = upgrade.join().unwrap().unwrap();
-    assert!(!output.rolled_back, "{:?}", output.reason);
+    probe.finish();
 }
 
 #[test]
@@ -1002,7 +1040,22 @@ fn an_upgrade_rolls_back_when_a_previously_ready_listener_stops_answering_http()
     std::fs::write(&candidate, format!("#!/usr/bin/env python3\nimport os, sys\nif sys.argv[1] == 'worker':\n    os.dup2(3, 4)\nos.execv({source:?}, [{source:?}] + sys.argv[1:])\n", source = running.source.to_str().unwrap())).unwrap();
     std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
     let probe = Availability::start(&running.url);
-    let output = running.upgrade(&candidate);
+    let private = format!("http://[::1]:{}", running.url.rsplit(':').next().unwrap());
+    let private_probe = Availability::start(&private);
+    let client = running.client();
+    client.register("partial-observer").unwrap();
+    let mut events = client.watch("partial-observer").unwrap();
+    let output = std::thread::scope(|scope| {
+        let upgrade = scope.spawn(|| running.upgrade(&candidate));
+        assert_eq!(events.next().unwrap().unwrap(), protocol::Event::Restarting);
+        let exposed = Instant::now();
+        let output = upgrade.join().unwrap();
+        assert!(
+            exposed.elapsed() < Duration::from_secs(10),
+            "partial-address rollback exceeded exposure deadline"
+        );
+        output
+    });
     assert!(!output.status.success());
     let error = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -1028,6 +1081,7 @@ fn an_upgrade_rolls_back_when_a_previously_ready_listener_stops_answering_http()
     );
     assert_failed_candidate_retires_after_rollback(&running, original);
     probe.finish();
+    private_probe.finish();
 }
 
 fn assert_failed_candidate_retires_after_rollback(running: &Running, original: i32) {

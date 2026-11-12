@@ -13,6 +13,12 @@ pub(crate) const DRAIN_LIMIT: Duration = REQUEST_DRAIN.saturating_add(Duration::
 pub(crate) const FIRST_ACCEPT_LIMIT: Duration = Duration::from_secs(2);
 pub(crate) const EARLY_DRAIN_LIMIT: Duration = Duration::from_secs(1);
 pub(crate) const READY_LIMIT: Duration = Duration::from_secs(5);
+pub(crate) const EXPOSURE_LIMIT: Duration = Duration::from_secs(10);
+pub(crate) const ADMISSION_MARGIN: Duration = Duration::from_millis(500);
+pub(crate) const ROLLBACK_RESERVE: Duration = DRAIN_LIMIT
+    .saturating_add(FIRST_ACCEPT_LIMIT)
+    .saturating_add(ADMISSION_MARGIN);
+pub(crate) const LAUNCH_RESERVE: Duration = FIRST_ACCEPT_LIMIT.saturating_add(ROLLBACK_RESERVE);
 // ALF may resolve a flow's attributed PID asynchronously, including under load.
 pub(crate) const RETIRE_GRACE: Duration = Duration::from_secs(5);
 // Both attempts can consume drain + readiness, followed by the firewall grace.
@@ -27,6 +33,7 @@ pub(crate) const CONTROL_LIMIT: Duration = PARK_LIMIT
     .saturating_add(Duration::from_secs(5));
 const _: () = {
     assert!(DRAIN_LIMIT.as_millis() > REQUEST_DRAIN.as_millis());
+    assert!(LAUNCH_RESERVE.as_millis() < EXPOSURE_LIMIT.as_millis());
     assert!(DRAIN_LIMIT.as_millis() + FIRST_ACCEPT_LIMIT.as_millis() < 10_000);
     assert!(
         DRAIN_LIMIT.as_millis()

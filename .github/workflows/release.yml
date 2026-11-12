@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag (for example v0.1.2)
+        description: Release tag (for example v0.1.3)
         required: true
         type: string
       draft:
@@ -89,6 +89,8 @@ jobs:
           Cooperative handoff drains requests and closes SQLite while keeping the outgoing process alive. The replacement must accept on every previously-ready address; success is reported at activation, and the database-free predecessor is retired after a five-second firewall-lookup grace. Upgrades are serialized through that grace. Before activation, a cooperative failed candidate is drained and parked while the same outgoing process resumes; the failed candidate retires only after rollback readiness and the same grace. A candidate that crashes or will not park must instead be reaped before rollback and may interrupt a remote connection; that exception is logged. Acknowledged writes are never replaced by a backup.
 
           Cooperative workers exit when their supervisor channel closes, including while parked; they no longer serve as orphans after supervisor death. Normal shutdown reaps both workers and releases all listeners before confirming stop, and explicitly refuses any queued upgrade.
+
+          A ten-second request-exposure deadline includes the outgoing drain. Before launching a candidate, the supervisor reserves startup, a full candidate drain, rollback acceptance and scheduling margin. If the outgoing drain leaves insufficient time, it resumes the same worker and reports the upgrade as deferred. The current CLI exits 75 (try again) with the measured drain and reason. Existing pending-listener retries continue; explicit upgrades require a later retry. Per-address monotonic timestamps and independent acceptance/readiness notifications expose the actual gaps.
 
           The executable is ad-hoc signed with the fixed identifier `io.rust-js.cross-agent-message` before checksums are calculated.
 

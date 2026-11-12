@@ -210,6 +210,20 @@ pub fn run(path: &Path, db: &Path, checksum: Option<&str>) -> Result<()> {
     let stats = probes
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if result.deferred {
+        let reason = result
+            .reason
+            .unwrap_or_else(|| "insufficient safe rollback budget; retry later".into());
+        let message = format!(
+            "Upgrade deferred; the hub remains build {}. {}. {} probe connections, {} failed, longest wait {} ms.",
+            result.build, reason, stats.count, stats.failed, stats.longest_ms
+        );
+        println!("{message}");
+        if let Err(error) = announce(&config, &message) {
+            eprintln!("could not announce upgrade deferral: {error:#}");
+        }
+        return Err(supervisor::Deferred(reason).into());
+    }
     let ready_addresses: Vec<&str> = result
         .addresses
         .iter()

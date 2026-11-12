@@ -260,7 +260,7 @@ dependencies = [
 
 [[package]]
 name = "cross-agent-message"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "axum",

@@ -642,6 +642,16 @@ full drain budget if buffered startup/acceptance frames reveal it began serving.
 Each listener reports stop and first-accept timestamps on the host's monotonic
 clock, so the supervisor logs the measured gap per address for upgrade and rollback.
 An address a failed candidate never accepted retains the original stop timestamp.
+The request-exposure deadline is 10 s, counted conservatively from the outgoing
+quiesce request, including its drain. A candidate launches only when enough time
+remains for first acceptance, its full drain if rollback is needed, the original
+worker's resume, and a 500 ms scheduling margin. The reservation is derived from
+the phase constants (currently 9.5 s). It is checked again immediately before
+launch. A slower outgoing drain therefore defers the upgrade: the same worker
+resumes, requests finish, and the candidate is never started. The current CLI
+prints the measured drain and reason and exits 75 (`EX_TEMPFAIL`, retry later).
+Older clients receive a rollback-compatible refusal with that reason. Explicit
+upgrades do not retry automatically; existing pending-listener retries continue.
 The listener queues up to the supported burst of 100 new connections during a
 swap. An upgrade reports its actual probe count, failures and longest wait,
 and posts one urgent line from `hub` to everyone. That reserved sender cannot

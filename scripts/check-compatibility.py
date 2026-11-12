@@ -206,6 +206,67 @@ def check_supervised_upgrades(current, previous):
             stop_process(process)
 
 
+def check_previous_client_deferral(current, previous):
+    help_text = subprocess.check_output([previous, "--help"], text=True)
+    if not any(line.strip().startswith("upgrade ") for line in help_text.splitlines()):
+        return
+    with tempfile.TemporaryDirectory(prefix="cam-defer-", dir="/tmp") as directory:
+        root = Path(directory)
+        installed = root / "cross-agent-message"
+        shutil.copy2(current, installed)
+        database = root / "hub.db"
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        url = f"http://127.0.0.1:{port}"
+        env = {**os.environ, "CROSS_AGENT_HUB": url, "CROSS_AGENT_STATE_DIR": directory}
+        process = subprocess.Popen([installed, "serve", "--db", database, "--port", str(port)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env, start_new_session=True)
+        events, stalled, upgrade = None, None, None
+        def info():
+            with urllib.request.urlopen(url + "/api/hub", timeout=2) as response:
+                return json.load(response)
+        try:
+            wait_for(lambda: info().get("supervised"))
+            before = info()
+            subprocess.run([current, "agents", "--as", "defer-observer"], env=env,
+                stdout=subprocess.DEVNULL, check=True, timeout=15)
+            events = urllib.request.urlopen(url + "/api/events?agent=defer-observer&protocol=1&types=restarting", timeout=20)
+            stalled = socket.create_connection(("127.0.0.1", port), timeout=15)
+            stalled.sendall(b"GET /api/hub HTTP/1.1\r\n")
+            upgrade = subprocess.Popen([previous, "upgrade", previous, "--db", str(database)],
+                env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+            while True:
+                line = events.readline()
+                assert line, "watch ended before the outgoing drain"
+                if line.startswith(b"data:") and json.loads(line[5:]).get("type") == "restarting":
+                    break
+            exposed = time.monotonic()
+            time.sleep(1)  # Longer than admission allows, shorter than request drain.
+            stalled.sendall(b"Host: localhost\r\nConnection: close\r\n\r\n")
+            response = b""
+            while True:
+                chunk = stalled.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+            assert response.startswith(b"HTTP/1.1 200"), response
+            stdout, stderr = upgrade.communicate(timeout=15)
+            assert upgrade.returncode != 0 and "upgrade deferred" in stderr.lower(), (stdout, stderr)
+            assert time.monotonic() - exposed < 10, "legacy-client deferral exceeded exposure bound"
+            after = info()
+            assert (after["version"], after["build"]) == (before["version"], before["build"])
+            print("PASS: previous client receives actionable deferred-upgrade refusal while requests finish")
+        finally:
+            if events:
+                events.close()
+            if stalled:
+                stalled.close()
+            if upgrade:
+                stop_process(upgrade)
+            stop_process(process)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--current", required=True)
@@ -216,3 +277,4 @@ if __name__ == "__main__":
     check(previous, current, "current client -> previous hub")
     check_migrated_data(current, previous)
     check_supervised_upgrades(current, previous)
+    check_previous_client_deferral(current, previous)

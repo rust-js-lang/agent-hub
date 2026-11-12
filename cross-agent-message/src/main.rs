@@ -254,7 +254,21 @@ fn dashboard() -> Dashboard {
     Dashboard::Dir(dist)
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) if error.is::<cross_agent_message::supervisor::Deferred>() => {
+            // EX_TEMPFAIL: the hub is healthy and the caller should retry later.
+            std::process::ExitCode::from(75)
+        }
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
     let cli = Cli::parse();
     let client = Client::new(&cli.hub);
     if !matches!(

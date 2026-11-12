@@ -61,9 +61,65 @@ pub struct Swapped {
     pub build: String,
     pub previous: String,
     pub rolled_back: bool,
+    #[serde(default)]
+    pub deferred: bool,
     pub reason: Option<String>,
     #[serde(default)]
     pub addresses: Vec<protocol::ListenAddress>,
+}
+
+/// A safe, retryable refusal to launch a candidate without its rollback budget.
+#[derive(Debug)]
+pub struct Deferred(pub String);
+impl std::fmt::Display for Deferred {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for Deferred {}
+
+#[derive(Debug)]
+struct Exposure {
+    started_ns: u64,
+    deadline: Instant,
+    drain_elapsed: Duration,
+}
+impl Exposure {
+    fn from_start(started_ns: u64) -> Result<Self> {
+        // Take Instant first so scheduling delay cannot lengthen the deadline.
+        let now = Instant::now();
+        let elapsed = crate::handoff::monotonic_ns()?
+            .checked_sub(started_ns)
+            .context("listener stop timestamp is in the future")?;
+        let elapsed = Duration::from_nanos(elapsed);
+        Ok(Self {
+            started_ns,
+            deadline: now + crate::handoff::EXPOSURE_LIMIT.saturating_sub(elapsed),
+            drain_elapsed: elapsed,
+        })
+    }
+    fn from_stops(
+        stops: &BTreeMap<String, u64>,
+        config: &Config,
+        fallback_ns: u64,
+    ) -> Result<Self> {
+        let started_ns = protected(config)
+            .map(|address| stops.get(&address).copied().unwrap_or(fallback_ns))
+            // The command can precede the listener tasks observing shutdown.
+            // Keep that scheduling interval inside the conservative deadline.
+            .chain(std::iter::once(fallback_ns))
+            .min()
+            .unwrap_or(fallback_ns);
+        Self::from_start(started_ns)
+    }
+    fn require_launch(&self) -> Result<()> {
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining < crate::handoff::LAUNCH_RESERVE {
+            let elapsed = crate::handoff::monotonic_ns()?.saturating_sub(self.started_ns);
+            return Err(Deferred(format!("upgrade deferred: outgoing drain took {:.3} ms; total exposure {:.3} ms; {} ms remain, but safe startup and rollback need {} ms; retry when requests are quieter", self.drain_elapsed.as_secs_f64() * 1_000.0, elapsed as f64 / 1_000_000.0, remaining.as_millis(), crate::handoff::LAUNCH_RESERVE.as_millis())).into());
+        }
+        Ok(())
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Active {
@@ -105,6 +161,7 @@ struct Worker {
     stopped_accepting_ns: BTreeMap<String, u64>,
     first_accepted_ns: BTreeMap<String, u64>,
     resume_from_ns: BTreeMap<String, u64>,
+    exposure_deadline: Option<Instant>,
     sequence: u64,
     phase: Phase,
 }
@@ -386,7 +443,7 @@ fn start(
     listeners: &[TcpListener],
     limit: Duration,
 ) -> Result<Worker> {
-    let (mut worker, readiness) = start_candidate(binary, config, listeners, limit, None)?;
+    let (mut worker, readiness) = start_candidate(binary, config, listeners, limit, None, None)?;
     if let Err(error) = readiness {
         terminate(&mut worker, Duration::ZERO)?;
         return Err(error);
@@ -402,7 +459,11 @@ fn start_candidate(
     listeners: &[TcpListener],
     limit: Duration,
     capability: Option<crate::updates::BuildInfo>,
+    exposure: Option<&Exposure>,
 ) -> Result<(Worker, Result<()>)> {
+    if let Some(exposure) = exposure {
+        exposure.require_launch()?;
+    }
     let started = Instant::now();
     let at_ns = crate::handoff::monotonic_ns()?;
     let deadline = started + limit;
@@ -427,6 +488,9 @@ fn start_candidate(
         Some(info) => info,
         None => crate::updates::inspect(&executable)?,
     };
+    if let Some(exposure) = exposure {
+        exposure.require_launch()?;
+    }
     let (mut process, stream) = child(&executable, config, listeners)?;
     let channel = match crate::handoff::Channel::new(stream) {
         Ok(channel) => channel,
@@ -445,6 +509,7 @@ fn start_candidate(
         stopped_accepting_ns: BTreeMap::new(),
         first_accepted_ns: BTreeMap::new(),
         resume_from_ns: BTreeMap::new(),
+        exposure_deadline: exposure.map(|exposure| exposure.deadline),
         addresses: Vec::new(),
         sequence: 0,
         phase: Phase::Running,
@@ -456,7 +521,10 @@ fn start_candidate(
         0,
         deadline,
         startup.then_some(StartLimit {
-            until: started + FIRST_ACCEPT_LIMIT,
+            until: exposure.map_or(started + FIRST_ACCEPT_LIMIT, |exposure| {
+                (started + FIRST_ACCEPT_LIMIT)
+                    .min(exposure.deadline - crate::handoff::ROLLBACK_RESERVE)
+            }),
             at_ns,
         }),
     ) {
@@ -655,18 +723,21 @@ fn resume(worker: &mut Worker, image: &Path, config: &Config) -> Result<()> {
     let id = worker.next_request();
     worker.phase = Phase::Resuming(id);
     worker.first_accepted_ns.clear();
-    let deadline = started + READY_LIMIT;
+    let deadline = worker
+        .exposure_deadline
+        .map_or(started + READY_LIMIT, |end| end.min(started + READY_LIMIT));
     worker
         .channel
         .send(&crate::handoff::Command::Resume { id }, deadline)?;
     let startup = worker.startup;
+    let worker_deadline = deadline;
     let ready = wait_ready(
         worker,
         config,
         id,
         deadline,
         startup.then_some(StartLimit {
-            until: started + FIRST_ACCEPT_LIMIT,
+            until: worker_deadline.min(started + FIRST_ACCEPT_LIMIT),
             at_ns,
         }),
     )?;
@@ -679,6 +750,7 @@ fn resume(worker: &mut Worker, image: &Path, config: &Config) -> Result<()> {
     worker.resume_from_ns.clear();
     worker.addresses = ready.addresses;
     worker.phase = Phase::Running;
+    worker.exposure_deadline = None;
     eprintln!(
         "Worker {} resumed on the same process after rollback ({} ms).",
         worker.id(),
@@ -689,19 +761,25 @@ fn resume(worker: &mut Worker, image: &Path, config: &Config) -> Result<()> {
 
 /// A late drain never licenses another database writer. On any failure,
 /// request resume and keep owning the original child instead of killing it.
-fn quiesce(worker: &mut Worker, image: &Path, config: &Config) -> Result<()> {
+fn quiesce(worker: &mut Worker, image: &Path, config: &Config) -> Result<Exposure> {
+    let started_ns = crate::handoff::monotonic_ns()?;
+    let fallback = Exposure::from_start(started_ns)?;
+    worker.exposure_deadline = Some(fallback.deadline);
     if !worker.handoff {
         eprintln!(
             "Legacy outgoing worker has no cooperative handoff; this transition may interrupt a remote connection."
         );
-        return terminate(worker, Duration::from_secs(4));
+        terminate(worker, Duration::from_secs(4))?;
+        return Exposure::from_start(started_ns);
     }
     if let Err(error) = drain(worker) {
         resume(worker, image, config)
             .with_context(|| format!("{error:#}; old worker resume did not finish"))?;
         return Err(error);
     }
-    Ok(())
+    let exposure = Exposure::from_stops(&worker.stopped_accepting_ns, config, started_ns)?;
+    worker.exposure_deadline = Some(exposure.deadline);
+    Ok(exposure)
 }
 
 /// A rejected candidate must drain without automatically resuming itself.
@@ -824,6 +902,7 @@ fn rollback_candidate(
             eprintln!("retirement before controlled activation rollback failed: {error:#}");
         }
     }
+    let rollback_started_ns = crate::handoff::monotonic_ns()?;
     worker.resume_from_ns = worker.stopped_accepting_ns.clone();
     if candidate.handoff && candidate.try_wait()?.is_none() {
         match drain(&mut candidate) {
@@ -837,6 +916,20 @@ fn rollback_candidate(
                         worker.resume_from_ns.remove(address);
                     }
                 }
+                let resumed_deadline =
+                    Exposure::from_stops(&worker.resume_from_ns, config, rollback_started_ns)?
+                        .deadline;
+                let partial = protected(config)
+                    .any(|address| !candidate.first_accepted_ns.contains_key(&address));
+                // A still-uncovered address must never gain a later deadline
+                // just because a different address was accepted by the candidate.
+                worker.exposure_deadline = Some(if partial {
+                    worker
+                        .exposure_deadline
+                        .map_or(resumed_deadline, |previous| previous.min(resumed_deadline))
+                } else {
+                    resumed_deadline
+                });
                 candidate.phase = Phase::Retiring;
                 // Retain ownership even if resume times out: the main loop
                 // starts this grace only after the active worker proves ready.
@@ -890,6 +983,7 @@ fn shutdown(
             build: build.clone(),
             previous: build,
             rolled_back: true,
+            deferred: false,
             reason: Some("supervisor is stopping; queued upgrade was not started".into()),
             addresses: Vec::new(),
         };
@@ -1212,6 +1306,7 @@ pub fn run(mut config: Config) -> Result<()> {
                         worker.resume_from_ns.clear();
                         worker.addresses = ready.addresses;
                         worker.phase = Phase::Running;
+                        worker.exposure_deadline = None;
                         eprintln!("Worker {} completed delayed resume.", worker.id());
                     }
                 }
@@ -1248,19 +1343,23 @@ pub fn run(mut config: Config) -> Result<()> {
                         .as_deref()
                         .context("stable worker path missing")?,
                 )?;
-                if let Err(error) = quiesce(&mut worker, &prior.current, &config) {
-                    eprintln!("listener handoff cancelled; retaining worker: {error:#}");
-                    active = prior;
-                    atomic_json(&config.active_path(), &active)?;
-                    handoff_retry = true;
-                    continue;
-                }
+                let exposure = match quiesce(&mut worker, &prior.current, &config) {
+                    Ok(exposure) => exposure,
+                    Err(error) => {
+                        eprintln!("listener handoff cancelled; retaining worker: {error:#}");
+                        active = prior;
+                        atomic_json(&config.active_path(), &active)?;
+                        handoff_retry = true;
+                        continue;
+                    }
+                };
                 let restart = start_candidate(
                     &active.current,
                     &mut config,
                     &listeners,
                     READY_LIMIT,
                     Some(capability),
+                    Some(&exposure),
                 );
                 match restart {
                     Ok((next, Ok(()))) => {
@@ -1313,7 +1412,14 @@ pub fn run(mut config: Config) -> Result<()> {
                         handoff_retry = true;
                     }
                     Err(error) => {
-                        eprintln!("listener handoff failed; resuming previous worker: {error:#}");
+                        let outcome = if error.is::<Deferred>() {
+                            "deferred"
+                        } else {
+                            "failed"
+                        };
+                        eprintln!(
+                            "listener handoff {outcome}; resuming previous worker: {error:#}"
+                        );
                         active = prior;
                         if let Err(error) = atomic_json(&config.active_path(), &active) {
                             eprintln!(
@@ -1321,6 +1427,7 @@ pub fn run(mut config: Config) -> Result<()> {
                             );
                         }
                         config.required_ready = protected_before;
+                        worker.resume_from_ns = worker.stopped_accepting_ns.clone();
                         if let Err(recovery) =
                             recover(&mut worker, &active.current, &mut config, &listeners)
                         {
@@ -1431,8 +1538,8 @@ pub fn run(mut config: Config) -> Result<()> {
                     worker.addresses = crate::addresses::probe(&config, &previous_build);
                     config.required_ready = crate::addresses::ready(&worker.addresses);
                     let protected_before_swap = config.required_ready.clone();
-                    quiesce(&mut worker, &active.current, &config)?;
-                    match start_candidate(&candidate, &mut config, &listeners, READY_LIMIT, Some(capability)) {
+                    let exposure = quiesce(&mut worker, &active.current, &config)?;
+                    match start_candidate(&candidate, &mut config, &listeners, READY_LIMIT, Some(capability), Some(&exposure)) {
                         Ok((child, readiness)) => {
                             let next = Active {
                                 current: candidate,
@@ -1445,6 +1552,7 @@ pub fn run(mut config: Config) -> Result<()> {
                                     build: previous_build.clone(),
                                     previous: previous_build.clone(),
                                     rolled_back: true,
+        deferred: false,
                                     reason: Some(format!("candidate readiness or activation failed: {error:#}")),
                                     addresses: worker.addresses.clone(),
                                 });
@@ -1463,17 +1571,21 @@ pub fn run(mut config: Config) -> Result<()> {
                                 build: info.build,
                                 previous: previous_build.clone(),
                                 rolled_back: false,
+        deferred: false,
                                 reason: None,
                                 addresses: worker.addresses.clone(),
                             })
                         }
                         Err(error) => {
+                            let deferred = error.is::<Deferred>();
+                            worker.resume_from_ns = worker.stopped_accepting_ns.clone();
                             recover(&mut worker, &active.current, &mut config, &listeners)
                                 .context("rollback worker did not become ready")?;
                             Ok(Swapped {
                                 build: previous_build.clone(),
                                 previous: previous_build.clone(),
-                                rolled_back: true,
+                                rolled_back: true, // older clients still receive a safe refusal
+                                deferred,
                                 reason: Some(error.to_string()),
                                 addresses: worker.addresses.clone(),
                             })
@@ -1484,6 +1596,7 @@ pub fn run(mut config: Config) -> Result<()> {
                     build: previous_build.clone(),
                     previous: previous_build,
                     rolled_back: true,
+                    deferred: false,
                     reason: Some(format!("{error:#}")),
                     addresses: Vec::new(),
                 });
@@ -1680,6 +1793,7 @@ wire.recv(1)
                 stopped_accepting_ns: BTreeMap::new(),
                 first_accepted_ns: BTreeMap::new(),
                 resume_from_ns: BTreeMap::new(),
+                exposure_deadline: None,
                 sequence: 0,
                 phase: Phase::Running,
                 addresses: Vec::new(),
@@ -1807,6 +1921,7 @@ for line in lines:
             stopped_accepting_ns: BTreeMap::new(),
             first_accepted_ns: BTreeMap::new(),
             resume_from_ns: BTreeMap::new(),
+            exposure_deadline: None,
             sequence: 0,
             phase: Phase::Running,
             addresses: Vec::new(),
