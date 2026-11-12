@@ -12,6 +12,9 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 struct Running {
+    // Timing budgets measure one upgrade, not competing debug workers on a
+    // small CI machine. Keep the real-process scenarios isolated.
+    _serial: std::sync::MutexGuard<'static, ()>,
     root: PathBuf,
     process: Child,
     url: String,
@@ -29,6 +32,8 @@ fn wait(mut condition: impl FnMut() -> bool, seconds: u64) {
 }
 impl Running {
     fn new() -> Self {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        let serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let root = PathBuf::from(format!(
             "/tmp/cam-supervisor-{}-{}",
@@ -52,6 +57,7 @@ impl Running {
             .spawn()
             .unwrap();
         let result = Self {
+            _serial: serial,
             root,
             process,
             url: format!("http://127.0.0.1:{port}"),
@@ -487,8 +493,10 @@ fn three_post_ready_crashes_restore_the_previous_binary_without_erasing_new_writ
     let before: serde_json::Value =
         serde_json::from_slice(&std::fs::read(running.root.join("hub.active.json")).unwrap())
             .unwrap();
+    let pid_file = running.root.join("candidate.pid");
     let script = running.candidate(&format!(
-        "(sleep 2; kill -KILL $$) & exec '{}' \"$@\"",
+        "echo $$ > '{}'; exec '{}' \"$@\"",
+        pid_file.display(),
         running.binary.display()
     ));
     let result = running.upgrade(&script);
@@ -500,6 +508,38 @@ fn three_post_ready_crashes_restore_the_previous_binary_without_erasing_new_writ
     let message = client
         .send("a", "b", "acknowledged by crash-prone new worker")
         .unwrap();
+    for crash in 0..3 {
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // The successful upgrade confirms the first readiness handshake.
+        // For later workers wait for the supervisor's handshake confirmation,
+        // rather than killing them a fixed time after process creation.
+        if crash > 0 {
+            wait(
+                || {
+                    std::fs::read_to_string(running.root.join("log")).is_ok_and(|log| {
+                        log.contains(&format!("Worker {pid} is ready after restart."))
+                    })
+                },
+                5,
+            );
+        }
+        unsafe {
+            assert_eq!(libc::kill(pid, libc::SIGKILL), 0);
+        }
+        if crash < 2 {
+            wait(
+                || {
+                    std::fs::read_to_string(&pid_file)
+                        .is_ok_and(|value| value.trim() != pid.to_string())
+                },
+                5,
+            );
+        }
+    }
     wait(
         || {
             let current: serde_json::Value = serde_json::from_slice(

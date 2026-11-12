@@ -185,7 +185,10 @@ fn start(
         loop {
             let mut buffer = [0; 1024];
             match ready.read(&mut buffer) {
-                Ok(0) => bail!("worker closed readiness pipe before ready"),
+                Ok(0) => bail!(
+                    "worker closed readiness pipe before ready (status: {:?})",
+                    worker.try_wait()?
+                ),
                 Ok(n) => {
                     data.extend_from_slice(&buffer[..n]);
                     if data.ends_with(b"\n") {
@@ -349,6 +352,7 @@ pub fn run(mut config: Config) -> Result<()> {
             ));
             match start(&active.current, &config, &listeners, Duration::from_secs(3)) {
                 Ok(child) => {
+                    eprintln!("Worker {} is ready after restart.", child.id());
                     worker = child;
                     if rolled_back {
                         let build = crate::updates::inspect(&active.current)?.build;
