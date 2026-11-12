@@ -384,6 +384,9 @@ fn start_candidate(
         .context("worker image is not a managed recovery snapshot")?;
     crate::installation::activate_verified(binary, &executable, checksum)?;
     crate::runtime::prepare_worker(&config.db)?;
+    // Discover capability before launch: readiness may time out with a startup
+    // marker still buffered, or before the child has had a chance to send it.
+    let capability = crate::updates::inspect(&executable)?;
     let (mut process, stream) = child(&executable, config, listeners)?;
     let channel = match crate::handoff::Channel::new(stream) {
         Ok(channel) => channel,
@@ -395,7 +398,8 @@ fn start_candidate(
     let mut worker = Worker {
         process,
         channel,
-        handoff: false,
+        handoff: capability.handoff_protocol == crate::handoff::VERSION
+            && config.handoff_protocol == crate::handoff::VERSION,
         addresses: Vec::new(),
         sequence: 0,
         phase: Phase::Running,

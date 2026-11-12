@@ -1073,6 +1073,22 @@ fn assert_failed_candidate_retires_after_rollback(running: &Running, original: i
 }
 
 #[test]
+fn a_capable_candidate_is_parked_even_if_readiness_fails_before_its_startup_marker() {
+    let running = Running::new();
+    let original = running.worker_pid();
+    // build-info delegates to the real binary and advertises its capability.
+    // Fail readiness before exec can emit the marker, then continue startup.
+    let candidate = running.candidate("printf 'invalid readiness\\n' >&4");
+    let probe = Availability::start(&running.url);
+    let result = running.upgrade(&candidate);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("invalid readiness"));
+    assert_eq!(running.worker_pid(), original);
+    assert_failed_candidate_retires_after_rollback(&running, original);
+    probe.finish();
+}
+
+#[test]
 fn activation_failure_parks_the_candidate_until_the_original_worker_resumes() {
     let running = Running::new();
     let original = running.worker_pid();

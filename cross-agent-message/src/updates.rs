@@ -37,6 +37,11 @@ pub struct BuildInfo {
     pub build: String,
     pub target: String,
     pub protocol: u32,
+    /// Supported private lifecycle protocol, independent of the active parent.
+    #[serde(default)]
+    pub handoff_protocol: u32,
+    #[serde(default)]
+    pub handoff_startup: bool,
 }
 
 pub fn build_info() -> BuildInfo {
@@ -45,6 +50,8 @@ pub fn build_info() -> BuildInfo {
         build: crate::hub::BUILD.to_string(),
         target: TARGET.to_string(),
         protocol: protocol::PROTOCOL,
+        handoff_protocol: crate::handoff::VERSION,
+        handoff_startup: true,
     }
 }
 
