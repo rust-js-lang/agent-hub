@@ -18,5 +18,5 @@ pub mod updates;
 pub mod supervisor;
 pub mod worker;
 
-pub mod upgrade;
 pub mod service;
+pub mod upgrade;

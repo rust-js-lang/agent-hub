@@ -51,7 +51,10 @@ fn dashboard() {
 }
 
 fn main() {
-    println!("cargo:rustc-env=CROSS_AGENT_TARGET={}", std::env::var("TARGET").expect("cargo sets TARGET"));
+    println!(
+        "cargo:rustc-env=CROSS_AGENT_TARGET={}",
+        std::env::var("TARGET").expect("cargo sets TARGET")
+    );
     dashboard();
     let git = |args: &[&str]| {
         Command::new("git")
