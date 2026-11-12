@@ -28,6 +28,14 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
+      - name: Install pinned compiler tooling dependencies
+        working-directory: rust-js
+        # Compiler tooling resolves its own workspace packages from here.
+        # Its repository hooks are unrelated to this application's CI.
+        run: bun install --frozen-lockfile --ignore-scripts
+      - name: Check JavaScript test dependencies
+        run: |
+          node --input-type=module -e 'import { createRequire } from "node:module"; const require = createRequire(new URL("./rust-js/tooling/cargo.js", import.meta.url)); require.resolve("@rust-js/typescript"); require.resolve("@rust-js/std");'
       - name: Run shared protocol tests as JavaScript
         # The tool builds the pinned rust-js compiler, then executes the same
         # contract tests with Node; compilation alone is not this check.
