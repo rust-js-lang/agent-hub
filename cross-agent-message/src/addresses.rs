@@ -299,6 +299,7 @@ mod tests {
             requested_addresses: vec![address],
             required_ready: Vec::new(),
             handoff_protocol: 0,
+            handoff_startup: false,
             worker_path: Some(std::env::current_exe().unwrap()),
             db: std::path::PathBuf::from("unused.db"),
             away_after: 60_000,

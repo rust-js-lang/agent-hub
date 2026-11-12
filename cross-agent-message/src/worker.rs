@@ -159,8 +159,42 @@ async fn serve(
     let (shutdown, _) = tokio::sync::watch::channel(false);
     let mut tasks = tokio::task::JoinSet::new();
     let accepted_on = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    for (index, listener) in listeners.iter().enumerate() {
-        let listener = tokio::net::TcpListener::from_std(listener.try_clone()?)?;
+    crate::runtime::prepare(&config.db)?;
+    let control = config.worker_control();
+    if control.exists() {
+        std::fs::remove_file(&control)?;
+    }
+    let local = tokio::net::UnixListener::bind(&control)?;
+    crate::runtime::legacy_alias(&config.db.with_extension("worker.sock"), &control)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o600))?;
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut commands = if config.handoff_protocol == crate::handoff::VERSION {
+        Some(crate::handoff::Commands::new(
+            tokio::net::UnixStream::from_std(ready.stream.try_clone()?)?,
+        ))
+    } else {
+        None
+    };
+    // Finish fallible startup before any task can accept a TCP connection.
+    let listeners = listeners
+        .iter()
+        .map(|listener| {
+            let address = listener.local_addr()?.to_string();
+            Ok((
+                tokio::net::TcpListener::from_std(listener.try_clone()?)?,
+                address,
+            ))
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    if config.handoff_startup && config.handoff_protocol == crate::handoff::VERSION {
+        ready.write(
+            &format!("accepting {request}\n"),
+            std::time::Instant::now() + Duration::from_secs(1),
+        )?;
+    }
+    for (index, (listener, local_address)) in listeners.into_iter().enumerate() {
         let accepted_on = accepted_on.clone();
         let app = app.clone();
         let peer_hub = hub.clone();
@@ -169,7 +203,6 @@ async fn serve(
         tasks.spawn(async move {
             let mut shutdown = shutdown;
             let mut connections = tokio::task::JoinSet::new();
-            let local_address = listener.local_addr()?.to_string();
             loop {
                 tokio::select! {
                     biased;
@@ -219,15 +252,6 @@ async fn serve(
             Ok::<(), anyhow::Error>(())
         });
     }
-    crate::runtime::prepare(&config.db)?;
-    let control = config.worker_control();
-    if control.exists() {
-        std::fs::remove_file(&control)?;
-    }
-    let local = tokio::net::UnixListener::bind(&control)?;
-    crate::runtime::legacy_alias(&config.db.with_extension("worker.sock"), &control)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o600))?;
     let local_hub = hub.clone();
     let mut local_shutdown = shutdown.subscribe();
     let control_db = config.db.clone();
@@ -261,39 +285,21 @@ async fn serve(
             }
         }
     });
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    // Full requests catch the firewall case where TCP connects but HTTP hangs.
-    let addresses = crate::addresses::initial(config, &hub).await?;
-    ready.write(
-        &format!(
-            "ready {}\n",
-            serde_json::to_string(&readiness(
-                config,
-                addresses,
-                accepted_on.load(std::sync::atomic::Ordering::SeqCst),
-                request
-            ))?
-        ),
-        std::time::Instant::now() + Duration::from_secs(1),
-    )?;
-    let mut commands = if config.handoff_protocol == crate::handoff::VERSION {
-        Some(crate::handoff::Commands::new(
-            tokio::net::UnixStream::from_std(ready.stream.try_clone()?)?,
-        ))
-    } else {
-        None
-    };
-    tasks.spawn(crate::addresses::monitor(
-        config.clone(),
-        hub.clone(),
-        shutdown.subscribe(),
-    ));
+    // Initial probes run alongside lifecycle commands. A failed startup can
+    // therefore be quiesced even before it has published a readiness reply.
+    let initial = crate::addresses::initial(config, &hub);
+    tokio::pin!(initial);
+    let mut ready_sent = false;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     let stopped = hub.stopped();
     tokio::pin!(stopped);
     let outcome = loop {
         tokio::select! {
+            addresses = &mut initial, if !ready_sent => {
+                ready.write(&format!("ready {}\n", serde_json::to_string(&readiness(config, addresses?, accepted_on.load(std::sync::atomic::Ordering::SeqCst), request))?), std::time::Instant::now() + Duration::from_secs(1))?;
+                ready_sent = true;
+                tasks.spawn(crate::addresses::monitor(config.clone(), hub.clone(), shutdown.subscribe()));
+            },
             _ = heartbeat.tick() => hub.heartbeat().map_err(|e| anyhow::anyhow!("heartbeat failed: {e:?}"))?,
             _ = term.recv() => break Outcome::Stopped,
             _ = interrupt.recv() => break Outcome::Stopped,

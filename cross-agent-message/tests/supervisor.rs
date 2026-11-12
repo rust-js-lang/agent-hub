@@ -983,6 +983,7 @@ fn a_pending_private_address_does_not_prevent_a_safe_upgrade() {
 #[test]
 fn an_upgrade_rolls_back_when_a_previously_ready_listener_stops_answering_http() {
     let running = Running::configured(false, &["::1"]);
+    let original = running.worker_pid();
     assert_eq!(
         running
             .client()
@@ -1020,6 +1021,90 @@ fn an_upgrade_rolls_back_when_a_previously_ready_listener_stops_answering_http()
         2
     );
     running.assert_worker_path();
+    assert_eq!(
+        running.worker_pid(),
+        original,
+        "rollback must resume the original PID"
+    );
+    assert_failed_candidate_retires_after_rollback(&running, original);
+    probe.finish();
+}
+
+fn assert_failed_candidate_retires_after_rollback(running: &Running, original: i32) {
+    let children = || {
+        let output = Command::new("pgrep")
+            .args(["-P", &running.process.id().to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|pid| pid.parse::<i32>().unwrap())
+            .collect::<Vec<_>>()
+    };
+    let current = children();
+    assert_eq!(
+        current.len(),
+        2,
+        "the failed candidate must remain alive during rollback grace"
+    );
+    assert!(current.contains(&original));
+    let failed = *current.iter().find(|pid| **pid != original).unwrap();
+    let files = Command::new("lsof")
+        .args(["-a", "-p", &failed.to_string(), "-Fn"])
+        .output()
+        .unwrap();
+    assert!(files.status.success());
+    assert!(
+        !String::from_utf8_lossy(&files.stdout)
+            .lines()
+            .any(|line| line.starts_with(&format!("n{}", running.db.display()))),
+        "failed candidate must close SQLite before rollback"
+    );
+    let retained = Instant::now();
+    while retained.elapsed() < Duration::from_secs(3) {
+        assert!(
+            children().contains(&failed),
+            "failed candidate retired before its firewall grace"
+        );
+        running.client().info().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    wait(|| children() == vec![original], 5);
+}
+
+#[test]
+fn activation_failure_parks_the_candidate_until_the_original_worker_resumes() {
+    let running = Running::new();
+    let original = running.worker_pid();
+    let candidate = running.root.join("activation-failure");
+    // Only the actual worker launch reaches this branch, after preflight.
+    std::fs::write(
+        &candidate,
+        format!(
+            r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+if sys.argv[1] == 'worker':
+    config = json.loads(pathlib.Path(sys.argv[sys.argv.index('--config') + 1]).read_text())
+    active = pathlib.Path(config['db']).with_suffix('.active.json')
+    active.unlink()
+    active.mkdir()
+os.execv({source:?}, [{source:?}] + sys.argv[1:])
+"#,
+            source = running.source.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let probe = Availability::start(&running.url);
+    let result = running.upgrade(&candidate);
+    assert!(!result.status.success());
+    let error = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        error.contains("rolled back") && error.contains("activation failed"),
+        "{error}"
+    );
+    assert_eq!(running.worker_pid(), original);
+    assert_failed_candidate_retires_after_rollback(&running, original);
     probe.finish();
 }
 

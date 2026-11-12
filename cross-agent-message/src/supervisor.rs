@@ -30,6 +30,9 @@ pub struct Config {
     pub required_ready: Vec<String>,
     #[serde(default)]
     pub handoff_protocol: u32,
+    /// Negotiate startup markers; older supervisors reject unknown wire lines.
+    #[serde(default)]
+    pub handoff_startup: bool,
 }
 impl Config {
     pub fn control(&self) -> PathBuf {
@@ -115,7 +118,8 @@ const RETIRE_GRACE: Duration = Duration::from_secs(5);
 
 struct Retirement {
     worker: Worker,
-    after: Instant,
+    // A rejected candidate cannot retire until rollback has actually resumed.
+    after: Option<Instant>,
 }
 
 fn activate_worker(worker: &mut Worker, next: Worker, retirement: &mut Option<Retirement>) {
@@ -125,7 +129,7 @@ fn activate_worker(worker: &mut Worker, next: Worker, retirement: &mut Option<Re
         previous.phase = Phase::Retiring;
         *retirement = Some(Retirement {
             worker: previous,
-            after: Instant::now() + RETIRE_GRACE,
+            after: Some(Instant::now() + RETIRE_GRACE),
         });
     }
 }
@@ -348,6 +352,22 @@ fn start(
     listeners: &[TcpListener],
     limit: Duration,
 ) -> Result<Worker> {
+    let (mut worker, readiness) = start_candidate(binary, config, listeners, limit)?;
+    if let Err(error) = readiness {
+        terminate(&mut worker, Duration::ZERO)?;
+        return Err(error);
+    }
+    Ok(worker)
+}
+
+/// Preserve a spawned candidate and its lifecycle channel on readiness failure.
+/// The upgrade caller must park it or reap it before reopening the old writer.
+fn start_candidate(
+    binary: &Path,
+    config: &mut Config,
+    listeners: &[TcpListener],
+    limit: Duration,
+) -> Result<(Worker, Result<()>)> {
     let deadline = Instant::now() + limit;
     let bytes = serde_json::to_vec(config)?;
     if std::fs::read(config.config_path()).ok().as_deref() != Some(bytes.as_slice()) {
@@ -365,31 +385,40 @@ fn start(
     crate::installation::activate_verified(binary, &executable, checksum)?;
     crate::runtime::prepare_worker(&config.db)?;
     let (mut process, stream) = child(&executable, config, listeners)?;
-    let mut channel = crate::handoff::Channel::new(stream)?;
-    let ready = match wait_ready(&mut process, &mut channel, config, 0, deadline) {
-        Ok(ready) => ready,
+    let channel = match crate::handoff::Channel::new(stream) {
+        Ok(channel) => channel,
         Err(error) => {
-            // Reap the candidate before any rollback can reopen SQLite.
             terminate(&mut process, Duration::ZERO)?;
             return Err(error);
         }
     };
-    let worker = Worker {
+    let mut worker = Worker {
         process,
         channel,
-        handoff: ready.handoff_protocol == crate::handoff::VERSION
-            && config.handoff_protocol == crate::handoff::VERSION,
-        addresses: ready.addresses,
+        handoff: false,
+        addresses: Vec::new(),
         sequence: 0,
         phase: Phase::Running,
     };
+    let ready = match wait_ready(
+        &mut worker.process,
+        &mut worker.channel,
+        config,
+        0,
+        deadline,
+        &mut worker.handoff,
+    ) {
+        Ok(ready) => ready,
+        Err(error) => return Ok((worker, Err(error))),
+    };
+    worker.addresses = ready.addresses;
     config.required_ready = crate::addresses::ready(&worker.addresses);
     eprintln!(
         "Worker {} is ready at {}.",
         worker.id(),
         executable.display()
     );
-    Ok(worker)
+    Ok((worker, Ok(())))
 }
 
 fn protected(config: &Config) -> impl Iterator<Item = String> + '_ {
@@ -433,12 +462,22 @@ fn wait_ready(
     config: &Config,
     request: u64,
     deadline: Instant,
+    handoff: &mut bool,
 ) -> Result<crate::addresses::Ready> {
     loop {
         if Instant::now() >= deadline {
             bail!("worker readiness timed out");
         }
         if let Some(line) = channel.poll()? {
+            if let Some(id) = line.strip_prefix("accepting ") {
+                if !config.handoff_startup || config.handoff_protocol != crate::handoff::VERSION {
+                    bail!("worker sent an unnegotiated startup marker");
+                }
+                if id.trim().parse::<u64>()? == request {
+                    *handoff = true;
+                }
+                continue;
+            }
             if let Some(payload) = line.strip_prefix("ready ") {
                 let ready = if let Ok(ready) =
                     serde_json::from_str::<crate::addresses::Ready>(payload.trim())
@@ -468,6 +507,8 @@ fn wait_ready(
                 if ready.request != request {
                     continue;
                 }
+                *handoff = ready.handoff_protocol == crate::handoff::VERSION
+                    && config.handoff_protocol == crate::handoff::VERSION;
                 validate_ready(&ready, config)?;
                 if Instant::now() > deadline {
                     bail!("worker readiness timed out");
@@ -519,6 +560,7 @@ fn resume(worker: &mut Worker, image: &Path, config: &Config) -> Result<()> {
         config,
         id,
         deadline,
+        &mut worker.handoff,
     )?;
     worker.addresses = ready.addresses;
     worker.phase = Phase::Running;
@@ -538,46 +580,49 @@ fn quiesce(worker: &mut Worker, image: &Path, config: &Config) -> Result<()> {
         );
         return terminate(worker, Duration::from_secs(4));
     }
+    if let Err(error) = drain(worker) {
+        resume(worker, image, config)
+            .with_context(|| format!("{error:#}; old worker resume did not finish"))?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// A rejected candidate must drain without automatically resuming itself.
+fn drain(worker: &mut Worker) -> Result<()> {
     if worker.phase != Phase::Running {
         bail!("worker handoff is still awaiting recovery");
     }
     let id = worker.next_request();
     let deadline = Instant::now() + Duration::from_secs(4);
     worker.phase = Phase::Quiescing;
-    let result = (|| -> Result<()> {
-        worker
-            .channel
-            .send(&crate::handoff::Command::Quiesce { id }, deadline)?;
-        loop {
-            if let Some(line) = worker.channel.poll()? {
-                match serde_json::from_str::<crate::handoff::Reply>(&line) {
-                    Ok(crate::handoff::Reply::Drained { id: reply }) if reply == id => {
-                        worker.phase = Phase::Parked;
-                        eprintln!(
-                            "Worker {} acknowledged drained; database is closed and PID retained.",
-                            worker.id()
-                        );
-                        return Ok(());
-                    }
-                    Ok(_) => {}
-                    Err(_) => bail!("invalid worker drain acknowledgement"),
+    worker
+        .channel
+        .send(&crate::handoff::Command::Quiesce { id }, deadline)?;
+    loop {
+        if let Some(line) = worker.channel.poll()? {
+            match serde_json::from_str::<crate::handoff::Reply>(&line) {
+                Ok(crate::handoff::Reply::Drained { id: reply }) if reply == id => {
+                    worker.phase = Phase::Parked;
+                    eprintln!(
+                        "Worker {} acknowledged drained; database is closed and PID retained.",
+                        worker.id()
+                    );
+                    return Ok(());
                 }
+                Ok(_) => {}
+                Err(_) if line.starts_with("ready ") || line.starts_with("accepting ") => {}
+                Err(_) => bail!("invalid worker drain acknowledgement"),
             }
-            if worker.try_wait()?.is_some() {
-                bail!("worker exited before acknowledging drained");
-            }
-            if Instant::now() >= deadline {
-                bail!("worker drain timed out; cancelling handoff");
-            }
-            std::thread::sleep(Duration::from_millis(5));
         }
-    })();
-    if let Err(error) = result {
-        resume(worker, image, config)
-            .with_context(|| format!("{error:#}; old worker resume did not finish"))?;
-        return Err(error);
+        if worker.try_wait()?.is_some() {
+            bail!("worker exited before acknowledging drained");
+        }
+        if Instant::now() >= deadline {
+            bail!("worker drain timed out; cancelling handoff");
+        }
+        std::thread::sleep(Duration::from_millis(5));
     }
-    Ok(())
 }
 
 fn retire(worker: &mut Worker) -> Result<()> {
@@ -617,6 +662,44 @@ fn recover(
         *worker = start(image, config, listeners, Duration::from_millis(2500))?;
         Ok(())
     }
+}
+
+fn rollback_candidate(
+    mut candidate: Worker,
+    worker: &mut Worker,
+    image: &Path,
+    config: &mut Config,
+    listeners: &[TcpListener],
+    retirement: &mut Option<Retirement>,
+) -> Result<()> {
+    if retirement.is_some() {
+        bail!("cannot begin rollback while another predecessor is retiring");
+    }
+    if candidate.handoff && candidate.try_wait()?.is_none() {
+        match drain(&mut candidate) {
+            Ok(()) => {
+                candidate.phase = Phase::Retiring;
+                // Retain ownership even if resume times out: the main loop
+                // starts this grace only after the active worker proves ready.
+                *retirement = Some(Retirement {
+                    worker: candidate,
+                    after: None,
+                });
+                recover(worker, image, config, listeners)?;
+                if let Some(old) = retirement.as_mut() {
+                    old.after = Some(Instant::now() + RETIRE_GRACE);
+                }
+                return Ok(());
+            }
+            Err(error) => eprintln!("Failed candidate would not park: {error:#}"),
+        }
+    }
+    eprintln!(
+        "Failed candidate cannot cooperate; remote connections may be interrupted while it is reaped and the previous worker resumes."
+    );
+    // A writer that did not acknowledge drain must be reaped before rollback.
+    terminate(&mut candidate, Duration::ZERO)?;
+    recover(worker, image, config, listeners)
 }
 
 /// Shutdown is complete only when every inherited listener has been released.
@@ -760,6 +843,7 @@ pub fn run(mut config: Config) -> Result<()> {
         == Some(&installation.executable);
     config.worker_path = Some(installation.executable.clone());
     config.handoff_protocol = crate::handoff::VERSION;
+    config.handoff_startup = true;
     crate::runtime::prepare(&config.db)?;
     let control = config.control();
     if UnixStream::connect(config.db.with_extension("sock")).is_ok()
@@ -867,9 +951,15 @@ pub fn run(mut config: Config) -> Result<()> {
             let _ = std::fs::remove_file(&control);
             return Ok(());
         }
+        if let Some(old) = retirement.as_mut()
+            && old.after.is_none()
+            && worker.phase == Phase::Running
+        {
+            old.after = Some(Instant::now() + RETIRE_GRACE);
+        }
         if retirement
             .as_ref()
-            .is_some_and(|old| Instant::now() >= old.after)
+            .is_some_and(|old| old.after.is_some_and(|after| Instant::now() >= after))
             && let Some(mut old) = retirement.take()
             && let Err(error) = retire(&mut old.worker)
         {
@@ -984,24 +1074,47 @@ pub fn run(mut config: Config) -> Result<()> {
                     handoff_retry = true;
                     continue;
                 }
-                let restart = if replaced {
-                    start_or_restore(&mut active, &mut config, &listeners)
-                } else {
-                    start(
-                        &active.current,
-                        &mut config,
-                        &listeners,
-                        Duration::from_secs(3),
-                    )
-                };
+                let restart = start_candidate(
+                    &active.current,
+                    &mut config,
+                    &listeners,
+                    Duration::from_secs(3),
+                );
                 match restart {
-                    Ok(next) => {
+                    Ok((next, Ok(()))) => {
                         activate_worker(&mut worker, next, &mut retirement);
+                    }
+                    Ok((candidate, Err(error))) => {
+                        eprintln!(
+                            "listener handoff failed; parking candidate before rollback: {error:#}"
+                        );
+                        active = prior;
+                        if let Err(error) = atomic_json(&config.active_path(), &active) {
+                            eprintln!(
+                                "could not record previous image; continuing live rollback: {error:#}"
+                            );
+                        }
+                        config.required_ready = protected_before;
+                        if let Err(recovery) = rollback_candidate(
+                            candidate,
+                            &mut worker,
+                            &active.current,
+                            &mut config,
+                            &listeners,
+                            &mut retirement,
+                        ) {
+                            eprintln!("listener handoff recovery pending: {recovery:#}");
+                        }
+                        handoff_retry = true;
                     }
                     Err(error) => {
                         eprintln!("listener handoff failed; resuming previous worker: {error:#}");
                         active = prior;
-                        atomic_json(&config.active_path(), &active)?;
+                        if let Err(error) = atomic_json(&config.active_path(), &active) {
+                            eprintln!(
+                                "could not record previous image; continuing live rollback: {error:#}"
+                            );
+                        }
                         config.required_ready = protected_before;
                         if let Err(recovery) =
                             recover(&mut worker, &active.current, &mut config, &listeners)
@@ -1111,21 +1224,20 @@ pub fn run(mut config: Config) -> Result<()> {
                     config.required_ready = crate::addresses::ready(&worker.addresses);
                     let protected_before_swap = config.required_ready.clone();
                     quiesce(&mut worker, &active.current, &config)?;
-                    match start(&candidate, &mut config, &listeners, Duration::from_secs(3)) {
-                        Ok(mut child) => {
+                    match start_candidate(&candidate, &mut config, &listeners, Duration::from_secs(3)) {
+                        Ok((child, readiness)) => {
                             let next = Active {
                                 current: candidate,
                                 previous: Some(active.current.clone()),
                             };
-                            if let Err(error) = atomic_json(&config.active_path(), &next) {
-                                terminate(&mut child, Duration::ZERO)?;
+                            if let Err(error) = readiness.and_then(|()| atomic_json(&config.active_path(), &next)) {
                                 config.required_ready = protected_before_swap;
-                                recover(&mut worker, &active.current, &mut config, &listeners)?;
+                                rollback_candidate(child, &mut worker, &active.current, &mut config, &listeners, &mut retirement)?;
                                 return Ok(Swapped {
                                     build: previous_build.clone(),
                                     previous: previous_build.clone(),
                                     rolled_back: true,
-                                    reason: Some(format!("activation failed: {error:#}")),
+                                    reason: Some(format!("candidate readiness or activation failed: {error:#}")),
                                     addresses: worker.addresses.clone(),
                                 });
                             }
@@ -1245,6 +1357,7 @@ mod tests {
             requested_addresses: Vec::new(),
             required_ready: vec![private.to_string()],
             handoff_protocol: crate::handoff::VERSION,
+            handoff_startup: true,
             worker_path: None,
             db: PathBuf::from("unused.db"),
             activate_current: false,
@@ -1305,6 +1418,7 @@ mod tests {
             requested_addresses: Vec::new(),
             required_ready: Vec::new(),
             handoff_protocol: crate::handoff::VERSION,
+            handoff_startup: true,
             activate_current: false,
             away_after: 60_000,
             forget_after: 120_000,
@@ -1371,6 +1485,7 @@ for line in lines:
             &config,
             0,
             Instant::now() + Duration::from_secs(3),
+            &mut false,
         )
         .unwrap();
         let mut worker = Worker {
@@ -1415,6 +1530,7 @@ for line in lines:
             requested_addresses: requested.clone(),
             required_ready: Vec::new(),
             handoff_protocol: 0,
+            handoff_startup: false,
             worker_path: None,
             db: PathBuf::from("unused.db"),
             away_after: 60_000,

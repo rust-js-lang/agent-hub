@@ -40,6 +40,7 @@ impl Fixture {
             db: root.join("hub.db"),
             worker_path: Some(PathBuf::from(env!("CARGO_BIN_EXE_cross-agent-message"))),
             handoff_protocol: 1,
+            handoff_startup: true,
             activate_current: false,
             away_after: 60_000,
             forget_after: 120_000,
@@ -154,7 +155,11 @@ impl Worker {
         line
     }
     fn ready(&mut self, id: u64, address: &str) {
-        let line = self.line();
+        let mut line = self.line();
+        if line.starts_with("accepting ") {
+            assert_eq!(line.trim(), format!("accepting {id}"));
+            line = self.line();
+        }
         let ready: cross_agent_message::addresses::Ready =
             serde_json::from_str(line.strip_prefix("ready ").expect(&line)).unwrap();
         assert_eq!(ready.request, id);
@@ -221,6 +226,43 @@ fn closing_the_parent_channel_exits_both_serving_and_parked_workers() {
         replacement.drained(1);
         replacement.retire(2);
     }
+}
+
+#[test]
+fn a_starting_worker_can_park_before_its_initial_http_probes_finish() {
+    let mut fixture = Fixture::new();
+    // Probe a different listening socket whose owner never answers HTTP.
+    let blocked = TcpListener::bind("127.0.0.1:0").unwrap();
+    fixture.config.addresses = vec![blocked.local_addr().unwrap()];
+    fixture.config.requested_addresses = fixture.config.addresses.clone();
+    std::fs::write(
+        fixture.config.config_path(),
+        serde_json::to_vec(&fixture.config).unwrap(),
+    )
+    .unwrap();
+    let mut worker = fixture.spawn();
+    assert_eq!(worker.line().trim(), "accepting 0");
+    worker.send("quiesce", 1);
+    // The first reply must be drained, with no preceding ready reply.
+    worker.drained(1);
+    assert!(!fixture.database_open_by(worker.child.id()));
+    worker.retire(2);
+}
+
+#[test]
+fn startup_markers_are_not_sent_to_a_parent_that_did_not_negotiate_them() {
+    let mut fixture = Fixture::new();
+    fixture.config.handoff_startup = false;
+    std::fs::write(
+        fixture.config.config_path(),
+        serde_json::to_vec(&fixture.config).unwrap(),
+    )
+    .unwrap();
+    let mut worker = fixture.spawn();
+    assert!(worker.line().starts_with("ready "));
+    worker.send("quiesce", 1);
+    worker.drained(1);
+    worker.retire(2);
 }
 
 #[test]

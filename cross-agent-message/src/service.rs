@@ -113,6 +113,7 @@ mod tests {
             requested_addresses: Vec::new(),
             required_ready: Vec::new(),
             handoff_protocol: 0,
+            handoff_startup: false,
         };
         let text = super::plist(
             std::path::Path::new("/tmp/bin & stuff/cross-agent-message"),

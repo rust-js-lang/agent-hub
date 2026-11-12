@@ -641,6 +641,12 @@ be taken by an agent. Latency below one second is a measured target, not an
 unconditional promise. A supervisor replacement itself remains a cold restart.
 A parked worker waits at most 30 seconds for the supervisor's `resume` or
 `retire`; it never reopens SQLite on its own after a lost supervisor.
+Before activation, a cooperative failed candidate is also drained and parked:
+the original worker resumes on its existing PID, proves readiness, and only
+then starts the failed candidate's five-second retirement grace. Readiness and
+activation failures both follow this order. A candidate that has crashed or
+will not acknowledge drain must instead be reaped before rollback opens SQLite;
+that failure case may drop or stall a remote connection and is logged explicitly.
 Cooperative workers exit if the inherited supervisor channel closes, whether
 serving or parked. They do not continue serving as orphans. A normal supervisor
 stop reaps both the active worker and any parked predecessor and releases its
