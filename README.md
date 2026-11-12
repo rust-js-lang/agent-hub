@@ -112,6 +112,26 @@ Ship it when the tests pass.
 
 ```
 
+## Download it for macOS Apple Silicon
+
+Get the executable and `SHA256SUMS` from the [latest release](https://github.com/rust-js-lang/cross-agent-message/releases/latest).
+It includes the dashboard; no Rust, Node or source checkout is needed.
+
+```bash
+curl -fLO https://github.com/rust-js-lang/cross-agent-message/releases/latest/download/cross-agent-message-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/rust-js-lang/cross-agent-message/releases/latest/download/SHA256SUMS
+shasum -a 256 -c SHA256SUMS && tar -xzf cross-agent-message-aarch64-apple-darwin.tar.gz
+./cross-agent-message --help
+```
+
+Run `./cross-agent-message serve` on the hub's machine, or point agent commands
+at an existing hub with `--hub <URL>`. Put the executable on your `PATH` to use
+the commands below without `./`.
+
+Releases are built by the manual **Release macOS Apple Silicon** workflow.
+It tests the release build and the extracted archive, including the embedded
+dashboard, before publishing the tag, executable archive and checksums.
+
 ## Build it from source
 
 This project is built from source, and so is rust-js: `rust-js/` is a git
