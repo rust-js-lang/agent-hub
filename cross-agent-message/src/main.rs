@@ -43,6 +43,14 @@ struct Me {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Print machine-readable executable identity.
+    #[command(hide = true)]
+    BuildInfo,
+    /// Explicitly download and atomically replace this executable.
+    UpgradeSelf {
+        #[arg(long)]
+        from_hub: bool,
+    },
     /// Run the hub on this machine, with the dashboard at its address.
     Serve {
         #[arg(long, default_value_t = 7878)]
@@ -209,7 +217,29 @@ fn dashboard() -> Dashboard {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let client = Client::new(&cli.hub);
+    if !matches!(
+        &cli.command,
+        Command::Serve { .. } | Command::Key { .. } | Command::BuildInfo
+    ) {
+        let info = client.check_protocol()?;
+        let _ = cross_agent_message::updates::warn_if_behind(
+            &info,
+            client.hub(),
+            &cross_agent_message::updates::client_state_dir(),
+            hub::now() / 86_400_000,
+        );
+    }
     match cli.command {
+        Command::BuildInfo => {
+            println!(
+                "{}",
+                serde_json::to_string(&cross_agent_message::updates::build_info())?
+            );
+            Ok(())
+        }
+        Command::UpgradeSelf { from_hub } => {
+            cross_agent_message::updates::upgrade_self(&client, from_hub)
+        }
         Command::Serve {
             port,
             db,
@@ -400,17 +430,6 @@ fn register(client: &Client, me: &Me) -> Result<Agent> {
 fn agents(client: &Client, me: &Me) -> Result<()> {
     let you = register(client, me)?;
     println!("You are {} on {}.", you.name, you.machine);
-    // A hub of another build may not know all this command asks, nor this
-    // command all it does. One too old to say its build is one.
-    let hub = client
-        .info()
-        .map_or("an older one".to_string(), |info| info.build);
-    if hub != hub::BUILD {
-        println!(
-            "The hub is build {hub}, and this command build {}: `cross-agent-message serve --replace` starts the hub again on this build.",
-            hub::BUILD
-        );
-    }
     let now = hub::now();
     let others: Vec<Agent> = client
         .agents()?

@@ -11,6 +11,7 @@ import {
   PERSON,
   agentDeserialize_deserialize,
   channelDeserialize_deserialize,
+  hubInfoDeserialize_deserialize,
   inboxDeserialize_deserialize,
   messageDeserialize_deserialize,
   readInboxSerialize_serialize,
@@ -35,6 +36,10 @@ async function ask(path, init, readT) {
   const response = value._0;
   const status = response.status;
   const text = await response.text();
+  if (status === 426) {
+    // The draft is durable; reload can never discard it.
+    window.location.reload();
+  }
   if (status !== 200) {
     const value = $fromJson(text, refusalDeserialize_deserialize);
     return { TAG: "Err", _0: value.TAG === "Ok" ? value._0.reason : `The hub answered ${status}.` };
@@ -61,6 +66,7 @@ async function post(path, body, readT, writeimpl_Serialize) {
   const json = result$1._0;
   const headers = new Headers();
   headers.append("content-type", "application/json");
+  headers.append(Protocol.PROTOCOL_HEADER, "1");
   const init = {
     method: "POST",
     headers,
@@ -228,5 +234,27 @@ export async function retire(me, name) {
 /** A time in milliseconds since the Unix epoch, in the reader's locale. */
 export function time(at) {
   return new Date(Number(at)).toLocaleString();
+}
+
+export async function hub() {
+  return await ask(Protocol.HUB, undefined, hubInfoDeserialize_deserialize);
+}
+
+const DRAFT = "cross-agent-message.draft";
+export function draft() {
+  const result = $try(() => window.localStorage);
+  const option = result.TAG === "Ok" ? result._0 : undefined;
+  return option?.getItem(DRAFT) ?? "";
+}
+export function setDraft(body) {
+  let storage;
+  try {
+    storage = window.localStorage;
+  } catch {
+    return;
+  }
+  try {
+    storage.setItem(DRAFT, body);
+  } catch {}
 }
 //# sourceMappingURL=api.js.map

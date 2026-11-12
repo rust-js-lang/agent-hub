@@ -61,7 +61,22 @@ pub struct Refused(StatusCode, String);
 
 impl IntoResponse for Refused {
     fn into_response(self) -> Response {
-        (self.0, Json(Refusal { reason: self.1 })).into_response()
+        (
+            self.0,
+            Json(Refusal {
+                code: Some(
+                    match self.0 {
+                        StatusCode::GONE => "retired",
+                        StatusCode::NOT_FOUND => "unknown-agent",
+                        StatusCode::UPGRADE_REQUIRED => "upgrade-required",
+                        _ => "request-refused",
+                    }
+                    .to_string(),
+                ),
+                reason: self.1,
+            }),
+        )
+            .into_response()
     }
 }
 
@@ -94,6 +109,7 @@ impl Hub {
         away_after: u64,
         forget_after: u64,
     ) -> rusqlite::Result<Hub> {
+        let _ = crate::updates::binary();
         Ok(Hub {
             lifecycle: Mutex::new(()),
             away_after,
@@ -120,7 +136,17 @@ impl Hub {
             started: self.started,
             away_after: self.away_after,
             forget_after: self.forget_after,
-            features: vec!["inbox-digests".to_string(), "agent-lifecycle".to_string()],
+            features: vec![
+                "inbox-digests".to_string(),
+                "agent-lifecycle".to_string(),
+                "event-types".to_string(),
+                "binary-download".to_string(),
+            ],
+            protocol: protocol::PROTOCOL,
+            target: env!("CROSS_AGENT_TARGET").to_string(),
+            binary_sha256: crate::updates::binary()
+                .ok()
+                .map(|binary| binary.sha256.clone()),
         }
     }
 
@@ -235,6 +261,7 @@ pub fn router(hub: Arc<Hub>, dashboard: impl Into<Dashboard>) -> Router {
         .route(READ, post(read_message))
         .route(RETIRE, post(retire))
         .route(protocol::NOTICE, get(notice))
+        .route(protocol::BINARY, get(binary))
         .route(HOLDS, get(holds).post(take))
         .route(RELEASE, post(release))
         .route(CHANNELS, get(channels).post(join))
@@ -248,7 +275,9 @@ pub fn router(hub: Arc<Hub>, dashboard: impl Into<Dashboard>) -> Router {
         Dashboard::Embedded => routes.fallback(embedded),
         Dashboard::Dir(dir) => routes.fallback_service(ServeDir::new(dir)),
     };
-    routes.with_state(hub)
+    routes
+        .layer(axum::middleware::from_fn(protocol_header))
+        .with_state(hub)
 }
 
 /// A file of the dashboard kept in this binary, or that there's none.
@@ -257,6 +286,40 @@ async fn embedded(uri: Uri) -> Response {
         Some((kind, bytes)) => ([(header::CONTENT_TYPE, kind)], bytes).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn protocol_header(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let claimed = request.headers().get(protocol::PROTOCOL_HEADER);
+    let version = match claimed {
+        None => Some(1),
+        Some(value) => value.to_str().ok().and_then(|v| v.parse::<u32>().ok()),
+    };
+    let mut response = if version == Some(protocol::PROTOCOL) {
+        next.run(request).await
+    } else {
+        Refused(StatusCode::UPGRADE_REQUIRED, format!("This hub speaks protocol {}; this client claims {}. Upgrade the client: cross-agent-message upgrade-self", protocol::PROTOCOL, version.map_or("invalid".to_string(), |v| v.to_string()))).into_response()
+    };
+    response.headers_mut().insert(
+        protocol::PROTOCOL_HEADER,
+        axum::http::HeaderValue::from_static("1"),
+    );
+    response
+}
+
+async fn binary() -> Result<Response, Refused> {
+    let binary = crate::updates::binary()
+        .map_err(|reason| Refused(StatusCode::SERVICE_UNAVAILABLE, reason.to_string()))?;
+    Ok((
+        [
+            ("content-type", "application/octet-stream"),
+            ("x-content-sha256", binary.sha256.as_str()),
+        ],
+        binary.bytes.clone(),
+    )
+        .into_response())
 }
 
 async fn agents(State(hub): State<Arc<Hub>>) -> Result<Json<Vec<Agent>>, Refused> {
@@ -660,6 +723,7 @@ async fn release(
 #[derive(Deserialize)]
 struct EventsQuery {
     agent: Option<String>,
+    types: Option<String>,
 }
 
 /// While it's held, its agent is watching.
@@ -724,6 +788,12 @@ async fn events(
         events,
         watch,
         ended: false,
+        types: query
+            .types
+            .unwrap_or_else(|| "sent,read,agent".to_string())
+            .split(',')
+            .map(str::to_string)
+            .collect(),
     })
     .keep_alive(KeepAlive::default()))
 }
@@ -732,6 +802,7 @@ struct AgentEvents {
     events: BroadcastStream<Event>,
     watch: Option<Watch>,
     ended: bool,
+    types: Vec<String>,
 }
 
 impl Stream for AgentEvents {
@@ -778,6 +849,12 @@ impl Stream for AgentEvents {
                     Event::Retired { name } if *name == watch.name => self.ended = true,
                     _ => continue,
                 }
+            }
+            if !self.types.iter().any(|kind| kind == event.kind()) {
+                if self.ended {
+                    return Poll::Ready(None);
+                }
+                continue;
             }
             let json = serde_json::to_string(&event).expect("an event is JSON");
             return Poll::Ready(Some(Ok(sse::Event::default().data(json))));
@@ -1038,6 +1115,7 @@ mod tests {
             events,
             watch: Some(watch),
             ended: false,
+            types: vec!["sent".to_string(), "retired".to_string()],
         };
         hub.retire("a", now()).unwrap();
         let agent = hub.store().agent("a").unwrap().unwrap();

@@ -1,0 +1,30 @@
+name: Protocol compatibility
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compatibility:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+      - name: Build and test current protocol
+        run: cargo test -p cross-agent-message -p protocol
+      - name: Build the previous release
+        shell: bash
+        run: |
+          previous=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo 8cdea18)
+          mkdir -p target/compat-source
+          git archive "$previous" | tar -x -C target/compat-source
+          rm -rf target/compat-source/rust-js
+          ln -s "$PWD/rust-js" target/compat-source/rust-js
+          cargo build --manifest-path target/compat-source/Cargo.toml -p cross-agent-message --target-dir target/compat-build
+      - name: Test both directions against real processes
+        run: python3 scripts/check-compatibility.py --current target/debug/cross-agent-message --previous target/compat-build/debug/cross-agent-message

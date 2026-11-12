@@ -40,3 +40,9 @@ export function retire(me: Me, name: string): any;
 
 /** A time in milliseconds since the Unix epoch, in the reader's locale. */
 export function time(at: bigint): string;
+
+export function hub(): any;
+
+export function draft(): string;
+
+export function setDraft(body: string): void;

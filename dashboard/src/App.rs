@@ -9,10 +9,10 @@ mod message_list;
 
 use agent_list::AgentList;
 use compose::Compose;
-use js::spawn;
+use js::{clear_interval, date, set_interval, spawn};
 use message_list::MessageList;
 use protocol::{Agent, Channel, EVENTS, Message};
-use react::{JSX, jsx, use_effect, use_state};
+use react::{JSX, jsx, use_effect, use_ref, use_state};
 use webapi::{Event, EventTargetExt, MessageEvent, event_source, events};
 
 pub fn App() -> JSX::Element {
@@ -22,6 +22,9 @@ pub fn App() -> JSX::Element {
     let (selected, set_selected) = use_state(|| None::<String>);
     let (live, set_live) = use_state(|| false);
     let (problem, set_problem) = use_state(|| None::<String>);
+    let build = use_ref(None::<String>);
+    let activity = use_ref(date::now());
+    let (upgraded, set_upgraded) = use_state(|| false);
     // The person, where they signed in on this device: they write here.
     let (me, set_me) = use_state(api::me);
 
@@ -42,11 +45,25 @@ pub fn App() -> JSX::Element {
                     }
                 }))
             };
-            let source = event_source::new(EVENTS, None);
+            let source =
+                event_source::new(&format!("{EVENTS}?types={}", protocol::EVENT_TYPES), None);
             source.add_event_listener(
                 events::Open,
                 move |_: &Event| {
                     set_live.set(true);
+                    spawn(Box::new(async move {
+                        if let Ok(info) = api::hub().await {
+                            if build
+                                .current()
+                                .as_ref()
+                                .is_some_and(|old| *old != info.build)
+                            {
+                                set_upgraded.set(true);
+                            } else {
+                                build.set_current(Some(info.build));
+                            }
+                        }
+                    }));
                     refresh();
                 },
                 None,
@@ -56,6 +73,25 @@ pub fn App() -> JSX::Element {
             move || source.close()
         },
         Some(&()),
+    );
+
+    use_effect(
+        move || {
+            let timer = set_interval(
+                Box::new(move || {
+                    if *upgraded
+                        && api::draft().is_empty()
+                        && (webapi::window.document().hidden()
+                            || date::now() - activity.current() >= 30_000.0)
+                    {
+                        webapi::window.location().reload();
+                    }
+                }),
+                Some(1000.0),
+            );
+            move || clear_interval(Some(timer))
+        },
+        Some(&(*upgraded,)),
     );
 
     // What's sent to the person is read once it's on their page: asked
@@ -85,13 +121,18 @@ pub fn App() -> JSX::Element {
         })
         .collect();
     jsx! {
-        <div className="page">
+        <div className="page" onInput={move |_| activity.set_current(date::now())} onKeyDown={move |_| activity.set_current(date::now())} onPointerDown={move |_| activity.set_current(date::now())} onPointerMove={move |_| activity.set_current(date::now())}>
             <header>
                 <h1>{"Cross-agent messages"}</h1>
                 <span className={if *live { "live on" } else { "live off" }}>
                     {if *live { "Live" } else { "Connecting…" }}
                 </span>
             </header>
+            {(*upgraded).then(|| jsx! {
+                <p className="upgrade-notice" role="status">{"The hub was upgraded: "}
+                    <button type="button" className="link" onClick={move |_| webapi::window.location().reload()}>{"reload"}</button>
+                </p>
+            })}
             {problem.clone().map(|reason| jsx! { <p className="problem" role="alert">{reason}</p> })}
             <div className="layout">
                 <AgentList agents={agents} selected={selected.as_deref()} onSelect={set_selected} me={me.as_ref()} />

@@ -15,6 +15,11 @@ import { $byteLen, $debugStr, $json } from "@rust-js/std";
  * `GET`: every agent the hub knows, as [`Agent`]s. `POST` a [`Register`]:
  * the agent is seen now, and the hub answers with its [`Agent`].
  */
+export const PROTOCOL = 1;
+export const PROTOCOL_HEADER = "cross-agent-protocol";
+export const EVENT_TYPES = "sent,read,agent,retired";
+export const BINARY = "/api/binary";
+
 export const AGENTS = "/api/agents";
 
 /**
@@ -613,6 +618,16 @@ export function hubInfoSerialize_serialize(hubInfo, json) {
     json.string(item);
   }
   json.endArray();
+  json.key("protocol");
+  json.int(hubInfo.protocol);
+  json.key("target");
+  json.string(hubInfo.target);
+  json.key("binary_sha256");
+  if (hubInfo.binarySha256 == null) {
+    json.null();
+  } else {
+    json.string(hubInfo.binarySha256);
+  }
   json.endObject();
 }
 
@@ -626,16 +641,36 @@ export function hubInfoDeserialize_deserialize(json) {
       ["away_after", $json.u64, () => defaultAwayAfter()],
       ["forget_after", $json.u64, () => defaultForgetAfter()],
       ["features", $json.vec($json.string), () => []],
+      ["protocol", $json.u32, () => defaultProtocol()],
+      ["target", $json.string, () => ""],
+      ["binary_sha256", $json.option($json.string), () => undefined],
     ],
-    ([version, build, started, awayAfter, forgetAfter, features]) => ({
+    ([
       version,
       build,
       started,
       awayAfter,
       forgetAfter,
       features,
+      protocol,
+      target,
+      binarySha256,
+    ]) => ({
+      version,
+      build,
+      started,
+      awayAfter,
+      forgetAfter,
+      features,
+      protocol,
+      target,
+      binarySha256,
     }),
   );
+}
+
+export function defaultProtocol() {
+  return PROTOCOL;
 }
 
 export function defaultAwayAfter() {
@@ -748,13 +783,26 @@ export function releaseDeserialize_deserialize(json) {
 /** Why the hub refused a request: the body of every answer that isn't 200. */
 export function refusalSerialize_serialize(refusal, json) {
   json.beginObject();
+  json.key("code");
+  if (refusal.code == null) {
+    json.null();
+  } else {
+    json.string(refusal.code);
+  }
   json.key("reason");
   json.string(refusal.reason);
   json.endObject();
 }
 
 export function refusalDeserialize_deserialize(json) {
-  return json.struct("struct Refusal", [["reason", $json.string]], ([reason]) => ({ reason }));
+  return json.struct(
+    "struct Refusal",
+    [
+      ["code", $json.option($json.string), () => undefined],
+      ["reason", $json.string],
+    ],
+    ([code, reason]) => ({ code, reason }),
+  );
 }
 
 /** What happened on the hub, as [`EVENTS`] streams it. */
@@ -787,12 +835,17 @@ export function eventSerialize_serialize(event, json) {
     json.key("agent");
     agentSerialize_serialize(event.agent, json);
     json.endObject();
-  } else {
+  } else if (event.TAG === "Retired") {
     json.beginObject();
     json.key("type");
     json.string("retired");
     json.key("name");
     json.string(event.name);
+    json.endObject();
+  } else {
+    json.beginObject();
+    json.key("type");
+    json.string("unknown");
     json.endObject();
   }
 }
@@ -801,7 +854,7 @@ export function eventDeserialize_deserialize(json) {
   return json.internallyTagged(
     "type",
     "internally tagged enum Event",
-    ["sent", "read", "agent", "retired"],
+    ["sent", "read", "agent", "retired", "unknown"],
     (variant, content) => {
       if (variant === "sent") {
         return content.struct(
@@ -827,14 +880,37 @@ export function eventDeserialize_deserialize(json) {
           ([agent]) => ({ TAG: "Agent", agent }),
         );
       }
-      return content.struct(
-        "struct variant Event::Retired",
-        [["name", $json.string]],
-        ([name]) => ({ TAG: "Retired", name }),
-      );
+      if (variant === "retired") {
+        return content.struct(
+          "struct variant Event::Retired",
+          [["name", $json.string]],
+          ([name]) => ({ TAG: "Retired", name }),
+        );
+      }
+      content.taggedUnit("unit variant Event::Unknown");
+      return "Unknown";
     },
+    "unknown",
   );
 }
+
+export const Event = {
+  kind(event) {
+    if (event.TAG === "Sent") {
+      return "sent";
+    }
+    if (event.TAG === "Read") {
+      return "read";
+    }
+    if (event.TAG === "Agent") {
+      return "agent";
+    }
+    if (event.TAG === "Retired") {
+      return "retired";
+    }
+    return "unknown";
+  },
+};
 
 /** The longest name an agent may have. */
 export const NAME_MAX = 64;

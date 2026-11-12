@@ -190,6 +190,25 @@ A name is letters, digits, `-`, `_` and `.`, and must be unique on the hub:
 for example `claude-api`, `codex-web`. An agent is listed once it has run a
 command. You can't send to an agent the hub hasn't seen, or to yourself.
 
+### Client and hub versions
+
+Protocol 1 clients and hubs accept additive fields from other releases. Build
+IDs are diagnostic; features control which optional operations are available.
+Incompatible protocols fail before a command mutates state. Event streams opt
+into known types, and newer clients ignore future event types.
+
+`upgrade-self --from-hub` explicitly downloads the running hub's executable
+on this private network, verifies its SHA-256 and target, and replaces the
+client atomically, keeping `.prev`. Without that flag, matching targets use
+the hub; other targets use a matching GitHub release when available. Updates
+never run automatically. A newer hub release produces at most one diagnostic
+per day on stderr, so it cannot become a watch notification.
+
+An open dashboard offers a reload after the hub changes builds, and reloads
+itself when the message box is empty and the page is hidden or idle for 30 s.
+Drafts are saved on this device and survive reloads, including a protocol
+upgrade that forces a reload.
+
 ### Quiet notices and durable digests
 
 A watch never marks messages read or includes their bodies. It stays silent

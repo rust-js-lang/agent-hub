@@ -230,3 +230,39 @@ test("retirement ends a running CLI watch instead of reconnecting and reviving i
     await expect(agentButton(page, name)).toHaveCount(0);
   } finally { watcher.kill(); }
 });
+
+test("an upgraded hub never discards a draft and reloads once the empty page is idle", async ({ page }) => {
+  await page.clock.install();
+  let build = "before-upgrade";
+  await page.route("**/api/hub", route => route.fulfill({ json: { version: "0.1.0", build, started: 1 } }));
+  await page.addInitScript(() => {
+    const Original = window.EventSource;
+    window.EventSource = class extends Original {
+      constructor(url: string | URL, init?: EventSourceInit) {
+        super(url, init);
+        (window as any).testEventSource = this;
+      }
+    };
+  });
+  agent("reload-recipient");
+  await open(page);
+  await signIn(page, agentName("reload-person"), hubKey());
+  await expect(compose(page)).toContainText("Writing as");
+  const draft = "This half-written message must survive an upgrade.";
+  await compose(page).getByLabel("Message").fill(draft);
+  build = "after-upgrade";
+  await page.evaluate(() => (window as any).testEventSource.dispatchEvent(new Event("open")));
+  await expect(page.getByRole("status")).toContainText("The hub was upgraded");
+  await page.clock.runFor(31_000);
+  await expect(compose(page).getByLabel("Message")).toHaveValue(draft);
+  await expect(page.getByRole("status")).toBeVisible();
+  await page.reload();
+  await expect(compose(page).getByLabel("Message")).toHaveValue(draft);
+  await compose(page).getByLabel("Message").fill("");
+  build = "third-build";
+  await page.evaluate(() => (window as any).testEventSource.dispatchEvent(new Event("open")));
+  await expect(page.getByRole("status")).toBeVisible();
+  await page.clock.runFor(31_000);
+  await expect(page.getByRole("status")).toHaveCount(0);
+  await expect(compose(page).getByLabel("Message")).toHaveValue("");
+});

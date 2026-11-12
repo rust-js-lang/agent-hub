@@ -22,6 +22,10 @@ async fn ask<T: DeserializeOwned>(path: &str, init: Option<RequestInit<'_>>) -> 
     };
     let status = response.status() as u16;
     let text = response.text().await;
+    if status == 426 {
+        // The draft is durable; reload can never discard it.
+        webapi::window.location().reload();
+    }
     if status != 200 {
         return Err(match serde_json::from_str::<Refusal>(&text) {
             Ok(refusal) => refusal.reason,
@@ -38,6 +42,7 @@ async fn post<T: DeserializeOwned>(path: &str, body: &impl Serialize) -> Result<
         .map_err(|error| format!("This page can't write what it sends: {error}"))?;
     let headers = headers::new(None);
     headers.append("content-type", "application/json");
+    headers.append(protocol::PROTOCOL_HEADER, "1");
     let init = RequestInit {
         method: Some("POST"),
         headers: Some(headers),
@@ -148,4 +153,22 @@ pub async fn retire(me: &Me, name: &str) -> Result<(), String> {
 /// A time in milliseconds since the Unix epoch, in the reader's locale.
 pub fn time(at: u64) -> String {
     date::new(Some(&(at as f64))).to_locale_string(None, None)
+}
+
+pub async fn hub() -> Result<protocol::HubInfo, String> {
+    ask(protocol::HUB, None).await
+}
+
+const DRAFT: &str = "cross-agent-message.draft";
+pub fn draft() -> String {
+    window
+        .local_storage()
+        .ok()
+        .and_then(|s| s.get_item(DRAFT))
+        .unwrap_or_default()
+}
+pub fn set_draft(body: &str) {
+    if let Ok(storage) = window.local_storage() {
+        let _ = storage.set_item(DRAFT, body);
+    }
 }

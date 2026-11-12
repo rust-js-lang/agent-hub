@@ -11,6 +11,11 @@ use serde::{Deserialize, Serialize};
 
 /// `GET`: every agent the hub knows, as [`Agent`]s. `POST` a [`Register`]:
 /// the agent is seen now, and the hub answers with its [`Agent`].
+pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL_HEADER: &str = "cross-agent-protocol";
+pub const EVENT_TYPES: &str = "sent,read,agent,retired";
+pub const BINARY: &str = "/api/binary";
+
 pub const AGENTS: &str = "/api/agents";
 
 /// `GET`: the history, newest first, as [`Message`]s. `POST` a [`Send`]: the
@@ -251,6 +256,16 @@ pub struct HubInfo {
     pub forget_after: u64,
     #[serde(default)]
     pub features: Vec<String>,
+    #[serde(default = "default_protocol")]
+    pub protocol: u32,
+    #[serde(default)]
+    pub target: String,
+    #[serde(default)]
+    pub binary_sha256: Option<String>,
+}
+
+pub fn default_protocol() -> u32 {
+    PROTOCOL
 }
 
 pub fn default_away_after() -> u64 {
@@ -300,6 +315,8 @@ pub struct Release {
 /// Why the hub refused a request: the body of every answer that isn't 200.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Refusal {
+    #[serde(default)]
+    pub code: Option<String>,
     pub reason: String,
 }
 
@@ -323,6 +340,20 @@ pub enum Event {
     Retired {
         name: String,
     },
+    #[serde(other)]
+    Unknown,
+}
+
+impl Event {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Sent { .. } => "sent",
+            Self::Read { .. } => "read",
+            Self::Agent { .. } => "agent",
+            Self::Retired { .. } => "retired",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 /// The longest name an agent may have.
@@ -432,5 +463,64 @@ mod tests {
         assert!(!agent.away && agent.retired_at.is_none());
         let message: Message = serde_json::from_str(r#"{"id":1,"from":"a","to":"b","body":"hi","sentAt":1,"readAt":null,"person":false,"channel":null}"#).unwrap();
         assert!(!message.away);
+    }
+    #[test]
+    fn unknown_event_variants_and_extra_fields_are_forward_compatible() {
+        assert_eq!(
+            serde_json::from_str::<Event>(r#"{"type":"future-event","whatever":{"nested":true}}"#)
+                .unwrap(),
+            Event::Unknown
+        );
+        let event: Event =
+            serde_json::from_str(r#"{"type":"retired","name":"a","future":123}"#).unwrap();
+        assert_eq!(
+            event,
+            Event::Retired {
+                name: "a".to_string()
+            }
+        );
+        let info: HubInfo =
+            serde_json::from_str(r#"{"version":"old","build":"old","started":1,"future":true}"#)
+                .unwrap();
+        assert_eq!(info.protocol, 1);
+        let refusal: Refusal =
+            serde_json::from_str(r#"{"reason":"old reason","future":true}"#).unwrap();
+        assert!(refusal.code.is_none());
+    }
+    #[test]
+    fn protocol_objects_accept_additive_unknown_fields() {
+        fn accepts<T: serde::de::DeserializeOwned>(mut value: serde_json::Value) {
+            value.as_object_mut().unwrap().insert(
+                "field_from_a_future_release".to_string(),
+                serde_json::json!({"nested":true}),
+            );
+            serde_json::from_value::<T>(value).unwrap_or_else(|e| {
+                panic!(
+                    "{} rejected an extra field: {e}",
+                    std::any::type_name::<T>()
+                )
+            });
+        }
+        accepts::<Register>(serde_json::json!({"name":"a","machine":"m"}));
+        accepts::<Send>(serde_json::json!({"from":"a","to":"b","body":"hi"}));
+        accepts::<ReadInbox>(serde_json::json!({"name":"a","max":20}));
+        accepts::<ReadMessage>(serde_json::json!({"name":"a","id":1}));
+        accepts::<Retire>(serde_json::json!({"name":"a"}));
+        accepts::<Retired>(serde_json::json!({"channels":0,"holds":0}));
+        accepts::<Channel>(serde_json::json!({"name":"team","members":[]}));
+        accepts::<Join>(serde_json::json!({"name":"a","channel":"team"}));
+        accepts::<SignIn>(serde_json::json!({"name":"person","key":"key"}));
+        accepts::<Take>(serde_json::json!({"name":"check","holder":"a","minutes":30}));
+        accepts::<Release>(serde_json::json!({"name":"check","holder":"a"}));
+        accepts::<Hold>(serde_json::json!({"name":"check","holder":"a","since":1,"until":2}));
+        accepts::<Taken>(
+            serde_json::json!({"hold":{"name":"check","holder":"a","since":1,"until":2},"yours":true}),
+        );
+        accepts::<Inbox>(serde_json::json!({"messages":[],"remaining":0}));
+        accepts::<HubInfo>(serde_json::json!({"version":"old","build":"old","started":1}));
+        accepts::<Refusal>(serde_json::json!({"reason":"reason"}));
+        accepts::<Digest>(serde_json::json!({"channel":"team","unread":0,"first":[]}));
+        accepts::<DigestLine>(serde_json::json!({"id":1,"from":"a","first_line":"ask"}));
+        accepts::<AwaySummary>(serde_json::json!({"channel":"team","count":0,"senders":[]}));
     }
 }

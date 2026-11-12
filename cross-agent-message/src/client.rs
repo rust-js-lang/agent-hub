@@ -58,6 +58,11 @@ impl Client {
 
     /// The JSON of a 200 answer, or the hub's reason for refusing.
     fn answer<T: DeserializeOwned>(mut response: Response<Body>) -> Result<T> {
+        if let Some(header) = response.headers().get(protocol::PROTOCOL_HEADER)
+            && header.to_str().ok() != Some("1")
+        {
+            bail!("hub protocol is unsupported; upgrade the hub or client before sending commands");
+        }
         if response.status().is_success() {
             return response
                 .body_mut()
@@ -78,6 +83,7 @@ impl Client {
         let response = self
             .http
             .get(self.url(path))
+            .header(protocol::PROTOCOL_HEADER, "1")
             .call()
             .with_context(|| self.unreachable())?;
         Client::answer(response)
@@ -87,6 +93,7 @@ impl Client {
         let response = self
             .http
             .post(self.url(path))
+            .header(protocol::PROTOCOL_HEADER, "1")
             .send_json(body)
             .with_context(|| self.unreachable())?;
         Client::answer(response)
@@ -220,6 +227,7 @@ impl Client {
     }
 
     pub fn read_message(&self, name: &str, id: u64) -> Result<Message> {
+        self.require("inbox-digests")?;
         self.post(
             READ,
             &ReadMessage {
@@ -230,6 +238,7 @@ impl Client {
     }
 
     pub fn retire(&self, name: &str) -> Result<Retired> {
+        self.require("agent-lifecycle")?;
         self.post(
             RETIRE,
             &Retire {
@@ -248,6 +257,47 @@ impl Client {
     /// The hub that's running: its build.
     pub fn info(&self) -> Result<HubInfo> {
         self.get(HUB)
+    }
+
+    pub fn check_protocol(&self) -> Result<HubInfo> {
+        let info = self.info()?;
+        if info.protocol != protocol::PROTOCOL {
+            bail!(
+                "The hub at {} is {} (protocol {}); this command line needs protocol {}. Upgrade the hub on its machine: cross-agent-message upgrade <release>.",
+                self.hub,
+                info.version,
+                info.protocol,
+                protocol::PROTOCOL
+            );
+        }
+        Ok(info)
+    }
+
+    pub fn require(&self, feature: &str) -> Result<()> {
+        let info = self.check_protocol()?;
+        if !info.features.iter().any(|f| f == feature) {
+            bail!(
+                "This hub ({}) has no {feature} yet: upgrade it on its machine.",
+                info.version
+            );
+        }
+        Ok(())
+    }
+
+    pub fn download_binary(&self) -> Result<Vec<u8>> {
+        let mut response = self
+            .http
+            .get(self.url(protocol::BINARY))
+            .header(protocol::PROTOCOL_HEADER, "1")
+            .call()?;
+        if !response.status().is_success() {
+            bail!("hub executable download failed: {}", response.status());
+        }
+        Ok(response
+            .body_mut()
+            .with_config()
+            .limit(128 * 1024 * 1024)
+            .read_to_vec()?)
     }
 
     /// Asks the hub to stop, for another to take its place: what it was.
@@ -291,6 +341,8 @@ impl Client {
             .http
             .get(self.url(EVENTS))
             .query("agent", name)
+            .query("types", protocol::EVENT_TYPES)
+            .header(protocol::PROTOCOL_HEADER, "1")
             .call()
             .with_context(|| self.unreachable())?;
         if !response.status().is_success() {
@@ -300,10 +352,13 @@ impl Client {
         let lines = BufReader::new(response.into_body().into_reader()).lines();
         // Server-sent events: each is a `data:` line; others keep it alive.
         Ok(lines.filter_map(|line| match line {
-            Ok(line) => line.strip_prefix("data:").map(|json| {
-                serde_json::from_str(json.trim_start())
-                    .context("an event this version doesn't read")
-            }),
+            Ok(line) => {
+                let json = line.strip_prefix("data:")?;
+                match serde_json::from_str::<Event>(json.trim_start()) {
+                    Ok(Event::Unknown) => None,
+                    result => Some(result.context("an event this version doesn't read")),
+                }
+            }
             Err(error) => Some(Err(error).context("the hub closed the stream")),
         }))
     }

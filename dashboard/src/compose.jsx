@@ -28,7 +28,7 @@ export function Compose({ agents, channels, selected, me, onMe }) {
   const [name, setName] = useState(() => "");
   const [key, setKey] = useState(() => "");
   const [picked, setPicked] = useState(() => "");
-  const [body, setBody] = useState(() => "");
+  const [body, setBody] = useState(Api.draft);
   const [problem, setProblem] = useState(undefined);
 
   if (me == null) {
@@ -109,6 +109,7 @@ export function Compose({ agents, channels, selected, me, onMe }) {
   async function send() {
     const value = await Api.send(me, to$1, body);
     if (value.TAG === "Ok") {
+      Api.setDraft("");
       setBody("");
       setProblem(undefined);
     } else {
@@ -147,7 +148,11 @@ export function Compose({ agents, channels, selected, me, onMe }) {
           placeholder="Message"
           rows={3}
           value={body}
-          onChange={(e) => setBody(e.target.value)}
+          onChange={(e) => {
+            const value = e.target.value;
+            Api.setDraft(value);
+            setBody(value);
+          }}
         />
         <button type="button" className="send" disabled={!ready} onClick={send}>
           Send

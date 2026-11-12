@@ -45,7 +45,7 @@ pub fn Compose(
     let (name, set_name) = use_state(String::new);
     let (key, set_key) = use_state(String::new);
     let (picked, set_picked) = use_state(String::new);
-    let (body, set_body) = use_state(String::new);
+    let (body, set_body) = use_state(api::draft);
     let (problem, set_problem) = use_state(|| None::<String>);
 
     let Some(me) = me else {
@@ -133,6 +133,7 @@ pub fn Compose(
             spawn(Box::new(async move {
                 match api::send(&me, &to, &body).await {
                     Ok(_) => {
+                        api::set_draft("");
                         set_body.set(String::new());
                         set_problem.set(None);
                     }
@@ -175,7 +176,7 @@ pub fn Compose(
                     placeholder="Message"
                     rows={3}
                     value={body.clone()}
-                    onChange={move |e: &ChangeEvent<_>| set_body.set(e.value())} />
+                    onChange={move |e: &ChangeEvent<_>| { let value = e.value(); api::set_draft(&value); set_body.set(value); }} />
                 <button type="button" className="send" disabled={!ready} onClick={send}>{"Send"}</button>
             </div>
             {problem.clone().map(|reason| jsx! { <p className="problem" role="alert">{reason}</p> })}

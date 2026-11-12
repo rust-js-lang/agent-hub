@@ -4,6 +4,14 @@
  * `GET`: every agent the hub knows, as [`Agent`]s. `POST` a [`Register`]:
  * the agent is seen now, and the hub answers with its [`Agent`].
  */
+export const PROTOCOL: number;
+
+export const PROTOCOL_HEADER: string;
+
+export const EVENT_TYPES: string;
+
+export const BINARY: string;
+
 export const AGENTS: string;
 
 /**
@@ -251,7 +259,12 @@ export interface HubInfo {
     awayAfter: bigint;
     forgetAfter: bigint;
     features: string[];
+    protocol: number;
+    target: string;
+    binarySha256?: string | undefined;
 }
+
+export function defaultProtocol(): number;
 
 export function defaultAwayAfter(): bigint;
 
@@ -296,6 +309,7 @@ export interface Release {
 
 /** Why the hub refused a request: the body of every answer that isn't 200. */
 export interface Refusal {
+    code?: string | undefined;
     reason: string;
 }
 
@@ -313,6 +327,10 @@ export type Event = {
 } | {
     TAG: "Retired";
     name: string;
+} | "Unknown";
+
+export const Event: {
+    kind(event: Event): string;
 };
 
 /** The longest name an agent may have. */
