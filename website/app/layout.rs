@@ -2,8 +2,18 @@ js::import!("./globals.css");
 
 use crate::shell::Shell;
 use next::Metadata;
+use next::font::google::{Inter, Subset, VariableFont};
+use next::font::{Display, NextFont};
 use next::metadata::Title;
 use react::{JSX, ReactNode, jsx};
+
+thread_local! {
+    static INTER: NextFont = Inter(VariableFont {
+        subsets: Some(&[Subset::Latin]),
+        display: Some(Display::Swap),
+        ..Default::default()
+    });
+}
 
 pub fn generate_metadata() -> Metadata<'static> {
     Metadata {
@@ -22,7 +32,8 @@ pub struct RootLayoutProps<'a> {
 }
 
 pub fn RootLayout(RootLayoutProps { children }: RootLayoutProps) -> JSX::Element {
-    jsx! { <html lang="en"><body><Shell>{children}</Shell></body></html> }
+    let font = INTER.with(|font| font.class_name.clone());
+    jsx! { <html lang="en" className={font}><body><Shell>{children}</Shell></body></html> }
 }
 
 js::export_default!(RootLayout);

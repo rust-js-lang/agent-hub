@@ -327,3 +327,50 @@ test("Next Link navigation keeps the loaded document", async ({ page }) => {
     "same-document",
   );
 });
+
+test("Inter loads from self-hosted assets on the landing page and docs", async ({
+  page,
+  baseURL,
+}) => {
+  const googleFontRequests = [];
+  const fontResponses = [];
+  page.on("request", (request) => {
+    const hostname = new URL(request.url()).hostname;
+    if (["fonts.googleapis.com", "fonts.gstatic.com"].includes(hostname)) {
+      googleFontRequests.push(request.url());
+    }
+  });
+  page.on("response", (response) => {
+    if (response.request().resourceType() === "font") {
+      fontResponses.push({ url: response.url(), status: response.status() });
+    }
+  });
+
+  for (const path of ["./", "./docs/getting-started/"]) {
+    await page.goto(path);
+    const font = await page.evaluate(async () => {
+      await document.fonts.ready;
+      return {
+        family: getComputedStyle(document.body).fontFamily,
+        loaded: [...document.fonts]
+          .filter((face) => face.status === "loaded")
+          .map((face) => face.family),
+      };
+    });
+    expect(font.family).toMatch(/Inter/i);
+    expect(
+      font.loaded.some(
+        (name) => /Inter/i.test(name) && !/Fallback/i.test(name),
+      ),
+    ).toBe(true);
+  }
+
+  expect(fontResponses.length).toBeGreaterThan(0);
+  for (const response of fontResponses) {
+    const url = new URL(response.url);
+    expect(url.origin).toBe(new URL(baseURL).origin);
+    expect(url.pathname).toContain("/_next/static/media/");
+    expect(response.status).toBe(200);
+  }
+  expect(googleFontRequests).toEqual([]);
+});
