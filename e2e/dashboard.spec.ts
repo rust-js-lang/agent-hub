@@ -164,6 +164,22 @@ test("the person signs in with the hub's key and writes to an agent, who reads i
   await expect(answer.locator(".state")).toContainText("read ");
   await expect(answer).not.toHaveClass(/\bunread\b/);
 
+  // To a channel, every agent in it is sent a copy, and the page shows it
+  // once, with how many have read it. `#everyone` is offered first.
+  await compose(page).getByLabel("To").selectOption("#everyone");
+  await compose(page).getByLabel("Message").fill("Stand-up in five.");
+  await compose(page).getByRole("button", { name: "Send" }).click();
+  const all = messages(page).filter({ hasText: "Stand-up in five." });
+  await expect(all).toHaveCount(1);
+  await expect(all.locator(".to")).toHaveText("#everyone");
+  await expect(all.locator(".state")).toContainText(/read by 0 of \d+/);
+  expect(cli("inbox", "--as", codex)).toContain(`from ${tu}, the person, to #everyone`);
+  await expect(all.locator(".state")).toContainText(/read by 1 of \d+/);
+  // One an agent joined is offered too, by its name and how many are in it.
+  cli("join", "--as", claude, "#reviewers");
+  await page.reload();
+  await expect(compose(page).getByLabel("To").locator("option", { hasText: "#reviewers · 1 agent" })).toHaveCount(1);
+
   // Signed in on this device still, after a reload; and out when asked.
   await page.reload();
   await expect(compose(page)).toContainText(`Writing as ${tu}.`);

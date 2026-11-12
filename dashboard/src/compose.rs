@@ -2,7 +2,7 @@
 //! a device with the hub's key, then a recipient, a message and Send.
 
 use js::spawn;
-use protocol::Agent;
+use protocol::{Agent, Channel};
 use react::event::{ChangeEvent, MouseEvent};
 use react::{JSX, jsx, use_state};
 
@@ -25,6 +25,7 @@ fn grouped(typed: &str) -> String {
 
 pub struct ComposeProps<'a> {
     pub agents: &'a [Agent],
+    pub channels: &'a [Channel],
     /// The agent whose messages are shown, the one to write to unless
     /// another is picked.
     pub selected: Option<&'a str>,
@@ -35,6 +36,7 @@ pub struct ComposeProps<'a> {
 pub fn Compose(
     ComposeProps {
         agents,
+        channels,
         selected,
         me,
         on_me,
@@ -91,17 +93,37 @@ pub fn Compose(
         };
     };
 
-    // Whom it goes to: the one picked here, else the one whose messages
-    // are shown, else the first there is. Never the person themself.
+    // Whom it goes to: the one picked here, else the agent whose messages
+    // are shown, else the first channel, everyone. A channel is written
+    // with its `#`; one with no agent in it, and the person, aren't offered.
     let others: Vec<&Agent> = agents.iter().filter(|agent| !agent.person).collect();
-    let known = |name: &str| others.iter().any(|agent| agent.name == name);
+    let groups: Vec<(String, String)> = channels
+        .iter()
+        .filter(|channel| !channel.members.is_empty())
+        .map(|channel| {
+            let agents = match channel.members.len() {
+                1 => "1 agent".to_string(),
+                count => format!("{count} agents"),
+            };
+            (
+                format!("#{}", channel.name),
+                format!("#{} · {agents}", channel.name),
+            )
+        })
+        .collect();
+    let known = |to: &str| {
+        others.iter().any(|agent| agent.name == to) || groups.iter().any(|(name, _)| name == to)
+    };
     let to = match (picked.as_str(), selected) {
         (picked, _) if known(picked) => picked.to_string(),
         (_, Some(selected)) if known(selected) => selected.to_string(),
-        _ => others
-            .first()
-            .map(|agent| agent.name.clone())
-            .unwrap_or_default(),
+        _ => match groups.first() {
+            Some((name, _)) => name.clone(),
+            None => others
+                .first()
+                .map(|agent| agent.name.clone())
+                .unwrap_or_default(),
+        },
     };
     let ready = !to.is_empty() && !body.trim().is_empty();
     let send = {
@@ -135,6 +157,12 @@ pub fn Compose(
                     aria-label="To"
                     value={to.clone()}
                     onChange={move |e: &ChangeEvent<_>| set_picked.set(e.value())}>
+                    {groups
+                        .iter()
+                        .map(|(name, label)| jsx! {
+                            <option key={name.clone()} value={name.clone()}>{label.clone()}</option>
+                        })
+                        .collect::<Vec<_>>()}
                     {others
                         .iter()
                         .map(|agent| jsx! {

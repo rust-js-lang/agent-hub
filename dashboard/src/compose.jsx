@@ -25,7 +25,7 @@ function grouped(typed) {
   return groups.join("-");
 }
 
-export function Compose({ agents, selected, me, onMe }) {
+export function Compose({ agents, channels, selected, me, onMe }) {
   const [name, setName] = useState(() => "");
   const [key, setKey] = useState(() => "");
   const [picked, setPicked] = useState(() => "");
@@ -84,21 +84,31 @@ export function Compose({ agents, selected, me, onMe }) {
     );
   }
 
-  // Whom it goes to: the one picked here, else the one whose messages
-  // are shown, else the first there is. Never the person themself.
+  // Whom it goes to: the one picked here, else the agent whose messages
+  // are shown, else the first channel, everyone. A channel is written
+  // with its `#`; one with no agent in it, and the person, aren't offered.
   const others = agents.filter((agent) => !agent.person);
-  const known = (name) => others.some((agent) => agent.name === name);
+  const groups = channels
+    .filter((channel) => channel.members.length !== 0)
+    .map((channel) => {
+      const agents = channel.members.length === 1 ? "1 agent" : `${channel.members.length} agents`;
+      return [`#${channel.name}`, `#${channel.name} · ${agents}`];
+    });
+  const known = (to) =>
+    others.some((agent) => agent.name === to) || groups.some(([name]) => name === to);
   let to;
   if (known(picked)) {
     to = picked;
   } else if (selected != null && known(selected)) {
     to = selected;
   } else {
-    to = others[0]?.name ?? "";
+    const first = groups[0];
+    to = first != null ? first[0] : (others[0]?.name ?? "");
   }
   const ready = to !== "" && $trim(body) !== "";
+  const to$1 = to;
   async function send() {
-    const value = await Api.send(me, to, body);
+    const value = await Api.send(me, to$1, body);
     if (value.TAG === "Ok") {
       setBody("");
       setProblem(undefined);
@@ -110,6 +120,11 @@ export function Compose({ agents, selected, me, onMe }) {
     Api.signOut();
     onMe(undefined);
   }
+  const children = groups.map(([name, label]) => (
+    <option key={name} value={name}>
+      {label}
+    </option>
+  ));
   return (
     <section className="compose" aria-label="Write to the agents">
       <h2>Write to the agents</h2>
@@ -121,6 +136,7 @@ export function Compose({ agents, selected, me, onMe }) {
       </p>
       <div className="fields">
         <select aria-label="To" value={to} onChange={(e) => setPicked(e.target.value)}>
+          {children}
           {others.map((agent) => (
             <option key={agent.name} value={agent.name}>
               {agent.name}

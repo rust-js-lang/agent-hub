@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand};
 use cross_agent_message::client::Client;
 use cross_agent_message::hub::{self, Hub};
 use cross_agent_message::store::Store;
-use protocol::{Agent, Event, HOLD_MINUTES, Hold, check_hold, check_name};
+use protocol::{Agent, Event, HOLD_MINUTES, Hold, check_channel, check_hold, check_name};
 
 /// Lets AI coding agents, on any tool or machine, message each other through
 /// a hub. Each agent picks a name and passes it as `--as`. A message from
@@ -66,12 +66,14 @@ enum Command {
         #[command(flatten)]
         me: Me,
     },
-    /// Send a message to another agent, by its name as `agents` lists it.
-    /// It waits in that agent's inbox until the agent reads it.
+    /// Send a message to another agent, by its name as `agents` lists it,
+    /// or to every other agent in a channel, `'#everyone'`. It waits in
+    /// each one's inbox until that agent reads it.
     Send {
         #[command(flatten)]
         me: Me,
-        /// The agent to send it to.
+        /// The agent to send it to, or a channel, `#team`: quote it, as `#`
+        /// starts a comment in a shell.
         to: String,
         /// The message. Quote it, or pass a heredoc: "$(cat <<'EOF' ... EOF)".
         message: String,
@@ -117,6 +119,28 @@ enum Command {
     },
     /// List what's held now, by whom, and for how much longer.
     Holds {
+        #[command(flatten)]
+        me: Me,
+    },
+    /// Join a channel: a message sent to it reaches you, and every other
+    /// agent in it. Every agent is in `everyone` already.
+    Join {
+        #[command(flatten)]
+        me: Me,
+        /// The channel, with or without its `#`.
+        #[arg(value_name = "CHANNEL")]
+        channel: String,
+    },
+    /// Leave a channel you joined.
+    Leave {
+        #[command(flatten)]
+        me: Me,
+        /// The channel, with or without its `#`.
+        #[arg(value_name = "CHANNEL")]
+        channel: String,
+    },
+    /// List the channels, and who is in each.
+    Channels {
         #[command(flatten)]
         me: Me,
     },
@@ -168,6 +192,9 @@ fn main() -> Result<()> {
         } => hold(&client, &me, &name, minutes, wait),
         Command::Release { me, hold: name } => release(&client, &me, &name),
         Command::Holds { me } => holds(&client, &me),
+        Command::Join { me, channel } => join(&client, &me, &channel),
+        Command::Leave { me, channel } => leave(&client, &me, &channel),
+        Command::Channels { me } => channels(&client, &me),
         Command::Key { db } => key(&db),
     }
 }
@@ -329,8 +356,70 @@ fn agents(client: &Client, me: &Me) -> Result<()> {
 
 fn send(client: &Client, me: &Me, to: &str, message: &str) -> Result<()> {
     register(client, me)?;
+    // To a channel, a copy to each agent in it.
+    if let Some(channel) = to.strip_prefix('#') {
+        let sent = client.broadcast(&me.name, channel, message, None)?;
+        let to: Vec<&str> = sent.iter().map(|message| message.to.as_str()).collect();
+        println!(
+            "Sent to #{channel}: {} ({}).",
+            agents_counted(to.len()),
+            to.join(", ")
+        );
+        return Ok(());
+    }
     let message = client.send(&me.name, to, message)?;
     println!("Sent to {} (message {}).", message.to, message.id);
+    Ok(())
+}
+
+/// "1 agent", "3 agents".
+fn agents_counted(count: usize) -> String {
+    match count {
+        1 => "1 agent".to_string(),
+        count => format!("{count} agents"),
+    }
+}
+
+/// A channel's name as the hub has it: without the `#` it's written with.
+fn channel_named(written: &str) -> Result<&str> {
+    let name = written.strip_prefix('#').unwrap_or(written);
+    if let Err(reason) = check_channel(name) {
+        bail!("{reason}");
+    }
+    Ok(name)
+}
+
+fn join(client: &Client, me: &Me, channel: &str) -> Result<()> {
+    register(client, me)?;
+    let channel = client.join(channel_named(channel)?, &me.name)?;
+    println!(
+        "You're in #{}, with {}: a message sent to it reaches you.",
+        channel.name,
+        agents_counted(channel.members.len() - 1).replace("agent", "other agent")
+    );
+    Ok(())
+}
+
+fn leave(client: &Client, me: &Me, channel: &str) -> Result<()> {
+    register(client, me)?;
+    let channel = client.leave(channel_named(channel)?, &me.name)?;
+    println!("You left #{}.", channel.name);
+    Ok(())
+}
+
+fn channels(client: &Client, me: &Me) -> Result<()> {
+    register(client, me)?;
+    for channel in client.channels()? {
+        let members = match channel.members.is_empty() {
+            true => "no one".to_string(),
+            false => channel.members.join(", "),
+        };
+        println!(
+            "  #{} · {} · {members}",
+            channel.name,
+            agents_counted(channel.members.len())
+        );
+    }
     Ok(())
 }
 
@@ -422,9 +511,14 @@ fn watch(client: &Client, me: &Me) -> Result<()> {
 /// Who sent `message`, as an agent reads it: its name, and that it's the
 /// person where the hub says so, who signed it with the hub's key.
 fn sender(message: &protocol::Message) -> String {
-    match message.person {
+    let from = match message.person {
         true => format!("{}, the person", message.from),
         false => message.from.clone(),
+    };
+    // And the channel it was sent to, where it wasn't to its reader alone.
+    match &message.channel {
+        Some(channel) => format!("{from}, to #{channel}"),
+        None => from,
     }
 }
 

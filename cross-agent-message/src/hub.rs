@@ -14,9 +14,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use protocol::{
-    AGENTS, Agent, EVENTS, Event, HISTORY_LIMIT, HOLD_MINUTES_MAX, HOLDS, HUB, Hold, HubInfo,
-    INBOX, Inbox, MESSAGES, Message, PERSON, RELEASE, ReadInbox, Refusal, Register, Release, STOP,
-    Send, SignIn, Take, Taken, check_hold, check_name,
+    AGENTS, Agent, BROADCAST, CHANNELS, Channel, EVENTS, EVERYONE, Event, HISTORY_LIMIT,
+    HOLD_MINUTES_MAX, HOLDS, HUB, Hold, HubInfo, INBOX, Inbox, Join, LEAVE, MESSAGES, Message,
+    PERSON, RELEASE, ReadInbox, Refusal, Register, Release, STOP, Send, SignIn, Take, Taken,
+    check_channel, check_hold, check_name,
 };
 use serde::Deserialize;
 use tokio::sync::{broadcast, watch};
@@ -207,6 +208,9 @@ pub fn router(hub: Arc<Hub>, dashboard: PathBuf) -> Router {
         .route(INBOX, post(read_inbox))
         .route(HOLDS, get(holds).post(take))
         .route(RELEASE, post(release))
+        .route(CHANNELS, get(channels).post(join))
+        .route(LEAVE, post(leave))
+        .route(BROADCAST, post(broadcast))
         .route(PERSON, post(sign_in))
         .route(HUB, get(info))
         .route(STOP, post(stop))
@@ -313,36 +317,38 @@ async fn history(
     Ok(Json(hub.store().history(query.agent.as_deref(), limit)?))
 }
 
-async fn send(
-    State(hub): State<Arc<Hub>>,
-    Json(send): Json<Send>,
-) -> Result<Json<Message>, Refused> {
+/// Whether `send` is the person's: it comes with the hub's key, from the
+/// name they signed in under. And nothing else is sent as them.
+fn sent_by_person(hub: &Hub, send: &Send) -> Result<bool, Refused> {
     let from = hub.agent(&send.from)?;
-    hub.agent(&send.to)?;
-    // A message is the person's where it comes with the hub's key, from
-    // the name they signed in under; and nothing else is sent as them.
-    let person = match &send.key {
+    match &send.key {
         Some(key) => {
-            check_key(&hub, key)?;
+            check_key(hub, key)?;
             if !from.person {
                 return Err(bad_request(format!(
                     "{} isn't the person's name: sign in from the dashboard first",
                     send.from
                 )));
             }
-            true
+            Ok(true)
         }
-        None if from.person => {
-            return Err(Refused(
-                StatusCode::FORBIDDEN,
-                format!(
-                    "{} is the person's name on this hub: only the dashboard, with the hub's key, sends as them",
-                    send.from
-                ),
-            ));
-        }
-        None => false,
-    };
+        None if from.person => Err(Refused(
+            StatusCode::FORBIDDEN,
+            format!(
+                "{} is the person's name on this hub: only the dashboard, with the hub's key, sends as them",
+                send.from
+            ),
+        )),
+        None => Ok(false),
+    }
+}
+
+async fn send(
+    State(hub): State<Arc<Hub>>,
+    Json(send): Json<Send>,
+) -> Result<Json<Message>, Refused> {
+    let person = sent_by_person(&hub, &send)?;
+    hub.agent(&send.to)?;
     if send.from == send.to {
         return Err(bad_request(format!(
             "{} can't send a message to itself",
@@ -358,6 +364,93 @@ async fn send(
     });
     hub.tell_agent(&send.to)?;
     Ok(Json(message))
+}
+
+/// A channel's name as it's stored: without the `#` it's written with.
+fn channel_name(written: &str) -> Result<&str, Refused> {
+    let name = written.strip_prefix('#').unwrap_or(written);
+    check_channel(name).map_err(bad_request)?;
+    Ok(name)
+}
+
+async fn channels(State(hub): State<Arc<Hub>>) -> Result<Json<Vec<Channel>>, Refused> {
+    Ok(Json(hub.store().channels()?))
+}
+
+/// The channel `join` names, once its agent is one the hub knows and the
+/// channel one that's joined: every agent is in `everyone` already, and
+/// the person reads every channel on the dashboard.
+fn joinable<'a>(hub: &Hub, join: &'a Join) -> Result<&'a str, Refused> {
+    let channel = channel_name(&join.channel)?;
+    if hub.agent(&join.name)?.person {
+        return Err(bad_request(format!(
+            "{} is the person, who reads every channel on the dashboard",
+            join.name
+        )));
+    }
+    if channel == EVERYONE {
+        return Err(bad_request(format!(
+            "every agent is in #{EVERYONE}: it's neither joined nor left"
+        )));
+    }
+    Ok(channel)
+}
+
+async fn join(
+    State(hub): State<Arc<Hub>>,
+    Json(join): Json<Join>,
+) -> Result<Json<Channel>, Refused> {
+    let channel = joinable(&hub, &join)?;
+    let store = hub.store();
+    store.join(channel, &join.name)?;
+    Ok(Json(Channel {
+        name: channel.to_string(),
+        members: store.members(channel)?,
+    }))
+}
+
+async fn leave(
+    State(hub): State<Arc<Hub>>,
+    Json(join): Json<Join>,
+) -> Result<Json<Channel>, Refused> {
+    let channel = joinable(&hub, &join)?;
+    let store = hub.store();
+    store.leave(channel, &join.name)?;
+    Ok(Json(Channel {
+        name: channel.to_string(),
+        members: store.members(channel)?,
+    }))
+}
+
+/// A message to a channel: a copy to each agent in it but its sender.
+async fn broadcast(
+    State(hub): State<Arc<Hub>>,
+    Json(send): Json<Send>,
+) -> Result<Json<Vec<Message>>, Refused> {
+    let person = sent_by_person(&hub, &send)?;
+    let channel = channel_name(&send.to)?;
+    if send.body.trim().is_empty() {
+        return Err(bad_request("a message can't be empty".to_string()));
+    }
+    let messages = {
+        let mut store = hub.store();
+        let recipients: Vec<String> = (store.members(channel)?.into_iter())
+            .filter(|member| *member != send.from)
+            .collect();
+        if recipients.is_empty() {
+            return Err(bad_request(format!(
+                "no other agent is in #{channel}: `cross-agent-message join {channel}` puts one in"
+            )));
+        }
+        store.broadcast(&send, channel, &recipients, now(), person)?
+    };
+    for message in &messages {
+        hub.tell(Event::Sent {
+            message: message.clone(),
+        });
+        hub.tell_agent(&message.to)?;
+    }
+    Ok(Json(messages))
 }
 
 async fn read_inbox(

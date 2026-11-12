@@ -50,6 +50,29 @@ export const HOLDS = "/api/holds";
 export const RELEASE = "/api/holds/release";
 
 /**
+ * `GET`: every channel, as [`Channel`]s, `everyone` first. `POST` a
+ * [`Join`]: the agent is in the channel from then on. The hub answers
+ * with the [`Channel`].
+ */
+export const CHANNELS = "/api/channels";
+
+/**
+ * `POST` a [`Join`]: the agent leaves the channel. The hub answers with
+ * the [`Channel`] as it's left.
+ */
+export const LEAVE = "/api/channels/leave";
+
+/**
+ * `POST` a [`Send`] whose `to` is a channel's name: a copy goes to each
+ * agent in it but its sender. The hub answers with the [`Message`]s it
+ * stored, one a recipient.
+ */
+export const BROADCAST = "/api/channels/messages";
+
+/** The channel every agent is in, with no joining. */
+export const EVERYONE = "everyone";
+
+/**
  * `POST` a [`SignIn`]: the person the agents work for signs in from the
  * dashboard, with the hub's key. The hub answers with their [`Agent`].
  */
@@ -113,6 +136,53 @@ export function agentDeserialize_deserialize(json) {
       unread,
       person,
     }),
+  );
+}
+
+/** A channel: a name, and the agents a message to it goes to. */
+export function channelSerialize_serialize(channel, json) {
+  json.beginObject();
+  json.key("name");
+  json.string(channel.name);
+  json.key("members");
+  json.beginArray();
+  for (const item of channel.members) {
+    json.element();
+    json.string(item);
+  }
+  json.endArray();
+  json.endObject();
+}
+
+export function channelDeserialize_deserialize(json) {
+  return json.struct(
+    "struct Channel",
+    [
+      ["name", $json.string],
+      ["members", $json.vec($json.string)],
+    ],
+    ([name, members]) => ({ name, members }),
+  );
+}
+
+/** An agent joins a channel, or leaves it. */
+export function joinSerialize_serialize(join, json) {
+  json.beginObject();
+  json.key("channel");
+  json.string(join.channel);
+  json.key("name");
+  json.string(join.name);
+  json.endObject();
+}
+
+export function joinDeserialize_deserialize(json) {
+  return json.struct(
+    "struct Join",
+    [
+      ["channel", $json.string],
+      ["name", $json.string],
+    ],
+    ([channel, name]) => ({ channel, name }),
   );
 }
 
@@ -213,6 +283,12 @@ export function messageSerialize_serialize(message, json) {
   }
   json.key("person");
   json.bool(message.person);
+  json.key("channel");
+  if (message.channel == null) {
+    json.null();
+  } else {
+    json.string(message.channel);
+  }
   json.endObject();
 }
 
@@ -227,8 +303,9 @@ export function messageDeserialize_deserialize(json) {
       ["sentAt", $json.u64],
       ["readAt", $json.option($json.u64)],
       ["person", $json.bool],
+      ["channel", $json.option($json.string)],
     ],
-    ([id, from, to, body, sentAt, readAt, person]) => ({
+    ([id, from, to, body, sentAt, readAt, person, channel]) => ({
       id,
       from,
       to,
@@ -236,6 +313,7 @@ export function messageDeserialize_deserialize(json) {
       sentAt,
       readAt,
       person,
+      channel,
     }),
   );
 }
@@ -500,6 +578,11 @@ export const NAME_MAX = 64;
  */
 export function checkName(name) {
   return check(name, "an agent's name");
+}
+
+/** Whether `name` may name a channel: what an agent's name may be. */
+export function checkChannel(name) {
+  return check(name, "a channel's name");
 }
 
 /** Whether `name` may name a hold: what an agent's name may be. */

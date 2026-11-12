@@ -2,7 +2,8 @@
 
 use js::{date, settle};
 use protocol::{
-    AGENTS, Agent, INBOX, Inbox, MESSAGES, Message, PERSON, ReadInbox, Refusal, Send, SignIn,
+    AGENTS, Agent, BROADCAST, CHANNELS, Channel, INBOX, Inbox, MESSAGES, Message, PERSON,
+    ReadInbox, Refusal, Send, SignIn,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -46,11 +47,12 @@ async fn post<T: DeserializeOwned>(path: &str, body: &impl Serialize) -> Result<
     ask(path, Some(init)).await
 }
 
-/// Every agent, and the history, newest first.
-pub async fn load() -> Result<(Vec<Agent>, Vec<Message>), String> {
+/// Every agent, every channel, and the history, newest first.
+pub async fn load() -> Result<(Vec<Agent>, Vec<Channel>, Vec<Message>), String> {
     let agents = ask(AGENTS, None).await?;
+    let channels = ask(CHANNELS, None).await?;
     let messages = ask(MESSAGES, None).await?;
-    Ok((agents, messages))
+    Ok((agents, channels, messages))
 }
 
 /// The person the agents work for, as this device remembers them: the
@@ -101,15 +103,21 @@ pub fn sign_out() {
     }
 }
 
-/// Sends `body` to `to` as the person.
-pub async fn send(me: &Me, to: &str, body: &str) -> Result<Message, String> {
+/// Sends `body` as the person to `to`: an agent, or a channel, `#team`,
+/// each agent in which is sent a copy.
+pub async fn send(me: &Me, to: &str, body: &str) -> Result<(), String> {
     let send = Send {
         from: me.name.clone(),
         to: to.to_string(),
         body: body.to_string(),
         key: Some(me.key.clone()),
     };
-    post(MESSAGES, &send).await
+    if to.starts_with('#') {
+        let _: Vec<Message> = post(BROADCAST, &send).await?;
+    } else {
+        let _: Message = post(MESSAGES, &send).await?;
+    }
+    Ok(())
 }
 
 /// The person has read what was sent to them: it's on the page.

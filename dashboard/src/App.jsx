@@ -15,6 +15,7 @@ import * as Api from "./api.js";
 
 export function App() {
   const [agents, setAgents] = useState(() => []);
+  const [channels, setChannels] = useState(() => []);
   const [messages, setMessages] = useState(() => []);
   const [selected, setSelected] = useState(undefined);
   const [live, setLive] = useState(false);
@@ -29,8 +30,10 @@ export function App() {
       const value = await Api.load();
       if (value.TAG === "Ok") {
         const agents = value._0[0];
-        const messages = value._0[1];
+        const channels = value._0[1];
+        const messages = value._0[2];
         setAgents(agents);
+        setChannels(channels);
         setMessages(messages);
         setProblem(undefined);
       } else {
@@ -78,7 +81,7 @@ export function App() {
       <div className="layout">
         <AgentList agents={agents} selected={selected} onSelect={setSelected} />
         <div className="talk">
-          <Compose agents={agents} selected={selected} me={me} onMe={setMe} />
+          <Compose agents={agents} channels={channels} selected={selected} me={me} onMe={setMe} />
           <MessageList messages={shown} />
         </div>
       </div>

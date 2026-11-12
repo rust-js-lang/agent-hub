@@ -33,6 +33,23 @@ pub const HOLDS: &str = "/api/holds";
 /// [`Hold`]s still held.
 pub const RELEASE: &str = "/api/holds/release";
 
+/// `GET`: every channel, as [`Channel`]s, `everyone` first. `POST` a
+/// [`Join`]: the agent is in the channel from then on. The hub answers
+/// with the [`Channel`].
+pub const CHANNELS: &str = "/api/channels";
+
+/// `POST` a [`Join`]: the agent leaves the channel. The hub answers with
+/// the [`Channel`] as it's left.
+pub const LEAVE: &str = "/api/channels/leave";
+
+/// `POST` a [`Send`] whose `to` is a channel's name: a copy goes to each
+/// agent in it but its sender. The hub answers with the [`Message`]s it
+/// stored, one a recipient.
+pub const BROADCAST: &str = "/api/channels/messages";
+
+/// The channel every agent is in, with no joining.
+pub const EVERYONE: &str = "everyone";
+
 /// `POST` a [`SignIn`]: the person the agents work for signs in from the
 /// dashboard, with the hub's key. The hub answers with their [`Agent`].
 pub const PERSON: &str = "/api/person";
@@ -70,6 +87,21 @@ pub struct Agent {
     /// Whether it's the person the agents work for, signed in from the
     /// dashboard with the hub's key: only the dashboard sends as it.
     pub person: bool,
+}
+
+/// A channel: a name, and the agents a message to it goes to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Channel {
+    pub name: String,
+    /// The agents in it, by name.
+    pub members: Vec<String>,
+}
+
+/// An agent joins a channel, or leaves it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Join {
+    pub channel: String,
+    pub name: String,
 }
 
 /// The person signs in from the dashboard: the name they'll write as, and
@@ -113,6 +145,9 @@ pub struct Message {
     /// Whether the person sent it, from the dashboard with the hub's key:
     /// no agent's command sends one that says so.
     pub person: bool,
+    /// The channel it was sent to, of which this is its recipient's copy;
+    /// none of one sent to its recipient alone.
+    pub channel: Option<String>,
 }
 
 /// An agent reads its unread messages, at most `max` of them.
@@ -205,6 +240,11 @@ pub fn check_name(name: &str) -> Result<(), String> {
     check(name, "an agent's name")
 }
 
+/// Whether `name` may name a channel: what an agent's name may be.
+pub fn check_channel(name: &str) -> Result<(), String> {
+    check(name, "a channel's name")
+}
+
 /// Whether `name` may name a hold: what an agent's name may be.
 pub fn check_hold(name: &str) -> Result<(), String> {
     check(name, "a hold's name")
@@ -268,12 +308,13 @@ mod tests {
             sent_at: 1,
             read_at: None,
             person: false,
+            channel: None,
         };
         let event = Event::Sent { message };
         let json = serde_json::to_string(&event).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"sent","message":{"id":7,"from":"a","to":"b","body":"hi","sentAt":1,"readAt":null,"person":false}}"#
+            r#"{"type":"sent","message":{"id":7,"from":"a","to":"b","body":"hi","sentAt":1,"readAt":null,"person":false,"channel":null}}"#
         );
         assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), event);
     }

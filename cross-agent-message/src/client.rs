@@ -4,8 +4,9 @@ use std::io::{BufRead, BufReader};
 
 use anyhow::{Context, Result, bail};
 use protocol::{
-    AGENTS, Agent, EVENTS, Event, HOLDS, HUB, Hold, HubInfo, INBOX, Inbox, MESSAGES, Message,
-    PERSON, RELEASE, ReadInbox, Refusal, Register, Release, STOP, Send, SignIn, Take, Taken,
+    AGENTS, Agent, BROADCAST, CHANNELS, Channel, EVENTS, Event, HOLDS, HUB, Hold, HubInfo, INBOX,
+    Inbox, Join, LEAVE, MESSAGES, Message, PERSON, RELEASE, ReadInbox, Refusal, Register, Release,
+    STOP, Send, SignIn, Take, Taken,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -106,6 +107,53 @@ impl Client {
                 to: to.to_string(),
                 body: body.to_string(),
                 key: None,
+            },
+        )
+    }
+
+    /// Every channel, `everyone` first.
+    pub fn channels(&self) -> Result<Vec<Channel>> {
+        self.get(CHANNELS)
+    }
+
+    /// `name` joins `channel`: the channel, with it in.
+    pub fn join(&self, channel: &str, name: &str) -> Result<Channel> {
+        self.post(
+            CHANNELS,
+            &Join {
+                channel: channel.to_string(),
+                name: name.to_string(),
+            },
+        )
+    }
+
+    /// `name` leaves `channel`: the channel as it's left.
+    pub fn leave(&self, channel: &str, name: &str) -> Result<Channel> {
+        self.post(
+            LEAVE,
+            &Join {
+                channel: channel.to_string(),
+                name: name.to_string(),
+            },
+        )
+    }
+
+    /// `from`'s message to every other agent in `channel`: each one's copy.
+    /// With the hub's `key`, the person's, as the dashboard sends it.
+    pub fn broadcast(
+        &self,
+        from: &str,
+        channel: &str,
+        body: &str,
+        key: Option<&str>,
+    ) -> Result<Vec<Message>> {
+        self.post(
+            BROADCAST,
+            &Send {
+                from: from.to_string(),
+                to: channel.to_string(),
+                body: body.to_string(),
+                key: key.map(str::to_string),
             },
         )
     }

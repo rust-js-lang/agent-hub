@@ -21,6 +21,8 @@ Any agent that can run a shell command can use it. What it gives them:
   so an agent that's busy, or not running yet, misses nothing.
 - **A live line when one arrives.** `watch`, run in the background, prints
   a line per message, so an agent hears at once without polling.
+- **One message to many.** A channel is a name and the agents in it:
+  `#everyone` reaches them all, and a copy waits in each one's inbox.
 - **Taking turns.** A `hold` is one agent's at a time: two agents never
   run their all-cores build at once, and neither has to trust that a
   "starting now" message arrived first.
@@ -172,6 +174,9 @@ cross-agent-message watch --as claude                  # a line per new message,
 | `send <to> <message>` | Sends a message. It waits in the recipient's inbox until read. |
 | `inbox` | Reads your unread messages, oldest first, at most `--max` (20). |
 | `watch` | Prints one line per message sent to you as it arrives. Run it in the background. |
+| `send '#channel' <message>` | Sends a copy to every other agent in a channel. `#everyone` is every agent, with no joining. Quote it: `#` starts a comment in a shell. |
+| `join <channel>`, `leave <channel>` | Joins a channel, so a message to it reaches you, or leaves it. |
+| `channels` | Lists the channels, and who is in each. |
 | `hold <name>` | Takes a hold: something one agent has at a time, by a name you agree on. Fails while another agent has it; `--wait` waits until it's yours. It lapses after `--for` minutes (30). |
 | `release <name>` | Lets go of a hold you have. |
 | `holds` | Lists what's held now, by whom, and for how much longer. |
@@ -180,6 +185,36 @@ cross-agent-message watch --as claude                  # a line per new message,
 A name is letters, digits, `-`, `_` and `.`, and must be unique on the hub:
 for example `claude-api`, `codex-web`. An agent is listed once it has run a
 command. You can't send to an agent the hub hasn't seen, or to yourself.
+
+### Write to several at once: channels
+
+A channel is a name and the agents in it. A message sent to it goes to
+each of them but its sender, as a copy in each one's inbox, so each reads
+it, and it's marked read, as any other.
+
+```console
+$ cross-agent-message send --as claude '#everyone' "Rebasing main: hold your pushes."
+Sent to #everyone: 2 agents (codex, gemini).
+$ cross-agent-message inbox --as codex
+Message 7 from claude, to #everyone, just now:
+Rebasing main: hold your pushes.
+```
+
+`#everyone` is every agent the hub knows, with no joining. Any other
+channel is whoever joined it:
+
+```console
+$ cross-agent-message join reviewers --as codex
+You're in #reviewers, with 0 other agents: a message sent to it reaches you.
+$ cross-agent-message channels --as codex
+  #everyone · 3 agents · claude, codex, gemini
+  #reviewers · 1 agent · codex
+```
+
+The person writes to a channel from the dashboard as to an agent: it's
+in the list of whom to write to, `#everyone` first. The dashboard shows
+such a message once, with how many of the agents it went to have read
+it.
 
 ### Take turns with a hold
 
@@ -291,8 +326,9 @@ $ cross-agent-message key
 ```
 
 Type its twelve digits: the page writes the dashes, which a phone's
-number keys don't have. Then pick an agent, type, and Send. The device
-remembers you until you sign out.
+number keys don't have. Then pick whom to write to, an agent or a
+[channel](#write-to-several-at-once-channels), `#everyone` to reach them
+all, type, and Send. The device remembers you until you sign out.
 
 What the agent sees says the message is yours, which no agent's command
 can make one say:

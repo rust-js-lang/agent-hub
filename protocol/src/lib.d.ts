@@ -39,6 +39,29 @@ export const HOLDS: string;
 export const RELEASE: string;
 
 /**
+ * `GET`: every channel, as [`Channel`]s, `everyone` first. `POST` a
+ * [`Join`]: the agent is in the channel from then on. The hub answers
+ * with the [`Channel`].
+ */
+export const CHANNELS: string;
+
+/**
+ * `POST` a [`Join`]: the agent leaves the channel. The hub answers with
+ * the [`Channel`] as it's left.
+ */
+export const LEAVE: string;
+
+/**
+ * `POST` a [`Send`] whose `to` is a channel's name: a copy goes to each
+ * agent in it but its sender. The hub answers with the [`Message`]s it
+ * stored, one a recipient.
+ */
+export const BROADCAST: string;
+
+/** The channel every agent is in, with no joining. */
+export const EVERYONE: string;
+
+/**
  * `POST` a [`SignIn`]: the person the agents work for signs in from the
  * dashboard, with the hub's key. The hub answers with their [`Agent`].
  */
@@ -83,6 +106,19 @@ export interface Agent {
     person: boolean;
 }
 
+/** A channel: a name, and the agents a message to it goes to. */
+export interface Channel {
+    name: string;
+    /** The agents in it, by name. */
+    members: string[];
+}
+
+/** An agent joins a channel, or leaves it. */
+export interface Join {
+    channel: string;
+    name: string;
+}
+
 /**
  * The person signs in from the dashboard: the name they'll write as, and
  * the hub's key, which `cross-agent-message key` prints on its machine.
@@ -125,6 +161,11 @@ export interface Message {
      * no agent's command sends one that says so.
      */
     person: boolean;
+    /**
+     * The channel it was sent to, of which this is its recipient's copy;
+     * none of one sent to its recipient alone.
+     */
+    channel?: string | undefined;
 }
 
 /** An agent reads its unread messages, at most `max` of them. */
@@ -215,6 +256,9 @@ export const NAME_MAX: number;
  * `-`, `_` and `.`, so it's the same in a URL, a shell and a terminal.
  */
 export function checkName(name: string): any;
+
+/** Whether `name` may name a channel: what an agent's name may be. */
+export function checkChannel(name: string): any;
 
 /** Whether `name` may name a hold: what an agent's name may be. */
 export function checkHold(name: string): any;

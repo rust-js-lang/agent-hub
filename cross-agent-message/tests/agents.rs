@@ -167,6 +167,66 @@ fn a_hold_is_one_agents_at_a_time() {
     );
 }
 
+#[test]
+fn a_message_to_a_channel_reaches_each_agent_in_it_but_its_sender() {
+    let (client, key) = hub_with_key();
+    for name in ["claude", "codex", "gemini"] {
+        client.register(name).unwrap();
+    }
+    client.sign_in("tu", &key).unwrap();
+    let to = |sent: &[protocol::Message]| sent.iter().map(|m| m.to.clone()).collect::<Vec<_>>();
+
+    // Every agent is in `everyone`; the person isn't, nor the sender sent a copy.
+    let sent = client
+        .broadcast("claude", "#everyone", "Rebasing main.", None)
+        .unwrap();
+    assert_eq!(to(&sent), ["codex", "gemini"]);
+    assert!(
+        sent.iter()
+            .all(|m| m.channel.as_deref() == Some("everyone") && !m.person)
+    );
+    let inbox = client.read_inbox("codex", 20).unwrap();
+    assert_eq!(inbox.messages[0].channel.as_deref(), Some("everyone"));
+
+    // A channel is who joined it; the person's message to it says so.
+    let team = client.join("#team", "codex").unwrap();
+    assert_eq!((team.name.as_str(), team.members.len()), ("team", 1));
+    client.join("team", "gemini").unwrap();
+    let names =
+        |channels: Vec<protocol::Channel>| channels.into_iter().map(|c| c.name).collect::<Vec<_>>();
+    assert_eq!(names(client.channels().unwrap()), ["everyone", "team"]);
+    let sent = client
+        .broadcast("tu", "team", "Ship it.", Some(&key))
+        .unwrap();
+    assert_eq!(to(&sent), ["codex", "gemini"]);
+    assert!(sent.iter().all(|m| m.person));
+    assert_eq!(client.leave("team", "gemini").unwrap().members, ["codex"]);
+    assert_eq!(
+        to(&client
+            .broadcast("tu", "team", "Again.", Some(&key))
+            .unwrap()),
+        ["codex"]
+    );
+
+    let refused = |result: anyhow::Result<Vec<protocol::Message>>| result.unwrap_err().to_string();
+    assert_eq!(
+        refused(client.broadcast("codex", "team", "Only me here.", None)),
+        "no other agent is in #team: `cross-agent-message join team` puts one in"
+    );
+    assert_eq!(
+        refused(client.broadcast("tu", "team", "Without the key.", None)),
+        "tu is the person's name on this hub: only the dashboard, with the hub's key, sends as them"
+    );
+    assert_eq!(
+        client.join("everyone", "codex").unwrap_err().to_string(),
+        "every agent is in #everyone: it's neither joined nor left"
+    );
+    assert_eq!(
+        client.join("team", "tu").unwrap_err().to_string(),
+        "tu is the person, who reads every channel on the dashboard"
+    );
+}
+
 /// A hub and its key, as `cross-agent-message key` reads it of its file.
 fn hub_with_key() -> (Client, String) {
     let store = Store::in_memory().unwrap();

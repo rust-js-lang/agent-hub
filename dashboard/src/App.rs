@@ -11,12 +11,13 @@ use agent_list::AgentList;
 use compose::Compose;
 use js::spawn;
 use message_list::MessageList;
-use protocol::{Agent, EVENTS, Message};
+use protocol::{Agent, Channel, EVENTS, Message};
 use react::{JSX, jsx, use_effect, use_state};
 use webapi::{Event, EventTargetExt, MessageEvent, event_source, events};
 
 pub fn App() -> JSX::Element {
     let (agents, set_agents) = use_state(Vec::<Agent>::new);
+    let (channels, set_channels) = use_state(Vec::<Channel>::new);
     let (messages, set_messages) = use_state(Vec::<Message>::new);
     let (selected, set_selected) = use_state(|| None::<String>);
     let (live, set_live) = use_state(|| false);
@@ -31,8 +32,9 @@ pub fn App() -> JSX::Element {
             let refresh = move || {
                 spawn(Box::new(async move {
                     match api::load().await {
-                        Ok((agents, messages)) => {
+                        Ok((agents, channels, messages)) => {
                             set_agents.set(agents);
+                            set_channels.set(channels);
                             set_messages.set(messages);
                             set_problem.set(None);
                         }
@@ -94,7 +96,12 @@ pub fn App() -> JSX::Element {
             <div className="layout">
                 <AgentList agents={agents} selected={selected.as_deref()} onSelect={set_selected} />
                 <div className="talk">
-                    <Compose agents={agents} selected={selected.as_deref()} me={me.as_ref()} onMe={set_me} />
+                    <Compose
+                        agents={agents}
+                        channels={channels}
+                        selected={selected.as_deref()}
+                        me={me.as_ref()}
+                        onMe={set_me} />
                     <MessageList messages={shown} />
                 </div>
             </div>

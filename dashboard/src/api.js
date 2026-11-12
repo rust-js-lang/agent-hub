@@ -4,10 +4,13 @@
 
 import {
   AGENTS,
+  BROADCAST,
+  CHANNELS,
   INBOX,
   MESSAGES,
   PERSON,
   agentDeserialize_deserialize,
+  channelDeserialize_deserialize,
   inboxDeserialize_deserialize,
   messageDeserialize_deserialize,
   readInboxSerialize_serialize,
@@ -63,19 +66,24 @@ async function post(path, body, readT, writeimpl_Serialize) {
   return await ask(path, init, readT);
 }
 
-/** Every agent, and the history, newest first. */
+/** Every agent, every channel, and the history, newest first. */
 export async function load() {
   const result = await ask(AGENTS, undefined, $json.vec(agentDeserialize_deserialize));
   if (result.TAG === "Err") {
     return result;
   }
   const agents = result._0;
-  const result$1 = await ask(MESSAGES, undefined, $json.vec(messageDeserialize_deserialize));
+  const result$1 = await ask(CHANNELS, undefined, $json.vec(channelDeserialize_deserialize));
   if (result$1.TAG === "Err") {
     return result$1;
   }
-  const messages = result$1._0;
-  return { TAG: "Ok", _0: [agents, messages] };
+  const channels = result$1._0;
+  const result$2 = await ask(MESSAGES, undefined, $json.vec(messageDeserialize_deserialize));
+  if (result$2.TAG === "Err") {
+    return result$2;
+  }
+  const messages = result$2._0;
+  return { TAG: "Ok", _0: [agents, channels, messages] };
 }
 
 const NAME = "cross-agent-message.name";
@@ -152,7 +160,10 @@ export function signOut() {
   storage.removeItem(KEY);
 }
 
-/** Sends `body` to `to` as the person. */
+/**
+ * Sends `body` as the person to `to`: an agent, or a channel, `#team`,
+ * each agent in which is sent a copy.
+ */
 export async function send(me, to, body) {
   const send = {
     from: me.name,
@@ -160,7 +171,28 @@ export async function send(me, to, body) {
     body,
     key: me.key,
   };
-  return await post(MESSAGES, send, messageDeserialize_deserialize, sendSerialize_serialize);
+  if (to.startsWith("#")) {
+    const result = await post(
+      BROADCAST,
+      send,
+      $json.vec(messageDeserialize_deserialize),
+      sendSerialize_serialize,
+    );
+    if (result.TAG === "Err") {
+      return result;
+    }
+  } else {
+    const result = await post(
+      MESSAGES,
+      send,
+      messageDeserialize_deserialize,
+      sendSerialize_serialize,
+    );
+    if (result.TAG === "Err") {
+      return result;
+    }
+  }
+  return { TAG: "Ok" };
 }
 
 /** The person has read what was sent to them: it's on the page. */

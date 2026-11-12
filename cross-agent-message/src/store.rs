@@ -5,7 +5,7 @@ use std::path::Path;
 
 use std::hash::{BuildHasher, Hasher};
 
-use protocol::{Agent, Hold, Inbox, Message, Register, Send};
+use protocol::{Agent, Channel, EVERYONE, Hold, Inbox, Message, Register, Send};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
 pub struct Store {
@@ -27,6 +27,11 @@ const SCHEMA: &str = "
         read_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS unread ON messages (recipient, read_at, id);
+    CREATE TABLE IF NOT EXISTS members (
+        channel TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        PRIMARY KEY (channel, agent)
+    );
     CREATE TABLE IF NOT EXISTS settings (
         name TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -39,7 +44,7 @@ const SCHEMA: &str = "
     );
 ";
 
-const MESSAGE_COLUMNS: &str = "id, sender, recipient, body, sent_at, read_at, person";
+const MESSAGE_COLUMNS: &str = "id, sender, recipient, body, sent_at, read_at, person, channel";
 
 const AGENT_QUERY: &str = "
     SELECT name, machine, last_seen,
@@ -48,9 +53,14 @@ const AGENT_QUERY: &str = "
     FROM agents
 ";
 
-/// Columns a store made by a build before this one lacks: who is the
-/// person, and which messages they sent.
-const ADDED: &[(&str, &str)] = &[("agents", "person"), ("messages", "person")];
+/// Columns a store made by a build before this one lacks, each with its
+/// type: who is the person, which messages they sent, and the channel a
+/// message was sent to.
+const ADDED: &[(&str, &str, &str)] = &[
+    ("agents", "person", "INTEGER NOT NULL DEFAULT 0"),
+    ("messages", "person", "INTEGER NOT NULL DEFAULT 0"),
+    ("messages", "channel", "TEXT"),
+];
 
 /// A key no one would guess, twelve digits in three groups, `4821-7730-1182`:
 /// of the randomness std seeds each `RandomState` with.
@@ -80,16 +90,14 @@ impl Store {
 
     fn with(db: Connection) -> rusqlite::Result<Store> {
         db.execute_batch(SCHEMA)?;
-        for (table, column) in ADDED {
+        for (table, column, kind) in ADDED {
             let has: bool = db.query_row(
                 "SELECT count(*) > 0 FROM pragma_table_info(?1) WHERE name = ?2",
                 params![table, column],
                 |row| row.get(0),
             )?;
             if !has {
-                db.execute_batch(&format!(
-                    "ALTER TABLE {table} ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0"
-                ))?;
+                db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
             }
         }
         Ok(Store { db })
@@ -153,18 +161,115 @@ impl Store {
 
     /// Stores the message, sent now, the person's where `person` says.
     pub fn send(&self, send: &Send, now: u64, person: bool) -> rusqlite::Result<Message> {
+        self.deliver(send, &send.to, None, now, person)
+    }
+
+    /// The agents in `channel`, by name: every agent of `everyone`, those
+    /// that joined of another. Never the person, who reads every channel
+    /// on the dashboard.
+    pub fn members(&self, channel: &str) -> rusqlite::Result<Vec<String>> {
+        if channel == EVERYONE {
+            let mut query = self
+                .db
+                .prepare("SELECT name FROM agents WHERE person = 0 ORDER BY name")?;
+            return query.query_map([], |row| row.get(0))?.collect();
+        }
+        let mut query = self
+            .db
+            .prepare("SELECT agent FROM members WHERE channel = ?1 ORDER BY agent")?;
+        query.query_map([channel], |row| row.get(0))?.collect()
+    }
+
+    /// Every channel, `everyone` first, then those an agent joined, by name.
+    pub fn channels(&self) -> rusqlite::Result<Vec<Channel>> {
+        let mut names = vec![EVERYONE.to_string()];
+        let mut query = self
+            .db
+            .prepare("SELECT DISTINCT channel FROM members ORDER BY channel")?;
+        for name in query.query_map([], |row| row.get::<_, String>(0))? {
+            names.push(name?);
+        }
+        (names.into_iter())
+            .map(|name| {
+                Ok(Channel {
+                    members: self.members(&name)?,
+                    name,
+                })
+            })
+            .collect()
+    }
+
+    /// `agent` is in `channel` from now on.
+    pub fn join(&self, channel: &str, agent: &str) -> rusqlite::Result<()> {
         self.db.execute(
-            "INSERT INTO messages (sender, recipient, body, sent_at, person) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![send.from, send.to, send.body, now, person],
+            "INSERT OR IGNORE INTO members (channel, agent) VALUES (?1, ?2)",
+            params![channel, agent],
+        )?;
+        Ok(())
+    }
+
+    /// `agent` is no longer in `channel`.
+    pub fn leave(&self, channel: &str, agent: &str) -> rusqlite::Result<()> {
+        self.db.execute(
+            "DELETE FROM members WHERE channel = ?1 AND agent = ?2",
+            params![channel, agent],
+        )?;
+        Ok(())
+    }
+
+    /// Stores a copy of the message for each of `recipients`, sent now to
+    /// `channel`: all of them, or none.
+    pub fn broadcast(
+        &mut self,
+        send: &Send,
+        channel: &str,
+        recipients: &[String],
+        now: u64,
+        person: bool,
+    ) -> rusqlite::Result<Vec<Message>> {
+        let transaction = self.db.transaction()?;
+        let mut messages = Vec::new();
+        for recipient in recipients {
+            transaction.execute(
+                "INSERT INTO messages (sender, recipient, body, sent_at, person, channel) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![send.from, recipient, send.body, now, person, channel],
+            )?;
+            messages.push(Message {
+                id: transaction.last_insert_rowid() as u64,
+                from: send.from.clone(),
+                to: recipient.clone(),
+                body: send.body.clone(),
+                sent_at: now,
+                read_at: None,
+                person,
+                channel: Some(channel.to_string()),
+            });
+        }
+        transaction.commit()?;
+        Ok(messages)
+    }
+
+    fn deliver(
+        &self,
+        send: &Send,
+        recipient: &str,
+        channel: Option<&str>,
+        now: u64,
+        person: bool,
+    ) -> rusqlite::Result<Message> {
+        self.db.execute(
+            "INSERT INTO messages (sender, recipient, body, sent_at, person, channel) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![send.from, recipient, send.body, now, person, channel],
         )?;
         Ok(Message {
             id: self.db.last_insert_rowid() as u64,
             from: send.from.clone(),
-            to: send.to.clone(),
+            to: recipient.to_string(),
             body: send.body.clone(),
             sent_at: now,
             read_at: None,
             person,
+            channel: channel.map(str::to_string),
         })
     }
 
@@ -263,6 +368,7 @@ fn message(row: &Row) -> rusqlite::Result<Message> {
         sent_at: row.get(4)?,
         read_at: row.get(5)?,
         person: row.get(6)?,
+        channel: row.get(7)?,
     })
 }
 
@@ -334,6 +440,46 @@ mod tests {
             (history[0].body.as_str(), history[0].person),
             ("old", false)
         );
+    }
+
+    #[test]
+    fn a_channel_is_its_members_and_everyone_is_every_agent() {
+        let mut store = Store::in_memory().unwrap();
+        for name in ["a", "b", "c"] {
+            register(&store, name, 1);
+        }
+        store.see_person("tu", 1).unwrap();
+        assert_eq!(store.members(EVERYONE).unwrap(), ["a", "b", "c"]);
+        assert!(store.members("team").unwrap().is_empty());
+        store.join("team", "c").unwrap();
+        store.join("team", "a").unwrap();
+        store.join("team", "a").unwrap();
+        assert_eq!(store.members("team").unwrap(), ["a", "c"]);
+        let names =
+            |channels: Vec<Channel>| channels.into_iter().map(|c| c.name).collect::<Vec<_>>();
+        assert_eq!(names(store.channels().unwrap()), [EVERYONE, "team"]);
+        store.leave("team", "a").unwrap();
+        assert_eq!(store.members("team").unwrap(), ["c"]);
+
+        let send = Send {
+            from: "tu".to_string(),
+            to: "team".to_string(),
+            body: "all of you".to_string(),
+            key: None,
+        };
+        let recipients = ["b".to_string(), "c".to_string()];
+        let sent = store
+            .broadcast(&send, "team", &recipients, 5, true)
+            .unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!((sent[0].to.as_str(), sent[1].to.as_str()), ("b", "c"));
+        assert!(
+            sent.iter()
+                .all(|m| m.person && m.channel.as_deref() == Some("team") && m.sent_at == 5)
+        );
+        let inbox = store.read_inbox("c", 10, 6).unwrap();
+        assert_eq!(inbox.messages[0].channel.as_deref(), Some("team"));
+        assert_eq!(store.agent("b").unwrap().unwrap().unread, 1);
     }
 
     #[test]
