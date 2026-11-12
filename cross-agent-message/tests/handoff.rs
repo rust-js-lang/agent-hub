@@ -190,6 +190,40 @@ impl Drop for Worker {
 }
 
 #[test]
+fn closing_the_parent_channel_exits_both_serving_and_parked_workers() {
+    for parked in [false, true] {
+        let fixture = Fixture::new();
+        let address = fixture.config.addresses[0].to_string();
+        let mut worker = fixture.spawn();
+        worker.ready(0, &address);
+        if parked {
+            worker.send("quiesce", 1);
+            worker.drained(1);
+        }
+        worker
+            .wire
+            .get_mut()
+            .shutdown(std::net::Shutdown::Both)
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while worker.child.try_wait().unwrap().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "orphan worker retained its listeners"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        // A replacement must be able to own SQLite and the inherited listener.
+        let mut replacement = fixture.spawn();
+        replacement.ready(0, &address);
+        fixture.client().register("after-parent-exit").unwrap();
+        replacement.send("quiesce", 1);
+        replacement.drained(1);
+        replacement.retire(2);
+    }
+}
+
+#[test]
 fn a_snapshot_path_parent_is_refused_before_sqlite_is_opened() {
     let mut fixture = Fixture::new();
     fixture.config.worker_path = None;

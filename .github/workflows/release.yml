@@ -88,6 +88,8 @@ jobs:
 
           Cooperative handoff drains requests and closes SQLite while keeping the outgoing process alive. The replacement must accept on every previously-ready address; success is reported at activation, and the database-free predecessor is retired after a five-second firewall-lookup grace. Upgrades are serialized through that grace. Before activation, a failed candidate is reaped before the same outgoing process resumes; acknowledged writes are never replaced by a backup.
 
+          Cooperative workers exit when their supervisor channel closes, including while parked; they no longer serve as orphans after supervisor death. Normal shutdown reaps both workers and releases all listeners before confirming stop, and explicitly refuses any queued upgrade.
+
           The executable is ad-hoc signed with the fixed identifier `io.rust-js.cross-agent-message` before checksums are calculated.
 
           Migration from a v0.1.0/v0.1.1 supervisor requires one announced cold `serve --replace` using the existing database and listen options. A hot transition away from a legacy worker without the handshake may reset or stall a remote request once; zero-failure acceptance starts with the first cooperative outgoing worker, not that legacy transition. Follow the README's concurrent firewall-enabled remote trial before live deployment. This workflow does not restart the live hub.

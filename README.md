@@ -641,6 +641,11 @@ be taken by an agent. Latency below one second is a measured target, not an
 unconditional promise. A supervisor replacement itself remains a cold restart.
 A parked worker waits at most 30 seconds for the supervisor's `resume` or
 `retire`; it never reopens SQLite on its own after a lost supervisor.
+Cooperative workers exit if the inherited supervisor channel closes, whether
+serving or parked. They do not continue serving as orphans. A normal supervisor
+stop reaps both the active worker and any parked predecessor and releases its
+own listeners before acknowledging shutdown; a queued upgrade receives an
+explicit refusal.
 
 New clients use one connection per request and retry eligible writes within
 15 s. Nonces and effects commit together for sends, broadcasts and hold takes.

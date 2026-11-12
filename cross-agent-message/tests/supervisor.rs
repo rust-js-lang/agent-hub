@@ -736,6 +736,48 @@ fn three_post_ready_crashes_restore_the_previous_binary_without_erasing_new_writ
 }
 
 #[test]
+fn stop_during_retirement_releases_all_listeners_before_reply_and_refuses_queued_upgrade() {
+    use std::os::unix::net::UnixStream;
+    let running = Running::new();
+    assert!(running.upgrade(&running.binary).status.success());
+    let config = cross_agent_message::supervisor::load_config(&running.db).unwrap();
+    let swap = cross_agent_message::supervisor::Swap {
+        binary: running.binary.clone(),
+        sha256: cross_agent_message::updates::sha256(&std::fs::read(&running.binary).unwrap()),
+    };
+    let request = format!("{}\n", serde_json::to_string(&swap).unwrap());
+    let mut queued = UnixStream::connect(config.control()).unwrap();
+    queued
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    queued.write_all(request.as_bytes()).unwrap();
+    wait(
+        || {
+            std::fs::read_to_string(running.root.join("log"))
+                .unwrap()
+                .contains("Upgrade queued for predecessor retirement")
+        },
+        2,
+    );
+    cross_agent_message::supervisor::stop(&running.db).unwrap();
+    // Do not wait for the supervisor to exit: the acknowledgement is the barrier.
+    let address = running.url.trim_start_matches("http://").parse().unwrap();
+    let _listener = cross_agent_message::supervisor::bind_listener(address).unwrap();
+    let mut reply = String::new();
+    std::io::BufReader::new(queued)
+        .read_line(&mut reply)
+        .unwrap();
+    let reply: cross_agent_message::supervisor::Swapped = serde_json::from_str(&reply).unwrap();
+    assert!(reply.rolled_back);
+    assert!(
+        reply
+            .reason
+            .unwrap()
+            .contains("queued upgrade was not started")
+    );
+}
+
+#[test]
 fn legacy_stop_shuts_down_the_supervisor_and_releases_the_listener() {
     let mut running = Running::new();
     running.client().stop().unwrap();

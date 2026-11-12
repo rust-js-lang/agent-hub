@@ -619,6 +619,37 @@ fn recover(
     }
 }
 
+/// Shutdown is complete only when every inherited listener has been released.
+/// In particular, a parked predecessor must not outlive the stop reply.
+fn shutdown(
+    worker: &mut Worker,
+    retirement: &mut Option<Retirement>,
+    listeners: &mut Vec<TcpListener>,
+    pending_upgrade: &mut Option<(UnixStream, String)>,
+    image: &Path,
+) -> Result<()> {
+    if let Some((mut stream, _)) = pending_upgrade.take() {
+        let build =
+            crate::updates::inspect(image).map_or_else(|_| String::new(), |info| info.build);
+        let reply = Swapped {
+            build: build.clone(),
+            previous: build,
+            rolled_back: true,
+            reason: Some("supervisor is stopping; queued upgrade was not started".into()),
+            addresses: Vec::new(),
+        };
+        let _ = writeln!(stream, "{}", serde_json::to_string(&reply)?);
+    }
+    // Attempt both children even if one shutdown fails. Dropping the owned
+    // predecessor also reaps it if the graceful retirement channel failed.
+    let active = terminate(worker, Duration::from_secs(4));
+    let parked = retirement
+        .take()
+        .map_or(Ok(()), |mut old| retire(&mut old.worker));
+    listeners.clear();
+    active.and(parked)
+}
+
 pub fn request(config: &Config, swap: &Swap) -> Result<Swapped> {
     let mut socket = UnixStream::connect(config.control())
         .context("no supervised hub here; start one with serve --replace first")?;
@@ -826,7 +857,13 @@ pub fn run(mut config: Config) -> Result<()> {
     let mut pending_upgrade: Option<(UnixStream, String)> = None;
     loop {
         if signals.stopped() {
-            terminate(&mut worker, Duration::from_secs(4))?;
+            shutdown(
+                &mut worker,
+                &mut retirement,
+                &mut listeners,
+                &mut pending_upgrade,
+                &active.current,
+            )?;
             let _ = std::fs::remove_file(&control);
             return Ok(());
         }
@@ -1007,7 +1044,13 @@ pub fn run(mut config: Config) -> Result<()> {
                     .and_then(|v| v.get("stop").and_then(|v| v.as_bool()))
                     == Some(true)
                 {
-                    terminate(&mut worker, Duration::from_secs(4))?;
+                    shutdown(
+                        &mut worker,
+                        &mut retirement,
+                        &mut listeners,
+                        &mut pending_upgrade,
+                        &active.current,
+                    )?;
                     let _ = writeln!(stream, "{{\"stopped\":true}}");
                     let _ = std::fs::remove_file(&control);
                     return Ok(());
