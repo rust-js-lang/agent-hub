@@ -822,11 +822,25 @@ is configured.
 ## Work on it
 
 ```bash
-cargo test --release            # the hub, store, protocol and real upgrade timing
+cargo test --release -p cross-agent-message -p protocol  # native and real upgrade timing
 cargo run -p cross-agent-message -- serve
 bun run dev                     # the dashboard with Vite, at http://localhost:5173
 node rust-js/tooling/cli.js build --package dashboard   # after you edit dashboard/
+node rust-js/tooling/cli.js clippy --package dashboard -- -D warnings
+bun run test:client              # typed browser calls and stream lifecycle contracts
 ```
+
+`protocol/src/endpoints.rs` pairs each method, path, query, request and response.
+The hub's typed adapters register those definitions; the native and browser
+clients take the same definitions at each call. A browser stream additionally
+requires the compatible hub description returned by a successful probe before
+it checks features and creates an `EventSource`.
+
+Browser crates are checked through rust-js, which reads their JSX. The client
+contract suite checks invalid calls against the actual browser transport, with
+a compiling counterpart for each rejection, and tests the generated stream
+owner with controlled browser I/O and time. Chromium covers real requests,
+lost-response nonce replay, older hubs, and drafts during reconnects.
 
 The end-to-end tests drive the built dashboard in Chromium with
 [Playwright](https://playwright.dev), against a hub of their own on port

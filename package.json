@@ -7,6 +7,7 @@
     "dev": "vite web",
     "build": "node rust-js/tooling/cli.js build --package dashboard && vite build web",
     "test": "playwright test",
+    "test:client": "node --test tests/*.test.mjs",
     "site:compile": "node rust-js/tooling/cli.js build --package website",
     "site:dev": "bun run site:compile && next dev website",
     "site:build": "bun run site:compile && bun run site:bundle",

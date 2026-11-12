@@ -9,10 +9,10 @@
 import { AgentList } from "./agent_list.jsx";
 import { Compose } from "./compose.jsx";
 import { MessageList } from "./message_list.jsx";
-import { EVENTS } from "../../protocol/src/lib.js";
-import * as Protocol from "../../protocol/src/lib.js";
 import { useEffect, useRef, useState } from "react";
 import * as Api from "./api.js";
+import { Subscription } from "./live.js";
+import * as Live from "./live.js";
 
 export function App() {
   const [agents, setAgents] = useState(() => []);
@@ -59,25 +59,21 @@ export function App() {
         setProblem(value._0);
       }
     }
-    const source = new EventSource(`${EVENTS}?types=${Protocol.EVENT_TYPES}`);
-    source.addEventListener("open", () => {
-      setLive(true);
-      (async () => {
-        const value = await Api.hub();
-        if (value.TAG === "Ok") {
-          const current = build.current;
-          if (current != null && current !== value._0.build) {
-            setUpgraded(true);
-          } else {
-            build.current = value._0.build;
-          }
+    const subscription = Live.listen(
+      (info) => {
+        setAddresses(info.addresses);
+        const current = build.current;
+        if (current != null && current !== info.build) {
+          setUpgraded(true);
+        } else {
+          build.current = info.build;
         }
-      })();
-      refresh();
-    });
-    source.addEventListener("message", refresh);
-    source.addEventListener("error", () => setLive(false));
-    return () => source.close();
+      },
+      (connected) => setLive(connected),
+      refresh,
+      (reason) => setProblem(reason),
+    );
+    return () => Subscription.stop(subscription);
   }, []);
 
   useEffect(() => {
@@ -87,7 +83,7 @@ export function App() {
         Api.draft() === "" &&
         (window.document.hidden || Date.now() - activity.current >= 30000)
       ) {
-        window.location.reload();
+        Api.reload();
       }
     }, 1000);
     return () => {
@@ -160,7 +156,7 @@ export function App() {
       {upgraded && (
         <p className="upgrade-notice" role="status">
           The hub was upgraded:{" "}
-          <button type="button" className="link" onClick={() => window.location.reload()}>
+          <button type="button" className="link" onClick={Api.reload}>
             reload
           </button>
         </p>

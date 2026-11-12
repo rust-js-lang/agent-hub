@@ -2,111 +2,92 @@
 
 /** The dashboard's calls to the hub, and how it shows a time. */
 
+import { Error$ as Error } from "./client.js";
+import * as Client from "./client.js";
 import {
-  AGENTS,
-  BROADCAST,
-  CHANNELS,
-  INBOX,
-  MESSAGES,
-  PERSON,
+  __Query,
+  __Request,
+  historyQuery,
+  historyRequest,
+  readInboxRequest,
+  retireRequest,
+  sendRequest,
+  signInRequest,
+} from "../../protocol/src/endpoints.js";
+import * as Endpoints from "../../protocol/src/endpoints.js";
+import {
   agentDeserialize_deserialize,
   channelDeserialize_deserialize,
   hubInfoDeserialize_deserialize,
   inboxDeserialize_deserialize,
   messageDeserialize_deserialize,
   readInboxSerialize_serialize,
-  refusalDeserialize_deserialize,
   retireSerialize_serialize,
   retiredDeserialize_deserialize,
   sendSerialize_serialize,
   signInSerialize_serialize,
 } from "../../protocol/src/lib.js";
-import * as Protocol from "../../protocol/src/lib.js";
-import {
-  $displayF64,
-  $displayJsonError,
-  $fromJson,
-  $json,
-  $settle,
-  $toJson,
-  $try,
-} from "@rust-js/std";
+import { $json, $try } from "@rust-js/std";
+
+let reloading = false;
 
 /**
- * The JSON the hub answers at `path`, asked as `init` says, or why
- * there's none.
+ * Several failed requests in one render still request one reload. Compose
+ * already stores each draft edit before it can start a request.
  */
-async function ask(path, init, readT) {
-  const value = await $settle(window.fetch(path, init));
-  if (value.TAG !== "Ok") {
-    return { TAG: "Err", _0: "The hub can't be reached: is `cross-agent-message serve` running?" };
-  }
-  const response = value._0;
-  const status = response.status;
-  const text = await response.text();
-  if (status === 426) {
-    // The draft is durable; reload can never discard it.
+export function reload() {
+  const old = reloading;
+  reloading = true;
+  if (!old) {
     window.location.reload();
   }
-  if (status !== 200) {
-    const value = $fromJson(text, refusalDeserialize_deserialize);
-    return { TAG: "Err", _0: value.TAG === "Ok" ? value._0.reason : `The hub answered ${status}.` };
-  }
-  const result = $fromJson(text, readT);
-  return result.TAG === "Err"
-    ? {
-        TAG: "Err",
-        _0: `The hub's answer isn't what this page reads: ${$displayJsonError(result._0)}`,
-      }
-    : result;
 }
 
-/** The JSON the hub answers a `POST` of `body` to `path`. */
-async function post(path, body, readT, writeimpl_Serialize) {
-  return await postNonce(path, body, undefined, readT, writeimpl_Serialize);
-}
-
-async function postNonce(path, body, nonce, readT, writeimpl_Serialize) {
-  const result = $toJson(body, writeimpl_Serialize, false);
-  const result$1 =
-    result.TAG === "Err"
-      ? { TAG: "Err", _0: `This page can't write what it sends: ${$displayJsonError(result._0)}` }
-      : result;
-  if (result$1.TAG === "Err") {
-    return result$1;
+function problem(error) {
+  if (Error.upgradeRequired(error)) {
+    reload();
   }
-  const json = result$1._0;
-  const headers = new Headers();
-  headers.append("content-type", "application/json");
-  headers.append(Protocol.PROTOCOL_HEADER, "1");
-  if (nonce != null) {
-    headers.append(Protocol.WRITE_NONCE_HEADER, nonce);
-  }
-  const init = {
-    method: "POST",
-    headers,
-    body: json,
-  };
-  return await ask(path, init, readT);
+  return Error.message(error);
 }
 
 /** Every agent, every channel, and the history, newest first. */
 export async function load() {
-  const result = await ask(AGENTS, undefined, $json.vec(agentDeserialize_deserialize));
-  if (result.TAG === "Err") {
-    return result;
-  }
-  const agents = result._0;
-  const result$1 = await ask(CHANNELS, undefined, $json.vec(channelDeserialize_deserialize));
+  const result = await Client.get(
+    Endpoints.AGENTS,
+    undefined,
+    __Query,
+    __Request,
+    $json.vec(agentDeserialize_deserialize),
+  );
+  const result$1 = result.TAG === "Err" ? { TAG: "Err", _0: problem(result._0) } : result;
   if (result$1.TAG === "Err") {
     return result$1;
   }
-  const channels = result$1._0;
-  const result$2 = await ask(MESSAGES, undefined, $json.vec(messageDeserialize_deserialize));
-  if (result$2.TAG === "Err") {
-    return result$2;
+  const agents = result$1._0;
+  const result$2 = await Client.get(
+    Endpoints.CHANNELS,
+    undefined,
+    __Query,
+    __Request,
+    $json.vec(channelDeserialize_deserialize),
+  );
+  const result$3 = result$2.TAG === "Err" ? { TAG: "Err", _0: problem(result$2._0) } : result$2;
+  if (result$3.TAG === "Err") {
+    return result$3;
   }
-  const messages = result$2._0;
+  const channels = result$3._0;
+  const result$4 = await Client.get(
+    Endpoints.HISTORY,
+    {},
+    historyQuery,
+    historyRequest,
+    $json.vec(messageDeserialize_deserialize),
+  );
+  const result$5 = result$4.TAG === "Err" ? { TAG: "Err", _0: problem(result$4._0) } : result$4;
+  if (result$5.TAG === "Err") {
+    return result$5;
+  }
+  const messages = result$5._0;
   return { TAG: "Ok", _0: [agents, channels, messages] };
 }
 
@@ -145,16 +126,18 @@ export async function signIn(name, key) {
     name,
     key,
   };
-  const result = await post(
-    PERSON,
+  const result = await Client.post(
+    Endpoints.PERSON,
     signIn,
-    agentDeserialize_deserialize,
     signInSerialize_serialize,
+    signInRequest,
+    agentDeserialize_deserialize,
   );
-  if (result.TAG === "Err") {
-    return result;
+  const result$1 = result.TAG === "Err" ? { TAG: "Err", _0: problem(result._0) } : result;
+  if (result$1.TAG === "Err") {
+    return result$1;
   }
-  const agent = result._0;
+  const agent = result$1._0;
   const me = {
     name: agent.name,
     key,
@@ -195,41 +178,29 @@ export async function send(me, to, body) {
     body,
     key: me.key,
   };
-  const result = await hub();
-  const supported = result.TAG === "Ok" && result._0.features.includes("write-nonce");
-  const nonce = `${$displayF64(Date.now())}-${$displayF64(Math.random())}`;
-  const attempts = supported ? 3 : 1;
-  let problem = "The message could not be sent.";
-  for (let i = 0; i < attempts; i++) {
-    let result;
-    if (to.startsWith("#")) {
-      const result$1 = await postNonce(
-        BROADCAST,
-        send,
-        supported ? nonce : undefined,
-        $json.vec(messageDeserialize_deserialize),
-        sendSerialize_serialize,
-      );
-      function map() {}
-      result = result$1.TAG === "Ok" ? { TAG: "Ok", _0: map(result$1._0) } : result$1;
-    } else {
-      const result$1 = await postNonce(
-        MESSAGES,
-        send,
-        supported ? nonce : undefined,
-        messageDeserialize_deserialize,
-        sendSerialize_serialize,
-      );
-      function map() {}
-      result = result$1.TAG === "Ok" ? { TAG: "Ok", _0: map(result$1._0) } : result$1;
-    }
-    if (result.TAG === "Ok") {
-      return { TAG: "Ok" };
-    }
-    const reason = result._0;
-    problem = reason;
+  if (to.startsWith("#")) {
+    const result = await Client.post(
+      Endpoints.BROADCAST,
+      send,
+      sendSerialize_serialize,
+      sendRequest,
+      $json.vec(messageDeserialize_deserialize),
+    );
+    function map() {}
+    const result$1 = result.TAG === "Ok" ? { TAG: "Ok", _0: map(result._0) } : result;
+    return result$1.TAG === "Err" ? { TAG: "Err", _0: problem(result$1._0) } : result$1;
+  } else {
+    const result = await Client.post(
+      Endpoints.SEND,
+      send,
+      sendSerialize_serialize,
+      sendRequest,
+      messageDeserialize_deserialize,
+    );
+    function map() {}
+    const result$1 = result.TAG === "Ok" ? { TAG: "Ok", _0: map(result._0) } : result;
+    return result$1.TAG === "Err" ? { TAG: "Err", _0: problem(result$1._0) } : result$1;
   }
-  return { TAG: "Err", _0: problem };
 }
 
 /** The person has read what was sent to them: it's on the page. */
@@ -242,21 +213,30 @@ export async function read(me) {
 
     deferAck: false,
   };
-  return await post(INBOX, read, inboxDeserialize_deserialize, readInboxSerialize_serialize);
+  const result = await Client.post(
+    Endpoints.INBOX,
+    read,
+    readInboxSerialize_serialize,
+    readInboxRequest,
+    inboxDeserialize_deserialize,
+  );
+  return result.TAG === "Err" ? { TAG: "Err", _0: problem(result._0) } : result;
 }
 
 export async function retire(me, name) {
-  const result = await post(
-    Protocol.RETIRE,
+  const result = await Client.post(
+    Endpoints.RETIRE,
     {
       name,
       key: me.key,
     },
-    retiredDeserialize_deserialize,
     retireSerialize_serialize,
+    retireRequest,
+    retiredDeserialize_deserialize,
   );
-  if (result.TAG === "Err") {
-    return result;
+  const result$1 = result.TAG === "Err" ? { TAG: "Err", _0: problem(result._0) } : result;
+  if (result$1.TAG === "Err") {
+    return result$1;
   }
   return { TAG: "Ok" };
 }
@@ -267,7 +247,13 @@ export function time(at) {
 }
 
 export async function hub() {
-  return await ask(Protocol.HUB, undefined, hubInfoDeserialize_deserialize);
+  return await Client.get(
+    Endpoints.HUB,
+    undefined,
+    __Query,
+    __Request,
+    hubInfoDeserialize_deserialize,
+  );
 }
 
 const DRAFT = "cross-agent-message.draft";

@@ -191,6 +191,11 @@ export interface Query<Self> {
         string,
         string
     ][]): any;
+    /**
+     * Streams carry their protocol here because EventSource cannot set a
+     * request header. Ordinary endpoint queries make no protocol claim.
+     */
+    protocol(self: Self): number | null | undefined;
 }
 
 export const __Query: Query<undefined>;

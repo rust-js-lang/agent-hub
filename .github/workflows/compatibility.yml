@@ -42,6 +42,13 @@ jobs:
         env:
           CARGO_BUILD_JOBS: 2
         run: node rust-js/tooling/cli.js test --package protocol
+      - name: Verify typed browser contracts and generated client
+        env:
+          CARGO_BUILD_JOBS: 2
+        run: |
+          node rust-js/tooling/cli.js clippy --package dashboard -- -D warnings
+          node rust-js/tooling/cli.js build --package dashboard --check
+          bun run test:client
       - name: Build the previous release
         shell: bash
         run: |

@@ -423,7 +423,11 @@ export function event(data) {
   return event === "Unknown" ? { TAG: "Ok" } : { TAG: "Ok", _0: event };
 }
 
-export const __Query = { pairs: __Query_pairs, parse: __Query_parse };
+export const __Query = {
+  pairs: __Query_pairs,
+  parse: __Query_parse,
+  protocol: (self) => undefined,
+};
 function __Query_pairs(self) {
   return [];
 }
@@ -517,7 +521,11 @@ export function url(path, query, Query) {
   return result;
 }
 
-export const historyQuery = { pairs: historyQuery_pairs, parse: historyQuery_parse };
+export const historyQuery = {
+  pairs: historyQuery_pairs,
+  parse: historyQuery_parse,
+  protocol: (history) => undefined,
+};
 function historyQuery_pairs(history) {
   const pairs = [];
   if (history.agent != null) {
@@ -556,7 +564,14 @@ export const Events = {
   },
 };
 
-export const eventsQuery = { pairs: eventsQuery_pairs, parse: eventsQuery_parse };
+export const eventsQuery = {
+  pairs: eventsQuery_pairs,
+  parse: eventsQuery_parse,
+  protocol: eventsQuery_protocol,
+};
+function eventsQuery_protocol(events) {
+  return events.protocol;
+}
 function eventsQuery_pairs(events) {
   const pairs = [];
   if (events.agent != null) {
@@ -596,7 +611,11 @@ function eventsQuery_parse(pairs) {
   };
 }
 
-export const noticeQueryQuery = { pairs: noticeQueryQuery_pairs, parse: noticeQueryQuery_parse };
+export const noticeQueryQuery = {
+  pairs: noticeQueryQuery_pairs,
+  parse: noticeQueryQuery_parse,
+  protocol: (noticeQuery) => undefined,
+};
 function noticeQueryQuery_pairs(noticeQuery) {
   return [
     ["name", noticeQuery.name],
@@ -639,6 +658,7 @@ function noticeQueryQuery_parse(pairs) {
 export const noticeSnapshotQuery = {
   pairs: noticeSnapshotQuery_pairs,
   parse: noticeSnapshotQuery_parse,
+  protocol: (noticeSnapshot) => undefined,
 };
 function noticeSnapshotQuery_pairs(noticeSnapshot) {
   return [

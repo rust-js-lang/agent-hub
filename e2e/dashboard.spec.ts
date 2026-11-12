@@ -286,3 +286,120 @@ test("an upgraded hub never discards a draft and reloads once the empty page is 
   await expect(page.getByRole("status")).toHaveCount(0);
   await expect(compose(page).getByLabel("Message")).toHaveValue("");
 });
+
+test("a CLOSED stream reconnects after an upgrade while a draft delays reload", async ({ page }) => {
+  await page.clock.install();
+  let build = "before-closed";
+  await page.route("**/api/hub", async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...await response.json(), build } });
+  });
+  await page.addInitScript(() => {
+    const Original = window.EventSource;
+    (window as any).testSources = [];
+    window.EventSource = class extends Original {
+      constructor(url: string | URL, init?: EventSourceInit) {
+        super(url, init);
+        (window as any).testSources.push(this);
+      }
+    };
+  });
+  agent("closed-recipient");
+  await open(page);
+  await signIn(page, agentName("closed-person"), hubKey());
+  await expect(compose(page)).toContainText("Writing as");
+  const draft = "Keep editing while messages reconnect.";
+  await compose(page).getByLabel("Message").fill(draft);
+  build = "after-closed";
+  await page.evaluate(() => {
+    const source = (window as any).testSources.at(-1);
+    source.close();
+    source.dispatchEvent(new Event("error"));
+  });
+  await expect(page.getByRole("status")).toContainText("The hub was upgraded");
+  await page.clock.runFor(1000);
+  await expect(page.getByText("Live", { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => (window as any).testSources.length)).toBe(2);
+  await expect(compose(page).getByLabel("Message")).toHaveValue(draft);
+  await page.clock.runFor(31_000);
+  await expect(compose(page).getByLabel("Message")).toHaveValue(draft);
+  await expect(page.getByRole("status")).toBeVisible();
+});
+
+test("a committed send with a lost response replays one nonce and delivers once", async ({ page }) => {
+  const recipient = agent("nonce-recipient");
+  const person = agentName("nonce-person");
+  await open(page);
+  await signIn(page, person, hubKey());
+  await expect(compose(page)).toContainText(`Writing as ${person}.`);
+  const attempts: { nonce?: string; body: string | null }[] = [];
+  await page.route("**/api/messages", async route => {
+    if (route.request().method() !== "POST") return route.continue();
+    attempts.push({ nonce: route.request().headers()["cross-agent-nonce"], body: route.request().postData() });
+    const response = await route.fetch();
+    if (attempts.length === 1) await route.abort("connectionreset");
+    else await route.fulfill({ response });
+  });
+  const body = `Deliver only once to ${recipient}.`;
+  await compose(page).getByLabel("To").selectOption(recipient);
+  await compose(page).getByLabel("Message").fill(body);
+  await compose(page).getByRole("button", { name: "Send" }).click();
+  await expect(compose(page).getByLabel("Message")).toHaveValue("");
+  expect(attempts).toHaveLength(2);
+  expect(attempts[0].nonce).toBeTruthy();
+  expect(attempts[1]).toEqual(attempts[0]);
+  const inbox = cli("inbox", "--as", recipient);
+  expect(inbox.split(body)).toHaveLength(2);
+  expect(cli("inbox", "--as", recipient)).not.toContain(body);
+});
+
+test("a hub without write-nonce gets one ambiguous send attempt and keeps the draft", async ({ page }) => {
+  const recipient = agent("legacy-nonce-recipient");
+  await page.route("**/api/hub", async route => {
+    const response = await route.fetch();
+    const info = await response.json();
+    await route.fulfill({ response, json: { ...info, features: info.features.filter((f: string) => f !== "write-nonce") } });
+  });
+  await open(page);
+  const person = agentName("legacy-nonce-person");
+  await signIn(page, person, hubKey());
+  await expect(compose(page)).toContainText(`Writing as ${person}.`);
+  let attempts = 0;
+  await page.route("**/api/messages", async route => {
+    if (route.request().method() !== "POST") return route.continue();
+    attempts += 1;
+    expect(route.request().headers()["cross-agent-nonce"]).toBeUndefined();
+    await route.fetch(); // Commit, then lose the acknowledgement.
+    await route.abort("connectionreset");
+  });
+  const body = `Keep this draft for ${recipient}.`;
+  await compose(page).getByLabel("To").selectOption(recipient);
+  await compose(page).getByLabel("Message").fill(body);
+  await compose(page).getByRole("button", { name: "Send" }).click();
+  await expect(compose(page).getByRole("alert")).toContainText("can't be reached");
+  await expect(compose(page).getByRole("button", { name: "Send" })).toBeEnabled();
+  expect(attempts).toBe(1);
+  await expect(compose(page).getByLabel("Message")).toHaveValue(body);
+  expect(cli("inbox", "--as", recipient).split(body)).toHaveLength(2);
+});
+
+test("an explicit refusal is shown once without replaying a send", async ({ page }) => {
+  const recipient = agent("refusal-recipient");
+  await open(page);
+  const person = agentName("refusal-person");
+  await signIn(page, person, hubKey());
+  await expect(compose(page)).toContainText(`Writing as ${person}.`);
+  let attempts = 0;
+  await page.route("**/api/messages", async route => {
+    if (route.request().method() !== "POST") return route.continue();
+    attempts += 1;
+    await route.fulfill({ status: 503, json: { code: "busy", reason: "Try after this request finishes." } });
+  });
+  await compose(page).getByLabel("To").selectOption(recipient);
+  await compose(page).getByLabel("Message").fill("Preserve the refused draft.");
+  await compose(page).getByRole("button", { name: "Send" }).click();
+  await expect(compose(page).getByRole("alert")).toHaveText("Try after this request finishes.");
+  await expect(compose(page).getByRole("button", { name: "Send" })).toBeEnabled();
+  expect(attempts).toBe(1);
+  await expect(compose(page).getByLabel("Message")).toHaveValue("Preserve the refused draft.");
+});

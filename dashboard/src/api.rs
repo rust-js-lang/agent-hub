@@ -1,73 +1,44 @@
 //! The dashboard's calls to the hub, and how it shows a time.
 
-use js::{date, settle};
-use protocol::{
-    AGENTS, Agent, BROADCAST, CHANNELS, Channel, INBOX, Inbox, MESSAGES, Message, PERSON,
-    ReadInbox, Refusal, Send, SignIn,
-};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use webapi::{BodyInit, RequestInit, headers, window};
+use crate::client;
+use js::date;
+use protocol::endpoints;
+use protocol::{Agent, Channel, Inbox, Message, ReadInbox, Send, SignIn};
+use std::cell::Cell;
+use webapi::window;
 
-/// The JSON the hub answers at `path`, asked as `init` says, or why
-/// there's none.
-async fn ask<T: DeserializeOwned>(path: &str, init: Option<RequestInit<'_>>) -> Result<T, String> {
-    let response = match settle(window.fetch(path, init)).await {
-        Ok(response) => response,
-        Err(_) => {
-            return Err(
-                "The hub can't be reached: is `cross-agent-message serve` running?".to_string(),
-            );
+thread_local! {
+    static RELOADING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Several failed requests in one render still request one reload. Compose
+/// already stores each draft edit before it can start a request.
+pub fn reload() {
+    RELOADING.with(|reloading| {
+        if !reloading.replace(true) {
+            window.location().reload();
         }
-    };
-    let status = response.status() as u16;
-    let text = response.text().await;
-    if status == 426 {
-        // The draft is durable; reload can never discard it.
-        webapi::window.location().reload();
-    }
-    if status != 200 {
-        return Err(match serde_json::from_str::<Refusal>(&text) {
-            Ok(refusal) => refusal.reason,
-            Err(_) => format!("The hub answered {status}."),
-        });
-    }
-    serde_json::from_str(&text)
-        .map_err(|error| format!("The hub's answer isn't what this page reads: {error}"))
+    });
 }
 
-/// The JSON the hub answers a `POST` of `body` to `path`.
-async fn post<T: DeserializeOwned>(path: &str, body: &impl Serialize) -> Result<T, String> {
-    post_nonce(path, body, None).await
-}
-
-async fn post_nonce<T: DeserializeOwned>(
-    path: &str,
-    body: &impl Serialize,
-    nonce: Option<&str>,
-) -> Result<T, String> {
-    let json = serde_json::to_string(body)
-        .map_err(|error| format!("This page can't write what it sends: {error}"))?;
-    let headers = headers::new(None);
-    headers.append("content-type", "application/json");
-    headers.append(protocol::PROTOCOL_HEADER, "1");
-    if let Some(nonce) = nonce {
-        headers.append(protocol::WRITE_NONCE_HEADER, nonce);
+fn problem(error: client::Error) -> String {
+    if error.upgrade_required() {
+        reload();
     }
-    let init = RequestInit {
-        method: Some("POST"),
-        headers: Some(headers),
-        body: Some(Some(BodyInit::Str(&json))),
-        ..Default::default()
-    };
-    ask(path, Some(init)).await
+    error.message()
 }
 
 /// Every agent, every channel, and the history, newest first.
 pub async fn load() -> Result<(Vec<Agent>, Vec<Channel>, Vec<Message>), String> {
-    let agents = ask(AGENTS, None).await?;
-    let channels = ask(CHANNELS, None).await?;
-    let messages = ask(MESSAGES, None).await?;
+    let agents = client::get(&endpoints::AGENTS, &())
+        .await
+        .map_err(problem)?;
+    let channels = client::get(&endpoints::CHANNELS, &())
+        .await
+        .map_err(problem)?;
+    let messages = client::get(&endpoints::HISTORY, &endpoints::History::default())
+        .await
+        .map_err(problem)?;
     Ok((agents, channels, messages))
 }
 
@@ -99,7 +70,9 @@ pub async fn sign_in(name: &str, key: &str) -> Result<Me, String> {
         name: name.to_string(),
         key: key.to_string(),
     };
-    let agent: Agent = post(PERSON, &sign_in).await?;
+    let agent = client::post(&endpoints::PERSON, &sign_in)
+        .await
+        .map_err(problem)?;
     let me = Me {
         name: agent.name,
         key: key.to_string(),
@@ -128,32 +101,17 @@ pub async fn send(me: &Me, to: &str, body: &str) -> Result<(), String> {
         body: body.to_string(),
         key: Some(me.key.clone()),
     };
-    let supported = hub()
-        .await
-        .is_ok_and(|info| info.features.iter().any(|f| f == "write-nonce"));
-    let nonce = format!("{}-{}", date::now(), js::math::random());
-    let attempts = if supported { 3 } else { 1 };
-    let mut problem = "The message could not be sent.".to_string();
-    for _ in 0..attempts {
-        let result = if to.starts_with('#') {
-            post_nonce::<Vec<Message>>(
-                BROADCAST,
-                &send,
-                if supported { Some(&nonce) } else { None },
-            )
+    if to.starts_with('#') {
+        client::post(&endpoints::BROADCAST, &send)
             .await
             .map(|_| ())
-        } else {
-            post_nonce::<Message>(MESSAGES, &send, if supported { Some(&nonce) } else { None })
-                .await
-                .map(|_| ())
-        };
-        match result {
-            Ok(()) => return Ok(()),
-            Err(reason) => problem = reason,
-        }
+            .map_err(problem)
+    } else {
+        client::post(&endpoints::SEND, &send)
+            .await
+            .map(|_| ())
+            .map_err(problem)
     }
-    Err(problem)
 }
 
 /// The person has read what was sent to them: it's on the page.
@@ -170,18 +128,21 @@ pub async fn read(me: &Me) -> Result<Inbox, String> {
 
         up_to: None,
     };
-    post(INBOX, &read).await
+    client::post(&endpoints::INBOX, &read)
+        .await
+        .map_err(problem)
 }
 
 pub async fn retire(me: &Me, name: &str) -> Result<(), String> {
-    let _: protocol::Retired = post(
-        protocol::RETIRE,
+    client::post(
+        &endpoints::RETIRE,
         &protocol::Retire {
             name: name.to_string(),
             key: Some(me.key.clone()),
         },
     )
-    .await?;
+    .await
+    .map_err(problem)?;
     Ok(())
 }
 
@@ -190,8 +151,8 @@ pub fn time(at: u64) -> String {
     date::new(Some(&(at as f64))).to_locale_string(None, None)
 }
 
-pub async fn hub() -> Result<protocol::HubInfo, String> {
-    ask(protocol::HUB, None).await
+pub async fn hub() -> Result<protocol::HubInfo, client::Error> {
+    client::get(&endpoints::HUB, &()).await
 }
 
 const DRAFT: &str = "cross-agent-message.draft";
