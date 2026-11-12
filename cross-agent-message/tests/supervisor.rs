@@ -279,6 +279,92 @@ impl Drop for Availability {
 }
 
 #[test]
+fn activation_returns_during_grace_and_the_next_upgrade_waits_without_stopping_service() {
+    let running = Running::new();
+    let client = running.client();
+    client.register("grace-a").unwrap();
+    client.register("grace-b").unwrap();
+    let original = running.worker_pid();
+    let probe = Availability::start(&running.url);
+    let first = running.upgrade(&running.binary);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let active = running.worker_pid();
+    assert_ne!(active, original);
+    let children = || {
+        let output = Command::new("pgrep")
+            .args(["-P", &running.process.id().to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| line.parse::<i32>().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        children().contains(&original),
+        "activation must report before retiring the predecessor"
+    );
+    assert!(children().contains(&active));
+    let files = Command::new("lsof")
+        .args(["-a", "-p", &original.to_string(), "-Fn"])
+        .output()
+        .unwrap();
+    assert!(files.status.success());
+    assert!(
+        !String::from_utf8_lossy(&files.stdout)
+            .lines()
+            .any(|line| line.starts_with(&format!("n{}", running.db.display()))),
+        "predecessor must not retain SQLite handles during grace"
+    );
+    std::thread::scope(|scope| {
+        let second = scope.spawn(|| running.upgrade(&running.binary));
+        wait(
+            || {
+                std::fs::read_to_string(running.root.join("log"))
+                    .unwrap()
+                    .contains("Upgrade queued for predecessor retirement")
+            },
+            3,
+        );
+        assert!(!second.is_finished());
+        client
+            .send(
+                "grace-a",
+                "grace-b",
+                "service continues while retirement is pending",
+            )
+            .unwrap();
+        assert_eq!(
+            running.worker_pid(),
+            active,
+            "queued upgrade must not overlap the first retirement"
+        );
+        let result = second.join().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    });
+    assert!(!children().contains(&original));
+    assert_eq!(
+        client
+            .read_inbox("grace-b", 10)
+            .unwrap()
+            .messages
+            .iter()
+            .filter(|message| message.from == "grace-a")
+            .count(),
+        1
+    );
+    probe.finish();
+}
+
+#[test]
 fn successful_swap_serves_new_connections_and_keeps_acknowledged_mail_and_holds() {
     let running = Running::new();
     let client = running.client();

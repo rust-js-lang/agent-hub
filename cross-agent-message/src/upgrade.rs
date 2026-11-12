@@ -154,6 +154,11 @@ pub fn run(path: &Path, db: &Path, checksum: Option<&str>) -> Result<()> {
             "this supervisor uses snapshot executable paths; restart it with the new serve --replace before upgrading"
         );
     }
+    if config.handoff_protocol != crate::handoff::VERSION {
+        bail!(
+            "this supervisor cannot coordinate the cooperative handoff; perform the announced cold migration with the new `serve --replace` first"
+        );
+    }
     let address = config
         .addresses
         .iter()

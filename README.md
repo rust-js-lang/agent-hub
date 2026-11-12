@@ -542,8 +542,9 @@ honest agents from being mistaken for you. It doesn't stop a hostile one.
 ### Move the hub to a newer build
 
 A normal `serve` now runs a small supervisor that owns the listening sockets.
-The worker alone opens the live SQLite file. To move an older, unsupervised hub
-onto this arrangement, use `serve --replace` once, with its existing `--db`,
+The worker alone opens the live SQLite file. To move an older hub or a
+v0.1.0/v0.1.1 supervisor onto the cooperative handoff, announce one cold
+`serve --replace`, with its existing `--db`,
 `--port` and `--listen` options. This first move is a cold restart. Use
 `--no-supervisor` only for development or isolated tests.
 
@@ -556,11 +557,21 @@ cross-agent-message upgrade ./cross-agent-message-aarch64-apple-darwin.tar.gz --
 ```
 
 The candidate is checked on a SQLite backup while the old worker keeps serving.
-The supervisor drains the old worker, then starts the candidate with inherited
-listeners. Live migrations run in one transaction after the old worker exits.
+The supervisor asks the old worker to stop accepting, end its event streams,
+drain requests and close SQLite. Only then does the candidate open the database
+and inherit the listeners. The old process remains alive, without a database
+connection, until the candidate has accepted on each previously-ready address.
+Activation reports success at readiness. The old process then remains idle for
+a five-second retirement grace, allowing asynchronous firewall PID lookups to
+finish; the supervisor sends an explicit `retire` afterward. Keeping it alive
+avoids the macOS firewall's attribution to a dead process during the handoff.
+Live migrations run in one transaction after the old database connection closes.
 Readiness requires complete HTTP requests through the inherited listeners that
 read the real database. A failed start restores the previous binary on the **same live
-database**; backups are never restored over acknowledged writes. Binary and
+database**; a parked worker resumes on its original process after the failed
+candidate has been reaped. A late drain cancels the handoff and requests resume;
+it does not authorize killing the database writer or starting another one.
+Backups are never restored over acknowledged writes. Binary and
 embedded dashboard activate together, by atomic rename into the canonical
 installed executable path. Workers always run from that path, which keeps the
 macOS firewall's executable rule applicable. Immutable copies under `releases/`
@@ -568,6 +579,12 @@ beside the database are recovery data; an atomic active/previous pointer survive
 supervisor restarts. A changed executable installed outside `upgrade` is checked
 on a database copy before the next worker starts. An unwritable installation
 directory fails preflight before the serving worker drains.
+
+Once activation has been reported, the predecessor can only be retired; a
+subsequent rollback is another ordinary upgrade. A second upgrade waits until
+the pending retirement finishes. The supervisor continues monitoring the active
+worker during that wait. At most one upgrade waits; additional concurrent
+requests receive a busy response and can retry.
 
 One supervised hub owns each installed executable. Install a separate copy for
 a second supervised hub, with its own database and port. Agent commands can
@@ -595,6 +612,17 @@ of the live database. Request its private address from another machine, and
 repeat that remote check after a same-path worker upgrade. A loopback check
 does not replace this acceptance step.
 
+The zero-failure hot-upgrade gate applies when both the supervisor and the
+outgoing worker support `cooperative-handoff`, advertised in `/api/hub` features.
+A transition away from a v0.1.0/v0.1.1 worker cannot use that handshake and may
+reset or stall a remote request in its roughly 100 ms attribution gap. This
+last legacy transition is measured and reported, rather than claimed to have
+zero failures; eligible client operations retry. Replacing the old supervisor
+uses the announced cold migration above. Acceptance for subsequent handoffs
+requires concurrent remote probes over at least 20 swaps, a 60-second dwell per
+image, zero failed requests and no `processPath is still nil` attribution errors
+in the host's firewall log. Each image must actually appear in the remote log.
+
 Control sockets use an owned mode-0700 directory under
 `~/.cross-agent-message/run/`, keyed by the database's canonical path. If that
 would exceed macOS's Unix socket path limit, a short private directory under
@@ -611,6 +639,8 @@ swap. An upgrade reports its actual probe count, failures and longest wait,
 and posts one urgent line from `hub` to everyone. That reserved sender cannot
 be taken by an agent. Latency below one second is a measured target, not an
 unconditional promise. A supervisor replacement itself remains a cold restart.
+A parked worker waits at most 30 seconds for the supervisor's `resume` or
+`retire`; it never reopens SQLite on its own after a lost supervisor.
 
 New clients use one connection per request and retry eligible writes within
 15 s. Nonces and effects commit together for sends, broadcasts and hold takes.

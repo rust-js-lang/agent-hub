@@ -28,6 +28,8 @@ pub struct Config {
     pub requested_addresses: Vec<SocketAddr>,
     #[serde(default)]
     pub required_ready: Vec<String>,
+    #[serde(default)]
+    pub handoff_protocol: u32,
 }
 impl Config {
     pub fn control(&self) -> PathBuf {
@@ -91,6 +93,48 @@ fn valid_snapshot(path: &Path, config: &Config) -> bool {
 struct Worker {
     process: Child,
     addresses: Vec<protocol::ListenAddress>,
+    channel: crate::handoff::Channel,
+    handoff: bool,
+    sequence: u64,
+    phase: Phase,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Running,
+    Quiescing,
+    Parked,
+    Resuming(u64),
+    Retiring,
+}
+
+// ALF may look up a flow's already-attributed PID asynchronously. Keep the
+// database-free predecessor alive after replacement readiness so those
+// lookups can still resolve it, including when the firewall daemon is busy.
+const RETIRE_GRACE: Duration = Duration::from_secs(5);
+
+struct Retirement {
+    worker: Worker,
+    after: Instant,
+}
+
+fn activate_worker(worker: &mut Worker, next: Worker, retirement: &mut Option<Retirement>) {
+    assert!(retirement.is_none(), "worker handoffs must be serialized");
+    let mut previous = std::mem::replace(worker, next);
+    if previous.handoff {
+        previous.phase = Phase::Retiring;
+        *retirement = Some(Retirement {
+            worker: previous,
+            after: Instant::now() + RETIRE_GRACE,
+        });
+    }
+}
+
+impl Worker {
+    fn next_request(&mut self) -> u64 {
+        self.sequence += 1;
+        self.sequence
+    }
 }
 impl std::ops::Deref for Worker {
     type Target = Child;
@@ -320,91 +364,24 @@ fn start(
         .context("worker image is not a managed recovery snapshot")?;
     crate::installation::activate_verified(binary, &executable, checksum)?;
     crate::runtime::prepare_worker(&config.db)?;
-    let (mut worker, mut ready) = child(&executable, config, listeners)?;
-    let result = (|| -> Result<Vec<protocol::ListenAddress>> {
-        let mut data = Vec::new();
-        loop {
-            let mut buffer = [0; 1024];
-            match ready.read(&mut buffer) {
-                Ok(0) => bail!(
-                    "worker closed readiness pipe before ready (status: {:?})",
-                    worker.try_wait()?
-                ),
-                Ok(n) => {
-                    data.extend_from_slice(&buffer[..n]);
-                    if data.ends_with(b"\n") {
-                        let text = std::str::from_utf8(&data)?;
-                        if let Some(payload) = text.strip_prefix("ready ") {
-                            let observed = if let Ok(ready) =
-                                serde_json::from_str::<crate::addresses::Ready>(payload.trim())
-                            {
-                                ready.addresses
-                            } else {
-                                // A previous release reports only its build. Verify
-                                // every address ourselves before accepting it.
-                                let remaining = deadline.saturating_duration_since(Instant::now());
-                                if remaining.is_zero() {
-                                    bail!("worker readiness timed out");
-                                }
-                                crate::addresses::probe_for(
-                                    config,
-                                    payload.trim(),
-                                    remaining.min(Duration::from_secs(1)),
-                                )
-                            };
-                            for address in config
-                                .addresses
-                                .first()
-                                .map(ToString::to_string)
-                                .into_iter()
-                                .chain(config.required_ready.iter().cloned())
-                            {
-                                if !observed.iter().any(|status| {
-                                    status.address == address
-                                        && status.state == protocol::AddressState::Ready
-                                }) {
-                                    let reason = observed
-                                        .iter()
-                                        .find(|status| status.address == address)
-                                        .and_then(|status| status.reason.as_deref())
-                                        .unwrap_or("address is not ready");
-                                    bail!("required address {address} is not ready: {reason}");
-                                }
-                            }
-                            if Instant::now() > deadline {
-                                bail!("worker readiness timed out");
-                            }
-                            return Ok(observed);
-                        }
-                        bail!("worker readiness refused: {text}");
-                    }
-                    if data.len() > 1024 * 1024 {
-                        bail!("invalid readiness response");
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(e.into()),
-            }
-            if let Some(status) = worker.try_wait()? {
-                bail!("worker exited before ready: {status}");
-            }
-            if Instant::now() >= deadline {
-                bail!("worker readiness timed out");
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    })();
-    let addresses = match result {
-        Ok(addresses) => addresses,
+    let (mut process, stream) = child(&executable, config, listeners)?;
+    let mut channel = crate::handoff::Channel::new(stream)?;
+    let ready = match wait_ready(&mut process, &mut channel, config, 0, deadline) {
+        Ok(ready) => ready,
         Err(error) => {
-            // Every failure path reaps the candidate before rollback opens SQLite.
-            terminate(&mut worker, Duration::ZERO)?;
+            // Reap the candidate before any rollback can reopen SQLite.
+            terminate(&mut process, Duration::ZERO)?;
             return Err(error);
         }
     };
     let worker = Worker {
-        process: worker,
-        addresses,
+        process,
+        channel,
+        handoff: ready.handoff_protocol == crate::handoff::VERSION
+            && config.handoff_protocol == crate::handoff::VERSION,
+        addresses: ready.addresses,
+        sequence: 0,
+        phase: Phase::Running,
     };
     config.required_ready = crate::addresses::ready(&worker.addresses);
     eprintln!(
@@ -413,6 +390,233 @@ fn start(
         executable.display()
     );
     Ok(worker)
+}
+
+fn protected(config: &Config) -> impl Iterator<Item = String> + '_ {
+    config
+        .addresses
+        .first()
+        .map(ToString::to_string)
+        .into_iter()
+        .chain(config.required_ready.iter().cloned())
+}
+
+fn validate_ready(ready: &crate::addresses::Ready, config: &Config) -> Result<()> {
+    if ready.handoff_protocol != 0 && ready.handoff_protocol != crate::handoff::VERSION {
+        bail!(
+            "unsupported worker handoff protocol {}",
+            ready.handoff_protocol
+        );
+    }
+    for address in protected(config) {
+        if !ready.addresses.iter().any(|status| {
+            status.address == address && status.state == protocol::AddressState::Ready
+        }) {
+            let reason = ready
+                .addresses
+                .iter()
+                .find(|status| status.address == address)
+                .and_then(|status| status.reason.as_deref())
+                .unwrap_or("address is not ready");
+            bail!("required address {address} is not ready: {reason}");
+        }
+        if ready.handoff_protocol == crate::handoff::VERSION && !ready.accepted.contains(&address) {
+            bail!("worker has not accepted on required address {address}");
+        }
+    }
+    Ok(())
+}
+
+fn wait_ready(
+    process: &mut Child,
+    channel: &mut crate::handoff::Channel,
+    config: &Config,
+    request: u64,
+    deadline: Instant,
+) -> Result<crate::addresses::Ready> {
+    loop {
+        if Instant::now() >= deadline {
+            bail!("worker readiness timed out");
+        }
+        if let Some(line) = channel.poll()? {
+            if let Some(payload) = line.strip_prefix("ready ") {
+                let ready = if let Ok(ready) =
+                    serde_json::from_str::<crate::addresses::Ready>(payload.trim())
+                {
+                    ready
+                } else if request == 0 {
+                    // Legacy workers have no handoff channel; their own ready
+                    // signal plus fresh full HTTP probes proves startup.
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        bail!("worker readiness timed out");
+                    }
+                    crate::addresses::Ready {
+                        build: payload.trim().to_string(),
+                        addresses: crate::addresses::probe_for(
+                            config,
+                            payload.trim(),
+                            remaining.min(Duration::from_secs(1)),
+                        ),
+                        handoff_protocol: 0,
+                        request: 0,
+                        accepted: Vec::new(),
+                    }
+                } else {
+                    bail!("invalid resumed worker readiness");
+                };
+                if ready.request != request {
+                    continue;
+                }
+                validate_ready(&ready, config)?;
+                if Instant::now() > deadline {
+                    bail!("worker readiness timed out");
+                }
+                return Ok(ready);
+            }
+            // A late quiesce reply may precede the matching resume readiness.
+            if serde_json::from_str::<crate::handoff::Reply>(&line).is_err() {
+                bail!("worker readiness refused: {line}");
+            }
+        }
+        if let Some(status) = process.try_wait()? {
+            bail!("worker exited before ready: {status}");
+        }
+        if Instant::now() >= deadline {
+            bail!("worker readiness timed out");
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn restore_image(snapshot: &Path, config: &Config) -> Result<()> {
+    let checksum = snapshot
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|p| p.to_str())
+        .context("recovery snapshot checksum missing")?;
+    crate::installation::activate_verified(
+        snapshot,
+        config
+            .worker_path
+            .as_deref()
+            .context("stable worker path missing")?,
+        checksum,
+    )
+}
+
+fn resume(worker: &mut Worker, image: &Path, config: &Config) -> Result<()> {
+    restore_image(image, config)?;
+    let id = worker.next_request();
+    worker.phase = Phase::Resuming(id);
+    let deadline = Instant::now() + Duration::from_millis(2500);
+    worker
+        .channel
+        .send(&crate::handoff::Command::Resume { id }, deadline)?;
+    let ready = wait_ready(
+        &mut worker.process,
+        &mut worker.channel,
+        config,
+        id,
+        deadline,
+    )?;
+    worker.addresses = ready.addresses;
+    worker.phase = Phase::Running;
+    eprintln!(
+        "Worker {} resumed on the same process after rollback.",
+        worker.id()
+    );
+    Ok(())
+}
+
+/// A late drain never licenses another database writer. On any failure,
+/// request resume and keep owning the original child instead of killing it.
+fn quiesce(worker: &mut Worker, image: &Path, config: &Config) -> Result<()> {
+    if !worker.handoff {
+        eprintln!(
+            "Legacy outgoing worker has no cooperative handoff; this transition may interrupt a remote connection."
+        );
+        return terminate(worker, Duration::from_secs(4));
+    }
+    if worker.phase != Phase::Running {
+        bail!("worker handoff is still awaiting recovery");
+    }
+    let id = worker.next_request();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    worker.phase = Phase::Quiescing;
+    let result = (|| -> Result<()> {
+        worker
+            .channel
+            .send(&crate::handoff::Command::Quiesce { id }, deadline)?;
+        loop {
+            if let Some(line) = worker.channel.poll()? {
+                match serde_json::from_str::<crate::handoff::Reply>(&line) {
+                    Ok(crate::handoff::Reply::Drained { id: reply }) if reply == id => {
+                        worker.phase = Phase::Parked;
+                        eprintln!(
+                            "Worker {} acknowledged drained; database is closed and PID retained.",
+                            worker.id()
+                        );
+                        return Ok(());
+                    }
+                    Ok(_) => {}
+                    Err(_) => bail!("invalid worker drain acknowledgement"),
+                }
+            }
+            if worker.try_wait()?.is_some() {
+                bail!("worker exited before acknowledging drained");
+            }
+            if Instant::now() >= deadline {
+                bail!("worker drain timed out; cancelling handoff");
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    })();
+    if let Err(error) = result {
+        resume(worker, image, config)
+            .with_context(|| format!("{error:#}; old worker resume did not finish"))?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn retire(worker: &mut Worker) -> Result<()> {
+    if !worker.handoff {
+        return Ok(());
+    } // legacy child was already reaped
+    if !matches!(worker.phase, Phase::Parked | Phase::Retiring) {
+        bail!("cannot retire a worker whose database may still be open");
+    }
+    let id = worker.next_request();
+    worker.channel.send(
+        &crate::handoff::Command::Retire { id },
+        Instant::now() + Duration::from_millis(250),
+    )?;
+    let deadline = Instant::now() + Duration::from_millis(250);
+    while worker.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            // Drained was acknowledged, so this process owns no SQLite handle.
+            worker.kill()?;
+            worker.wait()?;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+
+fn recover(
+    worker: &mut Worker,
+    image: &Path,
+    config: &mut Config,
+    listeners: &[TcpListener],
+) -> Result<()> {
+    if worker.handoff && worker.try_wait()?.is_none() {
+        resume(worker, image, config)
+    } else {
+        *worker = start(image, config, listeners, Duration::from_millis(2500))?;
+        Ok(())
+    }
 }
 
 pub fn request(config: &Config, swap: &Swap) -> Result<Swapped> {
@@ -524,6 +728,7 @@ pub fn run(mut config: Config) -> Result<()> {
         .and_then(|prior| prior.worker_path.as_ref())
         == Some(&installation.executable);
     config.worker_path = Some(installation.executable.clone());
+    config.handoff_protocol = crate::handoff::VERSION;
     crate::runtime::prepare(&config.db)?;
     let control = config.control();
     if UnixStream::connect(config.db.with_extension("sock")).is_ok()
@@ -616,11 +821,22 @@ pub fn run(mut config: Config) -> Result<()> {
     let mut crashes = Vec::<Instant>::new();
     let mut activated = Instant::now();
     let mut bind_retry = Instant::now();
+    let mut handoff_retry = false;
+    let mut retirement: Option<Retirement> = None;
+    let mut pending_upgrade: Option<(UnixStream, String)> = None;
     loop {
         if signals.stopped() {
             terminate(&mut worker, Duration::from_secs(4))?;
             let _ = std::fs::remove_file(&control);
             return Ok(());
+        }
+        if retirement
+            .as_ref()
+            .is_some_and(|old| Instant::now() >= old.after)
+            && let Some(mut old) = retirement.take()
+            && let Err(error) = retire(&mut old.worker)
+        {
+            eprintln!("could not gracefully retire drained predecessor: {error:#}");
         }
         if worker.try_wait()?.is_some() {
             // This is only observation data from the child we actually spawned,
@@ -685,6 +901,23 @@ pub fn run(mut config: Config) -> Result<()> {
                 }
             }
         }
+        if let Phase::Resuming(id) = worker.phase {
+            match worker.channel.poll() {
+                Ok(Some(line)) => {
+                    if let Some(payload) = line.strip_prefix("ready ")
+                        && let Ok(ready) = serde_json::from_str::<crate::addresses::Ready>(payload)
+                        && ready.request == id
+                        && validate_ready(&ready, &config).is_ok()
+                    {
+                        worker.addresses = ready.addresses;
+                        worker.phase = Phase::Running;
+                        eprintln!("Worker {} completed delayed resume.", worker.id());
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => eprintln!("waiting for worker recovery: {error:#}"),
+            }
+        }
         if bind_retry.elapsed() >= Duration::from_secs(1) {
             bind_retry = Instant::now();
             // /tmp may be cleaned while the supervisor still owns its listener.
@@ -697,11 +930,23 @@ pub fn run(mut config: Config) -> Result<()> {
             }
             let changed = attach_pending(&mut config, &mut listeners, &requested, bind_listener)?;
             if changed {
-                let build = crate::updates::inspect(&active.current)?.build;
+                handoff_retry = true;
+            }
+            if handoff_retry && retirement.is_none() {
+                handoff_retry = false;
+                let prior = active.clone();
+                let build = crate::updates::inspect(&prior.current)?.build;
                 let replaced = reconcile_installation(&mut active, &config)?;
                 worker.addresses = crate::addresses::probe(&config, &build);
                 config.required_ready = crate::addresses::ready(&worker.addresses);
-                terminate(&mut worker, Duration::from_secs(4))?;
+                let protected_before = config.required_ready.clone();
+                if let Err(error) = quiesce(&mut worker, &prior.current, &config) {
+                    eprintln!("listener handoff cancelled; retaining worker: {error:#}");
+                    active = prior;
+                    atomic_json(&config.active_path(), &active)?;
+                    handoff_retry = true;
+                    continue;
+                }
                 let restart = if replaced {
                     start_or_restore(&mut active, &mut config, &listeners)
                 } else {
@@ -713,10 +958,21 @@ pub fn run(mut config: Config) -> Result<()> {
                     )
                 };
                 match restart {
-                    Ok(next) => worker = next,
-                    Err(error) => eprintln!(
-                        "listener handoff failed; retaining sockets and retrying worker: {error:#}"
-                    ),
+                    Ok(next) => {
+                        activate_worker(&mut worker, next, &mut retirement);
+                    }
+                    Err(error) => {
+                        eprintln!("listener handoff failed; resuming previous worker: {error:#}");
+                        active = prior;
+                        atomic_json(&config.active_path(), &active)?;
+                        config.required_ready = protected_before;
+                        if let Err(recovery) =
+                            recover(&mut worker, &active.current, &mut config, &listeners)
+                        {
+                            eprintln!("listener handoff recovery pending: {recovery:#}");
+                        }
+                        handoff_retry = true;
+                    }
                 }
                 if replaced {
                     activated = Instant::now();
@@ -724,16 +980,28 @@ pub fn run(mut config: Config) -> Result<()> {
                 }
             }
         }
-        match socket.accept() {
-            Ok((mut stream, _)) => {
+        let incoming =
+            if let Some((stream, line)) = pending_upgrade.take_if(|_| retirement.is_none()) {
+                Ok((stream, Some(line)))
+            } else {
+                socket.accept().map(|(stream, _)| (stream, None))
+            };
+        match incoming {
+            Ok((mut stream, buffered)) => {
                 stream.set_read_timeout(Some(Duration::from_secs(1)))?;
                 let mut line = String::new();
-                let parsed = std::io::BufRead::read_line(
-                    &mut std::io::BufReader::new(&stream).take(64 * 1024),
-                    &mut line,
-                )
-                .map_err(anyhow::Error::from)
-                .and_then(|_| serde_json::from_str::<Swap>(&line).map_err(Into::into));
+                let received = if let Some(buffered) = buffered {
+                    line = buffered;
+                    Ok(line.len())
+                } else {
+                    std::io::BufRead::read_line(
+                        &mut std::io::BufReader::new(&stream).take(64 * 1024),
+                        &mut line,
+                    )
+                };
+                let mut parsed = received
+                    .map_err(anyhow::Error::from)
+                    .and_then(|_| serde_json::from_str::<Swap>(&line).map_err(Into::into));
                 if serde_json::from_str::<serde_json::Value>(&line)
                     .ok()
                     .and_then(|v| v.get("stop").and_then(|v| v.as_bool()))
@@ -743,6 +1011,18 @@ pub fn run(mut config: Config) -> Result<()> {
                     let _ = writeln!(stream, "{{\"stopped\":true}}");
                     let _ = std::fs::remove_file(&control);
                     return Ok(());
+                }
+                if parsed.is_ok() && retirement.is_some() {
+                    if pending_upgrade.is_none() {
+                        eprintln!(
+                            "Upgrade queued for predecessor retirement; active worker remains serving."
+                        );
+                        pending_upgrade = Some((stream, line));
+                        continue;
+                    }
+                    parsed = Err(anyhow::anyhow!(
+                        "another upgrade is waiting for predecessor retirement; retry after it finishes"
+                    ));
                 }
                 let previous_build = crate::updates::inspect(&active.current)?.build;
                 let result = parsed.and_then(|swap| {
@@ -787,7 +1067,7 @@ pub fn run(mut config: Config) -> Result<()> {
                     worker.addresses = crate::addresses::probe(&config, &previous_build);
                     config.required_ready = crate::addresses::ready(&worker.addresses);
                     let protected_before_swap = config.required_ready.clone();
-                    terminate(&mut worker, Duration::from_secs(4))?;
+                    quiesce(&mut worker, &active.current, &config)?;
                     match start(&candidate, &mut config, &listeners, Duration::from_secs(3)) {
                         Ok(mut child) => {
                             let next = Active {
@@ -797,12 +1077,7 @@ pub fn run(mut config: Config) -> Result<()> {
                             if let Err(error) = atomic_json(&config.active_path(), &next) {
                                 terminate(&mut child, Duration::ZERO)?;
                                 config.required_ready = protected_before_swap;
-                                worker = start(
-                                    &active.current,
-                                    &mut config,
-                                    &listeners,
-                                    Duration::from_millis(2500),
-                                )?;
+                                recover(&mut worker, &active.current, &mut config, &listeners)?;
                                 return Ok(Swapped {
                                     build: previous_build.clone(),
                                     previous: previous_build.clone(),
@@ -811,7 +1086,7 @@ pub fn run(mut config: Config) -> Result<()> {
                                     addresses: worker.addresses.clone(),
                                 });
                             }
-                            worker = child;
+                            activate_worker(&mut worker, child, &mut retirement);
                             active = next;
                             activated = Instant::now();
                             crashes.clear();
@@ -824,13 +1099,8 @@ pub fn run(mut config: Config) -> Result<()> {
                             })
                         }
                         Err(error) => {
-                            worker = start(
-                                &active.current,
-                                &mut config,
-                                &listeners,
-                                Duration::from_millis(2500),
-                            )
-                            .context("rollback worker did not become ready")?;
+                            recover(&mut worker, &active.current, &mut config, &listeners)
+                                .context("rollback worker did not become ready")?;
                             Ok(Swapped {
                                 build: previous_build.clone(),
                                 previous: previous_build.clone(),
@@ -868,9 +1138,9 @@ pub fn run(mut config: Config) -> Result<()> {
 
 /// Signal delivery wakes a separate Tokio runtime; no Rust work runs in a
 /// signal handler. The synchronous supervisor only reads an atomic flag.
-struct ArcSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
+pub(crate) struct ArcSignal(std::sync::Arc<std::sync::atomic::AtomicBool>);
 impl ArcSignal {
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = stopped.clone();
         let (ready, registered) = std::sync::mpsc::sync_channel(1);
@@ -914,7 +1184,7 @@ impl ArcSignal {
             .context("signal handler did not initialize")??;
         Ok(Self(stopped))
     }
-    fn stopped(&self) -> bool {
+    pub(crate) fn stopped(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
@@ -922,6 +1192,172 @@ impl ArcSignal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retirement_requires_acceptance_on_protected_addresses_but_not_preexisting_blocked_ones() {
+        let loopback = "127.0.0.1:12345";
+        let private = "100.64.1.1:12345";
+        let mut config = Config {
+            addresses: vec![loopback.parse().unwrap(), private.parse().unwrap()],
+            requested_addresses: Vec::new(),
+            required_ready: vec![private.to_string()],
+            handoff_protocol: crate::handoff::VERSION,
+            worker_path: None,
+            db: PathBuf::from("unused.db"),
+            activate_current: false,
+            away_after: 60_000,
+            forget_after: 120_000,
+            reconnect_grace: 0,
+        };
+        let mut ready = crate::addresses::Ready {
+            build: "fixture".to_string(),
+            handoff_protocol: crate::handoff::VERSION,
+            request: 0,
+            accepted: vec![loopback.to_string()],
+            addresses: [loopback, private]
+                .iter()
+                .map(|address| protocol::ListenAddress {
+                    address: address.to_string(),
+                    state: protocol::AddressState::Ready,
+                    reason: None,
+                    remote_seen: false,
+                })
+                .collect(),
+        };
+        assert!(
+            validate_ready(&ready, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("has not accepted")
+        );
+        ready.accepted.push(private.to_string());
+        assert!(validate_ready(&ready, &config).is_ok());
+        ready.addresses[1].state = protocol::AddressState::Blocked;
+        assert!(validate_ready(&ready, &config).is_err());
+        config.required_ready.clear();
+        ready.accepted.pop();
+        assert!(validate_ready(&ready, &config).is_ok());
+        ready.handoff_protocol = 999;
+        assert!(validate_ready(&ready, &config).is_err());
+    }
+
+    #[test]
+    fn late_drain_is_cancelled_by_resume_without_killing_the_database_writer() {
+        let root = std::env::temp_dir().join(format!(
+            "cam-late-drain-{}-{}",
+            std::process::id(),
+            crate::hub::now()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let image = b"verified recovery image";
+        let hash = crate::updates::sha256(image);
+        let directory = root.join("releases").join(&hash);
+        std::fs::create_dir_all(&directory).unwrap();
+        let snapshot = directory.join("cross-agent-message");
+        std::fs::write(&snapshot, image).unwrap();
+        let config = Config {
+            db: root.join("hub.db"),
+            worker_path: Some(root.join("installed")),
+            addresses: vec!["127.0.0.1:12345".parse().unwrap()],
+            requested_addresses: Vec::new(),
+            required_ready: Vec::new(),
+            handoff_protocol: crate::handoff::VERSION,
+            activate_current: false,
+            away_after: 60_000,
+            forget_after: 120_000,
+            reconnect_grace: 0,
+        };
+        // This fixture deliberately holds a real SQLite write transaction
+        // beyond the supervisor's drain deadline. A forced kill loses its
+        // uncommitted marker. Resume is sent while it is still draining.
+        let script = r#"
+import json, socket, sqlite3, sys, time
+wire = socket.socket(fileno=3)
+lines = wire.makefile('r')
+db = sqlite3.connect(sys.argv[1])
+db.execute('create table invariant (value text)')
+db.execute('insert into invariant values (\'not lost\')')
+def ready(request):
+    value = {'build':'fixture', 'handoff_protocol':1, 'request':request,
+             'accepted':['127.0.0.1:12345'],
+             'addresses':[{'address':'127.0.0.1:12345','state':'ready','reason':None,'remoteSeen':False}]}
+    wire.sendall(('ready '+json.dumps(value)+'\n').encode())
+ready(0)
+for line in lines:
+    command=json.loads(line)
+    if command['command']=='quiesce':
+        time.sleep(4.2)
+        db.commit()
+        db.close()
+        wire.sendall((json.dumps({'state':'drained','id':command['id']})+'\n').encode())
+    elif command['command']=='resume':
+        db=sqlite3.connect(sys.argv[1])
+        ready(command['id'])
+    elif command['command']=='retire':
+        break
+"#;
+        let (parent, child_socket) = UnixStream::pair().unwrap();
+        let source = child_socket.as_raw_fd();
+        let mut command = Command::new("python3");
+        command
+            .arg("-c")
+            .arg(script)
+            .arg(&config.db)
+            .stdout(Stdio::null());
+        // SAFETY: duplicate the owned inherited socket with only libc calls.
+        unsafe {
+            command.pre_exec(move || {
+                let copy = libc::fcntl(source, libc::F_DUPFD_CLOEXEC, 128);
+                if copy < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(copy, 3) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(copy);
+                Ok(())
+            });
+        }
+        let mut process = command.spawn().unwrap();
+        drop(child_socket);
+        let pid = process.id();
+        let mut channel = crate::handoff::Channel::new(parent).unwrap();
+        let ready = wait_ready(
+            &mut process,
+            &mut channel,
+            &config,
+            0,
+            Instant::now() + Duration::from_secs(3),
+        )
+        .unwrap();
+        let mut worker = Worker {
+            process,
+            channel,
+            handoff: true,
+            sequence: 0,
+            phase: Phase::Running,
+            addresses: ready.addresses,
+        };
+        let error = quiesce(&mut worker, &snapshot, &config).unwrap_err();
+        assert!(error.to_string().contains("drain timed out"), "{error:#}");
+        assert!(worker.phase == Phase::Running);
+        assert_eq!(worker.id(), pid);
+        assert!(worker.try_wait().unwrap().is_none());
+        assert_eq!(
+            std::fs::read(config.worker_path.as_ref().unwrap()).unwrap(),
+            image
+        );
+        let db = rusqlite::Connection::open(&config.db).unwrap();
+        assert_eq!(
+            db.query_row("select value from invariant", [], |row| row
+                .get::<_, String>(0))
+                .unwrap(),
+            "not lost"
+        );
+        drop(db);
+        drop(worker);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_pending_address_is_attached_once_when_it_can_be_bound() {
@@ -935,6 +1371,7 @@ mod tests {
             addresses: vec![initial],
             requested_addresses: requested.clone(),
             required_ready: Vec::new(),
+            handoff_protocol: 0,
             worker_path: None,
             db: PathBuf::from("unused.db"),
             away_after: 60_000,

@@ -149,6 +149,7 @@ def check_supervised_upgrades(current, previous):
             assert Path(config["worker_path"]) == installed.resolve()
         try:
             wait_for(lambda: info().get("supervised"))
+            current_cooperative = "cooperative-handoff" in info().get("features", [])
             run(previous, "agents", "--as", "skew-a")
             run(previous, "agents", "--as", "skew-b")
             run(previous, "send", "--as", "skew-a", "skew-b", "supervised version-skew message")
@@ -162,8 +163,8 @@ def check_supervised_upgrades(current, previous):
         finally:
             stop_process(process)
 
-    # New workers must refuse the old snapshot-path supervisor before opening
-    # the live DB, so an older upgrade command cannot silently reintroduce #6.
+    # Snapshot-path parents must be refused. A stable-path parent may run the
+    # new worker, but cannot gain a newer handoff guarantee just by doing so.
     with tempfile.TemporaryDirectory(prefix="cam-old-sup-", dir="/tmp") as directory:
         root = Path(directory)
         installed = root / "cross-agent-message"
@@ -182,10 +183,25 @@ def check_supervised_upgrades(current, previous):
         try:
             wait_for(lambda: info().get("supervised"))
             before = info()
-            rejected = subprocess.run([previous, "upgrade", current, "--db", database], env=env, text=True, capture_output=True, timeout=30)
-            assert rejected.returncode != 0 and "serve --replace" in rejected.stderr, rejected.stderr
-            assert info()["version"] == before["version"] and info()["build"] == before["build"]
-            print("PASS: old snapshot supervisor refuses the new worker with cold-migration instructions and rolls back")
+            parent = json.loads(database.with_suffix(".worker.json").read_text())
+            attempted = subprocess.run([previous, "upgrade", current, "--db", database], env=env, text=True, capture_output=True, timeout=30)
+            if not parent.get("worker_path"):
+                assert attempted.returncode != 0 and "serve --replace" in attempted.stderr, attempted.stderr
+                assert info()["version"] == before["version"] and info()["build"] == before["build"]
+                print("PASS: old snapshot supervisor refuses the new worker with cold-migration instructions and rolls back")
+            else:
+                assert attempted.returncode == 0, attempted.stderr
+                expected = json.loads(subprocess.check_output([current, "build-info"], text=True))
+                actual = info()
+                assert (actual["version"], actual["build"]) == (expected["version"], expected["build"])
+                if current_cooperative:
+                    parent_cooperative = parent.get("handoff_protocol", 0) == 1
+                    assert ("cooperative-handoff" in actual.get("features", [])) == parent_cooperative
+                    if not parent_cooperative:
+                        refused = subprocess.run([current, "upgrade", current, "--db", database], env=env, text=True, capture_output=True, timeout=30)
+                        assert refused.returncode != 0 and "serve --replace" in refused.stderr, refused.stderr
+                        assert info()["build"] == actual["build"]
+                print("PASS: previous stable-path supervisor runs current worker without inventing parent capabilities")
         finally:
             stop_process(process)
 

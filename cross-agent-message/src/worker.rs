@@ -5,13 +5,11 @@ use crate::{
     supervisor::Config,
 };
 use anyhow::{Context, Result, bail};
-use std::io::Write;
 use std::os::fd::{FromRawFd, RawFd};
 use std::sync::Arc;
 use std::time::Duration;
 
-#[tokio::main]
-pub async fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Result<()> {
+pub fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Result<()> {
     let count: usize = std::env::var("CROSS_AGENT_LISTEN_COUNT")?.parse()?;
     if count == 0 || count > 64 || count != config.addresses.len() {
         bail!("invalid inherited listener count");
@@ -29,31 +27,112 @@ pub async fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Resu
         }
         let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
         listener.set_nonblocking(true)?;
-        listeners.push(tokio::net::TcpListener::from_std(listener)?);
+        // Keep the inherited descriptors outside the serving runtime. During
+        // quiescence the process still owns them but no task accepts on them.
+        listeners.push(listener);
     }
     if unsafe { libc::fcntl(ready_fd, libc::F_GETFD) } < 0 {
         bail!("readiness descriptor is not open");
     }
     // SAFETY: this unique endpoint is owned solely by this worker after exec.
-    let mut ready = unsafe { std::os::unix::net::UnixStream::from_raw_fd(ready_fd) };
+    let ready = unsafe { std::os::unix::net::UnixStream::from_raw_fd(ready_fd) };
+    let mut ready = crate::handoff::Channel::new(ready)?;
     if config.worker_path.is_none() {
-        writeln!(
-            ready,
-            "refused: this worker requires a stable installed-path supervisor; run the new serve --replace first"
-        )?;
+        ready.write("refused: this worker requires a stable installed-path supervisor; run the new serve --replace first\n", std::time::Instant::now() + Duration::from_secs(1))?;
         bail!(
             "this worker requires a stable installed-path supervisor; run the new serve --replace first"
         );
     }
     // Expensive executable hashing belongs to the paused startup window.
     let _ = crate::updates::binary();
+    let signals = crate::supervisor::ArcSignal::new()?;
+    let mut request = 0;
+    loop {
+        let outcome = serve(&config, dashboard.clone(), &listeners, &mut ready, request)?;
+        let Outcome::Quiesced(id) = outcome else {
+            return Ok(());
+        };
+        // serve's runtime has now been dropped: all Hub/Router clones and
+        // SQLite connections are gone before this acknowledgement is sent.
+        ready.send(
+            &crate::handoff::Reply::Drained { id },
+            std::time::Instant::now() + Duration::from_secs(1),
+        )?;
+        eprintln!(
+            "Worker {} drained and closed SQLite; awaiting resume or retire.",
+            std::process::id()
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if signals.stopped() {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                bail!("parked worker received no resume or retire within 30 seconds");
+            }
+            if let Some(line) = ready.poll()? {
+                match serde_json::from_str::<crate::handoff::Command>(&line)? {
+                    crate::handoff::Command::Resume { id } => {
+                        request = id;
+                        break;
+                    }
+                    crate::handoff::Command::Retire { .. } => return Ok(()),
+                    crate::handoff::Command::Quiesce { id } => {
+                        ready.send(&crate::handoff::Reply::Drained { id }, deadline)?
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+enum Outcome {
+    Stopped,
+    Quiesced(u64),
+}
+
+fn readiness(
+    config: &Config,
+    addresses: Vec<protocol::ListenAddress>,
+    accepted: u64,
+    request: u64,
+) -> crate::addresses::Ready {
+    crate::addresses::Ready {
+        build: hub::BUILD.to_string(),
+        addresses,
+        handoff_protocol: if config.handoff_protocol == crate::handoff::VERSION {
+            crate::handoff::VERSION
+        } else {
+            0
+        },
+        request,
+        accepted: config
+            .addresses
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| accepted & (1u64 << index) != 0)
+            .map(|(_, address)| address.to_string())
+            .collect(),
+    }
+}
+
+#[tokio::main]
+async fn serve(
+    config: &Config,
+    dashboard: crate::dashboard::Dashboard,
+    listeners: &[std::net::TcpListener],
+    ready: &mut crate::handoff::Channel,
+    request: u64,
+) -> Result<Outcome> {
     let mut store = Store::open(&config.db).context("worker cannot open database")?;
     store.resume_holds(hub::now())?;
     store.person_key()?;
     let hub = Arc::new(
         Hub::with_timeouts(store, config.away_after, config.forget_after)?
             .with_reconnect_grace(config.reconnect_grace)
-            .supervised(true),
+            .supervised(true)
+            .cooperative_handoff(config.handoff_protocol == crate::handoff::VERSION),
     );
     let app = hub::router(hub.clone(), dashboard);
     let local_ips = Arc::new(crate::addresses::local_ips());
@@ -79,7 +158,10 @@ pub async fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Resu
     );
     let (shutdown, _) = tokio::sync::watch::channel(false);
     let mut tasks = tokio::task::JoinSet::new();
-    for listener in listeners {
+    let accepted_on = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    for (index, listener) in listeners.iter().enumerate() {
+        let listener = tokio::net::TcpListener::from_std(listener.try_clone()?)?;
+        let accepted_on = accepted_on.clone();
         let app = app.clone();
         let peer_hub = hub.clone();
         let local_ips = local_ips.clone();
@@ -95,6 +177,7 @@ pub async fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Resu
                     _ = connections.join_next(), if !connections.is_empty() => {},
                     accepted = listener.accept() => {
                         let (socket, peer) = accepted?;
+                        accepted_on.fetch_or(1u64 << index, std::sync::atomic::Ordering::SeqCst);
                         let external = crate::addresses::is_remote(peer.ip(), &local_ips);
                         let peer_hub = peer_hub.clone(); let local_address = local_address.clone();
                         let app = app.clone(); let mut shutdown = shutdown.clone();
@@ -136,6 +219,7 @@ pub async fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Resu
             Ok::<(), anyhow::Error>(())
         });
     }
+    crate::runtime::prepare(&config.db)?;
     let control = config.worker_control();
     if control.exists() {
         std::fs::remove_file(&control)?;
@@ -180,16 +264,26 @@ pub async fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Resu
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     // Full requests catch the firewall case where TCP connects but HTTP hangs.
-    let addresses = crate::addresses::initial(&config, &hub).await?;
-    writeln!(
-        ready,
-        "ready {}",
-        serde_json::to_string(&crate::addresses::Ready {
-            build: hub::BUILD.to_string(),
-            addresses
-        })?
+    let addresses = crate::addresses::initial(config, &hub).await?;
+    ready.write(
+        &format!(
+            "ready {}\n",
+            serde_json::to_string(&readiness(
+                config,
+                addresses,
+                accepted_on.load(std::sync::atomic::Ordering::SeqCst),
+                request
+            ))?
+        ),
+        std::time::Instant::now() + Duration::from_secs(1),
     )?;
-    drop(ready);
+    let mut commands = if config.handoff_protocol == crate::handoff::VERSION {
+        Some(crate::handoff::Commands::new(
+            tokio::net::UnixStream::from_std(ready.stream.try_clone()?)?,
+        ))
+    } else {
+        None
+    };
     tasks.spawn(crate::addresses::monitor(
         config.clone(),
         hub.clone(),
@@ -198,15 +292,29 @@ pub async fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Resu
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     let stopped = hub.stopped();
     tokio::pin!(stopped);
-    loop {
+    let outcome = loop {
         tokio::select! {
             _ = heartbeat.tick() => hub.heartbeat().map_err(|e| anyhow::anyhow!("heartbeat failed: {e:?}"))?,
-            _ = term.recv() => break,
-            _ = interrupt.recv() => break,
-            _ = &mut stopped => break,
+            _ = term.recv() => break Outcome::Stopped,
+            _ = interrupt.recv() => break Outcome::Stopped,
+            _ = &mut stopped => break Outcome::Stopped,
+            command = async {
+                match commands.as_mut() {
+                    Some(stream) => stream.receive().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                match command? {
+                    crate::handoff::Command::Quiesce { id } => break Outcome::Quiesced(id),
+                    crate::handoff::Command::Retire { .. } => break Outcome::Stopped,
+                    crate::handoff::Command::Resume { id } => {
+                        ready.write(&format!("ready {}\n", serde_json::to_string(&readiness(config, hub.info().addresses, accepted_on.load(std::sync::atomic::Ordering::SeqCst), id))?), std::time::Instant::now() + Duration::from_secs(1))?;
+                    }
+                }
+            },
             result = tasks.join_next() => { if let Some(result) = result { result??; } bail!("listener stopped unexpectedly"); },
         }
-    }
+    };
     hub.begin_drain()
         .map_err(|e| anyhow::anyhow!("cannot record drain: {e:?}"))?;
     let _ = shutdown.send(true);
@@ -215,5 +323,5 @@ pub async fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Resu
     // drain window before dropping the runtime (the supervisor enforces it too).
 
     let _ = std::fs::remove_file(control);
-    Ok(())
+    Ok(outcome)
 }

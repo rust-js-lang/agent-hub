@@ -37,6 +37,7 @@ pub struct Hub {
     graced: HashSet<String>,
     draining: AtomicU64,
     supervised: bool,
+    cooperative_handoff: bool,
     addresses: Mutex<Vec<protocol::ListenAddress>>,
     events: broadcast::Sender<Event>,
     /// How many `watch`es of each agent are connected.
@@ -126,6 +127,7 @@ impl Hub {
             graced,
             draining: AtomicU64::new(0),
             supervised: false,
+            cooperative_handoff: false,
             addresses: Mutex::new(Vec::new()),
             away_after,
             forget_after,
@@ -145,6 +147,11 @@ impl Hub {
 
     pub fn supervised(mut self, supervised: bool) -> Self {
         self.supervised = supervised;
+        self
+    }
+
+    pub fn cooperative_handoff(mut self, capable: bool) -> Self {
+        self.cooperative_handoff = capable;
         self
     }
 
@@ -197,6 +204,9 @@ impl Hub {
         if self.supervised {
             features.push("live-upgrade");
             features.push("stable-worker-path");
+        }
+        if self.cooperative_handoff {
+            features.push("cooperative-handoff");
         }
         HubInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),

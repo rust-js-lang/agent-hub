@@ -5,10 +5,16 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Ready {
     pub build: String,
     pub addresses: Vec<ListenAddress>,
+    #[serde(default)]
+    pub handoff_protocol: u32,
+    #[serde(default)]
+    pub request: u64,
+    #[serde(default)]
+    pub accepted: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -292,6 +298,7 @@ mod tests {
             addresses: vec![address],
             requested_addresses: vec![address],
             required_ready: Vec::new(),
+            handoff_protocol: 0,
             worker_path: Some(std::env::current_exe().unwrap()),
             db: std::path::PathBuf::from("unused.db"),
             away_after: 60_000,

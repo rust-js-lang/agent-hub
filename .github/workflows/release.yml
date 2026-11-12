@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag (for example v0.1.0)
+        description: Release tag (for example v0.1.2)
         required: true
         type: string
       draft:
@@ -86,9 +86,11 @@ jobs:
 
           Supervised workers keep the installed executable path across upgrades and rollback, preserving the macOS firewall path (#6). Full HTTP checks report each address as ready, pending, or blocked; an upgrade rolls back if a previously-ready address stops answering. Long database paths use short private control sockets. Protocol compatibility, verified client updates (#4), and durable delivery (#3) remain supported.
 
+          Cooperative handoff drains requests and closes SQLite while keeping the outgoing process alive. The replacement must accept on every previously-ready address; success is reported at activation, and the database-free predecessor is retired after a five-second firewall-lookup grace. Upgrades are serialized through that grace. Before activation, a failed candidate is reaped before the same outgoing process resumes; acknowledged writes are never replaced by a backup.
+
           The executable is ad-hoc signed with the fixed identifier `io.rust-js.cross-agent-message` before checksums are calculated.
 
-          Moving an existing unsupervised hub or replacing the old supervisor requires one cold `serve --replace` using the existing database and listen options. Later worker upgrades retain listening sockets. Follow the README's firewall-enabled remote trial before live deployment. This workflow does not restart the live hub.
+          Migration from a v0.1.0/v0.1.1 supervisor requires one announced cold `serve --replace` using the existing database and listen options. A hot transition away from a legacy worker without the handshake may reset or stall a remote request once; zero-failure acceptance starts with the first cooperative outgoing worker, not that legacy transition. Follow the README's concurrent firewall-enabled remote trial before live deployment. This workflow does not restart the live hub.
           NOTES
           draft_args=()
           if [ "$RELEASE_DRAFT" = true ]; then

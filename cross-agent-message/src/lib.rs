@@ -12,6 +12,7 @@ pub mod hub;
 pub mod store;
 
 pub mod addresses;
+mod handoff;
 mod holds;
 pub mod installation;
 mod runtime;

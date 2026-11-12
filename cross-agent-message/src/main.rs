@@ -300,6 +300,7 @@ fn main() -> Result<()> {
                     worker_path: None,
                     requested_addresses: Vec::new(),
                     required_ready: Vec::new(),
+                    handoff_protocol: 0,
                 })
             }
         },
@@ -440,6 +441,7 @@ fn serve(
             worker_path: None,
             requested_addresses: Vec::new(),
             required_ready: Vec::new(),
+            handoff_protocol: 0,
         })
     } else {
         serve_at(addresses, db, away_after, forget_after, reconnect_grace)
@@ -519,6 +521,7 @@ async fn serve_at(
         addresses: addresses.to_vec(),
         requested_addresses: addresses.to_vec(),
         required_ready: Vec::new(),
+        handoff_protocol: 0,
         worker_path: Some(std::fs::canonicalize(std::env::current_exe()?)?),
         db,
         away_after,
