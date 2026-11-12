@@ -24,8 +24,23 @@ export function App() {
   const build = useRef(undefined);
   const activity = useRef(Date.now());
   const [upgraded, setUpgraded] = useState(false);
+  const [addresses, setAddresses] = useState(() => []);
   // The person, where they signed in on this device: they write here.
   const [me, setMe] = useState(Api.me);
+
+  useEffect(() => {
+    async function refresh() {
+      const value = await Api.hub();
+      if (value.TAG === "Ok") {
+        setAddresses(value._0.addresses);
+      }
+    }
+    refresh();
+    const timer = setInterval(refresh, 15000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, []);
 
   // Every event says something changed: fetch the agents and the history
   // again, so the page is the hub's own answer, whatever it missed.
@@ -97,6 +112,26 @@ export function App() {
   const shown = messages.filter(
     (message) => selected == null || message.from === selected || message.to === selected,
   );
+  const condition = addresses.length !== 0;
+  const items = condition
+    ? addresses.map((address) => {
+        const reason = address.state === "Blocked" ? address.reason : undefined;
+        return (
+          <li key={address.address} className={address.state === "Blocked" ? "blocked" : ""}>
+            <code>{address.address}</code> ·{" "}
+            {address.state === "Ready"
+              ? "ready"
+              : address.state === "Pending"
+                ? "pending"
+                : address.state === "Blocked"
+                  ? "blocked"
+                  : "unknown"}
+            {address.remoteSeen && " · seen from another machine"}
+            {reason != null && <span className="listener-reason">{reason}</span>}
+          </li>
+        );
+      })
+    : undefined;
   return (
     <div
       className="page"
@@ -117,6 +152,11 @@ export function App() {
         <h1>Cross-agent messages</h1>
         <span className={live ? "live on" : "live off"}>{live ? "Live" : "Connecting…"}</span>
       </header>
+      {condition && (
+        <ul className="listener-status" aria-label="Hub addresses">
+          {items}
+        </ul>
+      )}
       {upgraded && (
         <p className="upgrade-notice" role="status">
           The hub was upgraded:{" "}

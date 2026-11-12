@@ -3,6 +3,26 @@ import { db } from "../playwright.config";
 import { expect, test } from "@playwright/test";
 import { agent, agentName, cli, hubKey, watch } from "./agents";
 
+test("listen addresses distinguish local readiness, pending interfaces, and blocked HTTP", async ({ page }) => {
+  await page.route("**/api/hub", async route => {
+    const response = await route.fetch();
+    await route.fulfill({ response, json: { ...await response.json(), addresses: [
+      { address: "127.0.0.1:7878", state: "ready", remoteSeen: false },
+      { address: "100.64.0.1:7878", state: "ready", remoteSeen: true },
+      { address: "100.64.0.2:7878", state: "pending", remoteSeen: false },
+      { address: "100.64.0.3:7878", state: "blocked", remoteSeen: false, reason: "The firewall may be blocking this installed executable." },
+    ] } });
+  });
+  await open(page);
+  const addresses = page.getByRole("list", { name: "Hub addresses" });
+  await expect(addresses.getByRole("listitem")).toHaveCount(4);
+  await expect(addresses.getByRole("listitem").filter({ hasText: "127.0.0.1:7878" })).not.toContainText("seen from another machine");
+  await expect(addresses.getByRole("listitem").filter({ hasText: "100.64.0.1:7878" })).toContainText("seen from another machine");
+  await expect(addresses.getByRole("listitem").filter({ hasText: "100.64.0.2:7878" })).toContainText("pending");
+  await expect(addresses.getByRole("listitem").filter({ hasText: "100.64.0.3:7878" })).toContainText("blocked");
+  await expect(addresses).toContainText("The firewall may be blocking this installed executable.");
+});
+
 /** The dashboard, connected to the hub's live events. */
 async function open(page: import("@playwright/test").Page) {
   await page.goto("/");

@@ -306,3 +306,6 @@ h2 {
 .away-agents > summary { cursor: pointer; color: var(--muted); padding: 0.6rem 0; }
 .away-agents .agent-row { margin-bottom: 0.35rem; }
 .retire { justify-self: end; font: inherit; font-size: 0.8rem; color: var(--muted); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 0.25rem 0.5rem; cursor: pointer; }
+.listener-status { display: flex; flex-wrap: wrap; gap: .4rem 1.25rem; margin: .5rem 0 1rem; padding: 0; list-style: none; font-size: .8rem; }
+.listener-status .blocked { color: #a33b32; }
+.listener-reason { display: block; max-width: 70ch; overflow-wrap: anywhere; }

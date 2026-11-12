@@ -37,6 +37,7 @@ pub struct Hub {
     graced: HashSet<String>,
     draining: AtomicU64,
     supervised: bool,
+    addresses: Mutex<Vec<protocol::ListenAddress>>,
     events: broadcast::Sender<Event>,
     /// How many `watch`es of each agent are connected.
     watchers: Mutex<HashMap<String, usize>>,
@@ -125,6 +126,7 @@ impl Hub {
             graced,
             draining: AtomicU64::new(0),
             supervised: false,
+            addresses: Mutex::new(Vec::new()),
             away_after,
             forget_after,
             reconnect_grace: 30_000,
@@ -146,6 +148,39 @@ impl Hub {
         self
     }
 
+    pub fn set_addresses(&self, mut addresses: Vec<protocol::ListenAddress>) {
+        let mut previous = self
+            .addresses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for address in &mut addresses {
+            address.remote_seen |= previous
+                .iter()
+                .any(|old| old.address == address.address && old.remote_seen);
+        }
+        *previous = addresses;
+    }
+
+    pub fn note_remote(&self, address: &str) {
+        let mut addresses = self
+            .addresses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(listener) = addresses
+            .iter_mut()
+            .find(|listener| listener.address == address)
+        {
+            listener.remote_seen = true;
+        } else {
+            addresses.push(protocol::ListenAddress {
+                address: address.to_string(),
+                state: protocol::AddressState::Unknown,
+                reason: Some("checking reachability".to_string()),
+                remote_seen: true,
+            });
+        }
+    }
+
     /// What's running.
     pub fn info(&self) -> HubInfo {
         let mut features = vec![
@@ -157,9 +192,11 @@ impl Hub {
             "read-ack",
             "bounded-skip",
             "notice-id",
+            "listen-status",
         ];
         if self.supervised {
             features.push("live-upgrade");
+            features.push("stable-worker-path");
         }
         HubInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -169,6 +206,11 @@ impl Hub {
             forget_after: self.forget_after,
             features: features.into_iter().map(str::to_string).collect(),
             supervised: self.supervised,
+            addresses: self
+                .addresses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
             protocol: protocol::PROTOCOL,
             target: env!("CROSS_AGENT_TARGET").to_string(),
             binary_sha256: crate::updates::binary()
@@ -1110,6 +1152,19 @@ impl Stream for AgentEvents {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_observation_survives_later_local_readiness_probes() {
+        let hub = Hub::new(Store::in_memory().unwrap()).unwrap();
+        hub.note_remote("100.64.1.1:7878");
+        hub.set_addresses(vec![protocol::ListenAddress {
+            address: "100.64.1.1:7878".to_string(),
+            state: protocol::AddressState::Ready,
+            reason: None,
+            remote_seen: false,
+        }]);
+        assert!(hub.info().addresses[0].remote_seen);
+    }
 
     fn take(name: &str, holder: &str, minutes: u32) -> Take {
         Take {

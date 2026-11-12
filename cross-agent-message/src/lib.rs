@@ -11,7 +11,10 @@ pub mod dashboard;
 pub mod hub;
 pub mod store;
 
+pub mod addresses;
 mod holds;
+pub mod installation;
+mod runtime;
 
 pub mod updates;
 

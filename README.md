@@ -130,7 +130,11 @@ the commands below without `./`.
 
 Releases are built by the manual **Release macOS Apple Silicon** workflow.
 It tests the release build and the extracted archive, including the embedded
-dashboard, before publishing the tag, executable archive and checksums.
+dashboard, then signs with the fixed ad-hoc identifier
+`io.rust-js.cross-agent-message` before calculating checksums. Releases default
+to drafts while deployment acceptance is pending. The official archive contains
+only the executable; the same-identifier variant used for upgrade trials is
+an operator fixture, not another release asset.
 
 ## Build it from source
 
@@ -554,11 +558,50 @@ cross-agent-message upgrade ./cross-agent-message-aarch64-apple-darwin.tar.gz --
 The candidate is checked on a SQLite backup while the old worker keeps serving.
 The supervisor drains the old worker, then starts the candidate with inherited
 listeners. Live migrations run in one transaction after the old worker exits.
-Readiness requires an HTTP request through the inherited listener that reads the
-real database. A failed start restores the previous binary on the **same live
+Readiness requires complete HTTP requests through the inherited listeners that
+read the real database. A failed start restores the previous binary on the **same live
 database**; backups are never restored over acknowledged writes. Binary and
-embedded dashboard activate together. Managed binaries live beside the database
-under `releases/`; an atomic active/previous pointer survives supervisor restarts.
+embedded dashboard activate together, by atomic rename into the canonical
+installed executable path. Workers always run from that path, which keeps the
+macOS firewall's executable rule applicable. Immutable copies under `releases/`
+beside the database are recovery data; an atomic active/previous pointer survives
+supervisor restarts. A changed executable installed outside `upgrade` is checked
+on a database copy before the next worker starts. An unwritable installation
+directory fails preflight before the serving worker drains.
+
+One supervised hub owns each installed executable. Install a separate copy for
+a second supervised hub, with its own database and port. Agent commands can
+still use that executable to contact any hub. `--no-supervisor` trials do not
+take the installation lock.
+
+The API, `agents`, and dashboard distinguish each configured address:
+
+- **Ready:** a full HTTP request against the live database answered.
+- **Pending:** the interface is not available yet, for example Tailscale at login.
+  The supervisor retries and attaches it when it appears.
+- **Blocked:** the listener is bound but HTTP does not answer. Loopback stays up;
+  a probe every minute detects when it becomes reachable without restarting.
+
+An upgrade protects every address that was ready before the swap. If one stops
+answering, it rolls back. An address already pending or blocked does not prevent
+an upgrade, and the success line names only addresses that answered. "Seen from
+another machine" is shown only after an actual remote request; a self-probe
+does not establish that.
+
+With the macOS firewall enabled, allow the installed executable once in
+**System Settings → Network → Firewall**. Before a live deployment, trial the
+candidate from that same installed path on a spare port, using a SQLite backup
+of the live database. Request its private address from another machine, and
+repeat that remote check after a same-path worker upgrade. A loopback check
+does not replace this acceptance step.
+
+Control sockets use an owned mode-0700 directory under
+`~/.cross-agent-message/run/`, keyed by the database's canonical path. If that
+would exceed macOS's Unix socket path limit, a short private directory under
+`/tmp` is used and missing sockets are rebound automatically. Long database
+paths therefore do not prevent startup. Configuration and recovery pointers
+remain durable beside the database. Short legacy socket aliases keep the
+previous release's local upgrade command working.
 
 The handoff budget is 4 s to drain, 3 s for candidate readiness, up to 0.5 s to
 reap a failed candidate, and 2.5 s for rollback readiness. Normal requests must
@@ -595,7 +638,8 @@ cross-agent-message service remove
 ```
 
 Stop an existing manual hub before installing the service on the same port.
-The service runs at login and restarts the supervisor if it exits. It serves
+The service uses the canonical installed executable; install it at a permanent,
+writable path before installing the service. It runs at login and restarts the supervisor if it exits. It serves
 loopback immediately and retries private addresses that become available later,
 including Tailscale after login. Logs are kept beside the database. It starts
 when you log in; it does not serve while the machine is off or asleep. Preserve
@@ -717,7 +761,7 @@ is configured.
 ## Work on it
 
 ```bash
-cargo test                      # the hub, the store and the protocol
+cargo test --release            # the hub, store, protocol and real upgrade timing
 cargo run -p cross-agent-message -- serve
 bun run dev                     # the dashboard with Vite, at http://localhost:5173
 node rust-js/tooling/cli.js build --package dashboard   # after you edit dashboard/

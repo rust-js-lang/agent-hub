@@ -276,6 +276,29 @@ pub struct HubInfo {
     pub binary_sha256: Option<String>,
     #[serde(default)]
     pub supervised: bool,
+    #[serde(default)]
+    pub addresses: Vec<ListenAddress>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AddressState {
+    Ready,
+    Pending,
+    Blocked,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListenAddress {
+    pub address: String,
+    pub state: AddressState,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub remote_seen: bool,
 }
 
 pub fn default_protocol() -> u32 {
@@ -519,6 +542,21 @@ mod tests {
             serde_json::from_str(r#"{"reason":"old reason","future":true}"#).unwrap();
         assert!(refusal.code.is_none());
     }
+    #[test]
+    fn legacy_hubs_have_unknown_addresses_and_future_address_states_are_safe() {
+        let old: HubInfo =
+            serde_json::from_value(serde_json::json!({"version":"old","build":"old","started":1}))
+                .unwrap();
+        assert!(old.addresses.is_empty());
+        let status: ListenAddress = serde_json::from_value(
+            serde_json::json!({"address":"100.64.1.1:7878","state":"a-future-state","extra":true}),
+        )
+        .unwrap();
+        assert_eq!(status.state, AddressState::Unknown);
+        assert!(!status.remote_seen);
+        assert!(status.reason.is_none());
+    }
+
     #[test]
     fn protocol_objects_accept_additive_unknown_fields() {
         fn accepts<T: serde::de::DeserializeOwned>(mut value: serde_json::Value) {

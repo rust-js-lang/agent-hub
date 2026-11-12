@@ -272,6 +272,16 @@ export interface HubInfo {
     target: string;
     binarySha256?: string | undefined;
     supervised: boolean;
+    addresses: ListenAddress[];
+}
+
+export type AddressState = "Ready" | "Pending" | "Blocked" | "Unknown";
+
+export interface ListenAddress {
+    address: string;
+    state: AddressState;
+    reason?: string | undefined;
+    remoteSeen: boolean;
 }
 
 export function defaultProtocol(): number;

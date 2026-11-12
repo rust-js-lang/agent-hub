@@ -58,7 +58,7 @@ pub fn install(config: &crate::supervisor::Config) -> Result<()> {
     let directory = home.join("Library/LaunchAgents");
     std::fs::create_dir_all(&directory)?;
     std::fs::create_dir_all(config.db.parent().context("database directory")?)?;
-    let executable = crate::supervisor::snapshot(&std::env::current_exe()?, &config)?;
+    let executable = std::fs::canonicalize(std::env::current_exe()?)?;
     let file = directory.join("org.rust-js.cross-agent-message.plist");
     std::fs::write(&file, plist(&executable, &config))?;
     // SAFETY: getuid has no preconditions and reads the calling user's ID.
@@ -109,6 +109,9 @@ mod tests {
             forget_after: 86_400_000,
             reconnect_grace: 30_000,
             activate_current: false,
+            worker_path: None,
+            requested_addresses: Vec::new(),
+            required_ready: Vec::new(),
         };
         let text = super::plist(
             std::path::Path::new("/tmp/bin & stuff/cross-agent-message"),

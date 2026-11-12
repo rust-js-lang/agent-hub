@@ -661,6 +661,13 @@ export function hubInfoSerialize_serialize(hubInfo, json) {
   }
   json.key("supervised");
   json.bool(hubInfo.supervised);
+  json.key("addresses");
+  json.beginArray();
+  for (const item of hubInfo.addresses) {
+    json.element();
+    listenAddressSerialize_serialize(item, json);
+  }
+  json.endArray();
   json.endObject();
 }
 
@@ -678,6 +685,7 @@ export function hubInfoDeserialize_deserialize(json) {
       ["target", $json.string, () => ""],
       ["binary_sha256", $json.option($json.string), () => undefined],
       ["supervised", $json.bool, () => false],
+      ["addresses", $json.vec(listenAddressDeserialize_deserialize), () => []],
     ],
     ([
       version,
@@ -690,6 +698,7 @@ export function hubInfoDeserialize_deserialize(json) {
       target,
       binarySha256,
       supervised,
+      addresses,
     ]) => ({
       version,
       build,
@@ -701,7 +710,74 @@ export function hubInfoDeserialize_deserialize(json) {
       target,
       binarySha256,
       supervised,
+      addresses,
     }),
+  );
+}
+
+export function addressStateSerialize_serialize(addressState, json) {
+  if (addressState === "Ready") {
+    json.variant("ready");
+  } else if (addressState === "Pending") {
+    json.variant("pending");
+  } else if (addressState === "Blocked") {
+    json.variant("blocked");
+  } else {
+    json.variant("unknown");
+  }
+}
+
+export function addressStateDeserialize_deserialize(json) {
+  return json.enum(
+    "AddressState",
+    ["ready", "pending", "blocked", "unknown"],
+    (variant, content) => {
+      if (variant === "ready") {
+        content.unit();
+        return "Ready";
+      }
+      if (variant === "pending") {
+        content.unit();
+        return "Pending";
+      }
+      if (variant === "blocked") {
+        content.unit();
+        return "Blocked";
+      }
+      content.unit();
+      return "Unknown";
+    },
+    "unknown",
+  );
+}
+
+export function listenAddressSerialize_serialize(listenAddress, json) {
+  json.beginObject();
+  json.key("address");
+  json.string(listenAddress.address);
+  json.key("state");
+  addressStateSerialize_serialize(listenAddress.state, json);
+  json.key("reason");
+  if (listenAddress.reason == null) {
+    json.null();
+  } else {
+    json.string(listenAddress.reason);
+  }
+  json.key("remoteSeen");
+  json.bool(listenAddress.remoteSeen);
+  json.endObject();
+}
+
+export function listenAddressDeserialize_deserialize(json) {
+  return json.struct(
+    "struct ListenAddress",
+    [
+      ["address", $json.string],
+      ["state", addressStateDeserialize_deserialize],
+      ["reason", $json.option($json.string), () => undefined],
+      ["remoteSeen", $json.bool, () => false],
+    ],
+    ([address, state, reason, remoteSeen]) => ({ address, state, reason, remoteSeen }),
   );
 }
 

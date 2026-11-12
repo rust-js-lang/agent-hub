@@ -66,6 +66,9 @@ fn check_process(binary: &Path, db: &Path) -> Result<()> {
 }
 
 pub fn preflight(binary: &Path, config: &Config) -> Result<()> {
+    if let Some(executable) = &config.worker_path {
+        crate::installation::check_writable(executable)?;
+    }
     crate::updates::inspect(binary)?;
     let backup = config.db.with_extension(format!(
         "before-{}.db",
@@ -146,6 +149,11 @@ struct Probes {
 
 pub fn run(path: &Path, db: &Path, checksum: Option<&str>) -> Result<()> {
     let config = supervisor::load_config(db)?;
+    if config.worker_path.is_none() {
+        bail!(
+            "this supervisor uses snapshot executable paths; restart it with the new serve --replace before upgrading"
+        );
+    }
     let address = config
         .addresses
         .iter()
@@ -197,7 +205,13 @@ pub fn run(path: &Path, db: &Path, checksum: Option<&str>) -> Result<()> {
     let stats = probes
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let message = format!(
+    let ready_addresses: Vec<&str> = result
+        .addresses
+        .iter()
+        .filter(|address| address.state == protocol::AddressState::Ready)
+        .map(|address| address.address.as_str())
+        .collect();
+    let mut message = format!(
         "The hub moved from build {} to {}: {} probe connections, {} failed, longest wait {} ms{}.",
         result.previous,
         result.build,
@@ -210,7 +224,21 @@ pub fn run(path: &Path, db: &Path, checksum: Option<&str>) -> Result<()> {
             ""
         }
     );
+    if !ready_addresses.is_empty() {
+        message.push_str(&format!(" Reachable at {}.", ready_addresses.join(", ")));
+    }
     println!("{message}");
+    for address in result
+        .addresses
+        .iter()
+        .filter(|address| address.state != protocol::AddressState::Ready)
+    {
+        eprintln!(
+            "{}: {}",
+            address.address,
+            address.reason.as_deref().unwrap_or("not ready")
+        );
+    }
     // The result is sent to the live worker using the private control socket;
     // clients cannot impersonate the reserved hub sender.
     if let Err(error) = announce(&config, &message) {
@@ -229,7 +257,9 @@ pub fn run(path: &Path, db: &Path, checksum: Option<&str>) -> Result<()> {
 
 pub fn announce(config: &Config, message: &str) -> Result<()> {
     let mut socket =
-        std::os::unix::net::UnixStream::connect(config.db.with_extension("worker.sock"))?;
+        std::os::unix::net::UnixStream::connect(config.worker_control()).or_else(|_| {
+            std::os::unix::net::UnixStream::connect(config.db.with_extension("worker.sock"))
+        })?;
     socket.set_read_timeout(Some(Duration::from_secs(5)))?;
     writeln!(socket, "{}", serde_json::json!({"announce":message}))?;
     let mut text = String::new();

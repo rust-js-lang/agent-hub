@@ -297,6 +297,9 @@ fn main() -> Result<()> {
                     forget_after: protocol::default_forget_after(),
                     reconnect_grace: 30_000,
                     activate_current: false,
+                    worker_path: None,
+                    requested_addresses: Vec::new(),
+                    required_ready: Vec::new(),
                 })
             }
         },
@@ -434,6 +437,9 @@ fn serve(
             forget_after,
             reconnect_grace,
             activate_current: replace,
+            worker_path: None,
+            requested_addresses: Vec::new(),
+            required_ready: Vec::new(),
         })
     } else {
         serve_at(addresses, db, away_after, forget_after, reconnect_grace)
@@ -475,18 +481,65 @@ async fn serve_at(
         Hub::with_timeouts(store, away_after, forget_after)?.with_reconnect_grace(reconnect_grace),
     );
     let stopped = hub.stopped();
-    let app = hub::router(hub, dashboard);
+    let app = hub::router(hub.clone(), dashboard);
     let mut served = tokio::task::JoinSet::new();
+    let local_ips = Arc::new(cross_agent_message::addresses::local_ips());
     for listener in listeners {
         let app = app.clone();
+        let peer_hub = hub.clone();
+        let local_ips = local_ips.clone();
+        let address = listener.local_addr()?.to_string();
+        let app = app.layer(axum::middleware::from_fn(
+            move |axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
+                  request: axum::extract::Request,
+                  next: axum::middleware::Next| {
+                let peer_hub = peer_hub.clone();
+                let local_ips = local_ips.clone();
+                let address = address.clone();
+                async move {
+                    if cross_agent_message::addresses::is_remote(peer.ip(), &local_ips) {
+                        peer_hub.note_remote(&address);
+                    }
+                    next.run(request).await
+                }
+            },
+        ));
         served.spawn(async move {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = tokio::signal::ctrl_c().await;
-                })
-                .await
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async {
+                let _ = tokio::signal::ctrl_c().await;
+            })
+            .await
         });
     }
+    let config = cross_agent_message::supervisor::Config {
+        addresses: addresses.to_vec(),
+        requested_addresses: addresses.to_vec(),
+        required_ready: Vec::new(),
+        worker_path: Some(std::fs::canonicalize(std::env::current_exe()?)?),
+        db,
+        away_after,
+        forget_after,
+        reconnect_grace,
+        activate_current: false,
+    };
+    let observed = cross_agent_message::addresses::initial(&config, &hub).await?;
+    let local = addresses[0].to_string();
+    if !observed
+        .iter()
+        .any(|address| address.address == local && address.state == protocol::AddressState::Ready)
+    {
+        bail!("the loopback address {local} did not pass HTTP readiness");
+    }
+    let (address_shutdown, address_stopped) = tokio::sync::watch::channel(false);
+    served.spawn(async move {
+        cross_agent_message::addresses::monitor(config, hub, address_stopped)
+            .await
+            .map_err(std::io::Error::other)
+    });
     tokio::select! {
         // One address's serving ended, by Ctrl-C or an error: the hub's.
         Some(ended) = served.join_next() => ended.context("the hub's serving failed")??,
@@ -494,6 +547,7 @@ async fn serve_at(
         // hub that takes its place.
         () = stopped => println!("Stopped, for another hub to take its place."),
     }
+    let _ = address_shutdown.send(true);
     Ok(())
 }
 
@@ -531,6 +585,30 @@ fn register(client: &Client, me: &Me) -> Result<Agent> {
 fn agents(client: &Client, me: &Me) -> Result<()> {
     let you = register(client, me)?;
     println!("You are {} on {}.", you.name, you.machine);
+    if let Ok(info) = client.info() {
+        for address in info.addresses {
+            let state = match address.state {
+                protocol::AddressState::Ready => "ready",
+                protocol::AddressState::Pending => "pending",
+                protocol::AddressState::Blocked => "blocked",
+                protocol::AddressState::Unknown => "unknown",
+            };
+            println!(
+                "Hub {}: {state}{}",
+                address.address,
+                if address.remote_seen {
+                    " · seen from another machine"
+                } else {
+                    ""
+                }
+            );
+            if address.state == protocol::AddressState::Blocked
+                && let Some(reason) = address.reason
+            {
+                eprintln!("{reason}");
+            }
+        }
+    }
     let now = hub::now();
     let others: Vec<Agent> = client
         .agents()?

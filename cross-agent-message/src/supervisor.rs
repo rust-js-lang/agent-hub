@@ -22,10 +22,19 @@ pub struct Config {
     pub reconnect_grace: u64,
     #[serde(default)]
     pub activate_current: bool,
+    #[serde(default)]
+    pub worker_path: Option<PathBuf>,
+    #[serde(default)]
+    pub requested_addresses: Vec<SocketAddr>,
+    #[serde(default)]
+    pub required_ready: Vec<String>,
 }
 impl Config {
     pub fn control(&self) -> PathBuf {
-        self.db.with_extension("sock")
+        crate::runtime::socket(&self.db, "hub.sock")
+    }
+    pub fn worker_control(&self) -> PathBuf {
+        crate::runtime::socket(&self.db, "worker.sock")
     }
     pub fn config_path(&self) -> PathBuf {
         self.db.with_extension("worker.json")
@@ -46,6 +55,8 @@ pub struct Swapped {
     pub previous: String,
     pub rolled_back: bool,
     pub reason: Option<String>,
+    #[serde(default)]
+    pub addresses: Vec<protocol::ListenAddress>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Active {
@@ -53,21 +64,135 @@ struct Active {
     previous: Option<PathBuf>,
 }
 
-fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
-    let temporary = path.with_extension("json.tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temporary)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(&serde_json::to_vec(value)?)?;
-    file.sync_all()?;
-    std::fs::rename(temporary, path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
+fn valid_snapshot(path: &Path, config: &Config) -> bool {
+    let Some(directory) = path.parent() else {
+        return false;
+    };
+    let Some(hash) = directory.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(parent) = config.db.parent() else {
+        return false;
+    };
+    if path
+        .file_name()
+        .is_none_or(|name| name != "cross-agent-message")
+        || directory.parent() != Some(parent.join("releases").as_path())
+        || hash.len() != 64
+        || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return false;
     }
-    Ok(())
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+        && std::fs::read(path).is_ok_and(|bytes| crate::updates::sha256(&bytes) == hash)
+        && crate::updates::inspect(path).is_ok()
+}
+
+struct Worker {
+    process: Child,
+    addresses: Vec<protocol::ListenAddress>,
+}
+impl std::ops::Deref for Worker {
+    type Target = Child;
+    fn deref(&self) -> &Child {
+        &self.process
+    }
+}
+impl std::ops::DerefMut for Worker {
+    fn deref_mut(&mut self) -> &mut Child {
+        &mut self.process
+    }
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        // A recoverable supervisor error must not strand a database writer.
+        if self.process.try_wait().is_ok_and(|status| status.is_none()) {
+            let _ = self.process.kill();
+            let _ = self.process.wait();
+        }
+    }
+}
+
+fn start_or_restore(
+    active: &mut Active,
+    config: &mut Config,
+    listeners: &[TcpListener],
+) -> Result<Worker> {
+    match start(&active.current, config, listeners, Duration::from_secs(3)) {
+        Ok(worker) => Ok(worker),
+        Err(error) => {
+            let previous = active.previous.take().with_context(|| {
+                format!("worker startup failed and no previous image is available: {error:#}")
+            })?;
+            eprintln!("Worker startup failed; restoring the previous installed image: {error:#}");
+            active.current = previous;
+            atomic_json(&config.active_path(), active)?;
+            start(
+                &active.current,
+                config,
+                listeners,
+                Duration::from_millis(2500),
+            )
+            .context("previous worker did not recover")
+        }
+    }
+}
+
+/// An installer may replace the executable while the old worker keeps serving.
+/// A later restart must validate that replacement as an upgrade, not adopt it
+/// silently. Failed preflight leaves the recorded image to be restored by start.
+fn reconcile_installation(active: &mut Active, config: &Config) -> Result<bool> {
+    let executable = config
+        .worker_path
+        .as_deref()
+        .context("stable worker path missing")?;
+    let Ok(current) = std::fs::read(executable) else {
+        return Ok(false);
+    };
+    let expected = crate::updates::sha256(&std::fs::read(&active.current)?);
+    if crate::updates::sha256(&current) == expected {
+        return Ok(false);
+    }
+    eprintln!(
+        "The installed executable changed outside upgrade; running preflight before restarting it."
+    );
+    let candidate = snapshot(executable, config)?;
+    if let Err(error) = crate::upgrade::preflight(&candidate, config) {
+        eprintln!("External replacement failed preflight; restoring the recorded image: {error:#}");
+        return Ok(false);
+    }
+    let next = Active {
+        current: candidate,
+        previous: Some(active.current.clone()),
+    };
+    atomic_json(&config.active_path(), &next)?;
+    *active = next;
+    Ok(true)
+}
+
+pub(crate) fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let parent = path
+        .parent()
+        .context("state file has no parent directory")?;
+    let temporary = crate::installation::temporary(parent, "state");
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(&serde_json::to_vec(value)?)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)?;
+        std::fs::File::open(parent)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
 }
 
 pub fn snapshot(binary: &Path, config: &Config) -> Result<PathBuf> {
@@ -82,7 +207,7 @@ pub fn snapshot(binary: &Path, config: &Config) -> Result<PathBuf> {
     std::fs::create_dir_all(&directory)?;
     let destination = directory.join("cross-agent-message");
     if !destination.exists() {
-        let temp = directory.join("binary.tmp");
+        let temp = crate::installation::temporary(&directory, "snapshot");
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -90,7 +215,12 @@ pub fn snapshot(binary: &Path, config: &Config) -> Result<PathBuf> {
         file.set_permissions(std::fs::Permissions::from_mode(0o755))?;
         file.write_all(&bytes)?;
         file.sync_all()?;
+        drop(file);
         std::fs::rename(&temp, &destination)?;
+        std::fs::File::open(&directory)?.sync_all()?;
+        if let Some(parent) = directory.parent() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
     }
     if crate::updates::sha256(&std::fs::read(&destination)?) != crate::updates::sha256(&bytes) {
         bail!("managed binary checksum mismatch");
@@ -170,17 +300,28 @@ fn terminate(child: &mut Child, grace: Duration) -> Result<()> {
 
 fn start(
     binary: &Path,
-    config: &Config,
+    config: &mut Config,
     listeners: &[TcpListener],
     limit: Duration,
-) -> Result<Child> {
+) -> Result<Worker> {
+    let deadline = Instant::now() + limit;
     let bytes = serde_json::to_vec(config)?;
     if std::fs::read(config.config_path()).ok().as_deref() != Some(bytes.as_slice()) {
         atomic_json(&config.config_path(), config)?;
     }
-    let (mut worker, mut ready) = child(binary, config, listeners)?;
-    let result = (|| -> Result<()> {
-        let deadline = Instant::now() + limit;
+    let executable = config
+        .worker_path
+        .clone()
+        .context("stable worker path is missing; restart with the new serve --replace")?;
+    let checksum = binary
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .context("worker image is not a managed recovery snapshot")?;
+    crate::installation::activate_verified(binary, &executable, checksum)?;
+    crate::runtime::prepare_worker(&config.db)?;
+    let (mut worker, mut ready) = child(&executable, config, listeners)?;
+    let result = (|| -> Result<Vec<protocol::ListenAddress>> {
         let mut data = Vec::new();
         loop {
             let mut buffer = [0; 1024];
@@ -193,12 +334,51 @@ fn start(
                     data.extend_from_slice(&buffer[..n]);
                     if data.ends_with(b"\n") {
                         let text = std::str::from_utf8(&data)?;
-                        if text.starts_with("ready ") {
-                            return Ok(());
+                        if let Some(payload) = text.strip_prefix("ready ") {
+                            let observed = if let Ok(ready) =
+                                serde_json::from_str::<crate::addresses::Ready>(payload.trim())
+                            {
+                                ready.addresses
+                            } else {
+                                // A previous release reports only its build. Verify
+                                // every address ourselves before accepting it.
+                                let remaining = deadline.saturating_duration_since(Instant::now());
+                                if remaining.is_zero() {
+                                    bail!("worker readiness timed out");
+                                }
+                                crate::addresses::probe_for(
+                                    config,
+                                    payload.trim(),
+                                    remaining.min(Duration::from_secs(1)),
+                                )
+                            };
+                            for address in config
+                                .addresses
+                                .first()
+                                .map(ToString::to_string)
+                                .into_iter()
+                                .chain(config.required_ready.iter().cloned())
+                            {
+                                if !observed.iter().any(|status| {
+                                    status.address == address
+                                        && status.state == protocol::AddressState::Ready
+                                }) {
+                                    let reason = observed
+                                        .iter()
+                                        .find(|status| status.address == address)
+                                        .and_then(|status| status.reason.as_deref())
+                                        .unwrap_or("address is not ready");
+                                    bail!("required address {address} is not ready: {reason}");
+                                }
+                            }
+                            if Instant::now() > deadline {
+                                bail!("worker readiness timed out");
+                            }
+                            return Ok(observed);
                         }
                         bail!("worker readiness refused: {text}");
                     }
-                    if data.len() > 1024 {
+                    if data.len() > 1024 * 1024 {
                         bail!("invalid readiness response");
                     }
                 }
@@ -214,12 +394,24 @@ fn start(
             std::thread::sleep(Duration::from_millis(10));
         }
     })();
-    if let Err(error) = result {
-        // Every failure path, including malformed readiness, reaps the candidate
-        // before a rollback is allowed to open the live database.
-        terminate(&mut worker, Duration::ZERO)?;
-        return Err(error);
-    }
+    let addresses = match result {
+        Ok(addresses) => addresses,
+        Err(error) => {
+            // Every failure path reaps the candidate before rollback opens SQLite.
+            terminate(&mut worker, Duration::ZERO)?;
+            return Err(error);
+        }
+    };
+    let worker = Worker {
+        process: worker,
+        addresses,
+    };
+    config.required_ready = crate::addresses::ready(&worker.addresses);
+    eprintln!(
+        "Worker {} is ready at {}.",
+        worker.id(),
+        executable.display()
+    );
     Ok(worker)
 }
 
@@ -235,7 +427,10 @@ pub fn request(config: &Config, swap: &Swap) -> Result<Swapped> {
 }
 
 pub fn stop(db: &Path) -> Result<()> {
-    let mut socket = UnixStream::connect(db.with_extension("sock"))?;
+    let config = load_config(db)?;
+    // Cold replacement must also stop a supervisor from before short IPC paths.
+    let mut socket = UnixStream::connect(config.control())
+        .or_else(|_| UnixStream::connect(db.with_extension("sock")))?;
     socket.set_read_timeout(Some(Duration::from_secs(6)))?;
     socket.write_all(b"{\"stop\":true}\n")?;
     let mut line = String::new();
@@ -247,8 +442,31 @@ pub fn stop(db: &Path) -> Result<()> {
 }
 
 pub fn load_config(db: &Path) -> Result<Config> {
-    serde_json::from_slice(&std::fs::read(db.with_extension("worker.json"))?)
-        .context("invalid worker configuration")
+    let canonical = canonical_db(db)?;
+    let bytes = std::fs::read(canonical.with_extension("worker.json"))
+        .or_else(|_| std::fs::read(db.with_extension("worker.json")))?;
+    serde_json::from_slice(&bytes).context("invalid worker configuration")
+}
+
+fn canonical_db(db: &Path) -> Result<PathBuf> {
+    if db.exists() {
+        return Ok(std::fs::canonicalize(db)?);
+    }
+    if std::fs::symlink_metadata(db).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        bail!(
+            "database path {} is a dangling or invalid symlink",
+            db.display()
+        );
+    }
+    let absolute = if db.is_absolute() {
+        db.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(db)
+    };
+    Ok(
+        std::fs::canonicalize(absolute.parent().context("database parent")?)?
+            .join(absolute.file_name().context("database name")?),
+    )
 }
 
 pub fn bind_listener(address: SocketAddr) -> Result<TcpListener> {
@@ -264,14 +482,57 @@ pub fn bind_listener(address: SocketAddr) -> Result<TcpListener> {
     Ok(socket.into())
 }
 
+fn attach_pending(
+    config: &mut Config,
+    listeners: &mut Vec<TcpListener>,
+    requested: &[SocketAddr],
+    mut bind: impl FnMut(SocketAddr) -> Result<TcpListener>,
+) -> Result<bool> {
+    let mut changed = false;
+    for address in requested {
+        if config.addresses.contains(address) {
+            continue;
+        }
+        if let Ok(listener) = bind(*address) {
+            listener.set_nonblocking(true)?;
+            listeners.push(listener);
+            config.addresses.push(*address);
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
 pub fn run(mut config: Config) -> Result<()> {
+    if config.addresses.is_empty()
+        || config.addresses.len() > 64
+        || !config.addresses[0].ip().is_loopback()
+    {
+        bail!("configure a loopback address first and at most 64 listening addresses");
+    }
+    let original_db = config.db.clone();
     if !config.db.is_absolute() {
         config.db = std::env::current_dir()?.join(&config.db);
     }
     std::fs::create_dir_all(config.db.parent().context("database has no parent")?)?;
-    config.db = std::fs::canonicalize(config.db.parent().context("database parent")?)?
-        .join(config.db.file_name().context("database name")?);
+    config.db = canonical_db(&config.db)?;
+    let installation =
+        crate::installation::Installation::acquire(&std::env::current_exe()?, &config.db)?;
+    let prior_config = load_config(&config.db).ok();
+    let same_installation = prior_config
+        .as_ref()
+        .and_then(|prior| prior.worker_path.as_ref())
+        == Some(&installation.executable);
+    config.worker_path = Some(installation.executable.clone());
+    crate::runtime::prepare(&config.db)?;
     let control = config.control();
+    if UnixStream::connect(config.db.with_extension("sock")).is_ok()
+        || UnixStream::connect(original_db.with_extension("sock")).is_ok()
+    {
+        bail!(
+            "a legacy supervisor is still using this database; stop it before starting the stable-path supervisor"
+        );
+    }
     if control.exists() {
         use std::os::unix::fs::FileTypeExt;
         if UnixStream::connect(&control).is_ok() {
@@ -282,12 +543,15 @@ pub fn run(mut config: Config) -> Result<()> {
         }
         std::fs::remove_file(&control)?;
     }
-    let socket = UnixListener::bind(&control)?;
+    crate::runtime::prepare_worker(&config.db)?;
+    let mut socket = UnixListener::bind(&control)?;
+    crate::runtime::legacy_alias(&config.db.with_extension("sock"), &control)?;
     std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o600))?;
     socket.set_nonblocking(true)?;
     let mut listeners = Vec::new();
     let mut bound = Vec::new();
     let requested = config.addresses.clone();
+    config.requested_addresses = requested.clone();
     for address in &requested {
         match bind_listener(*address) {
             Ok(listener) => {
@@ -295,7 +559,12 @@ pub fn run(mut config: Config) -> Result<()> {
                 bound.push(*address);
                 listeners.push(listener);
             }
-            Err(error) if !address.ip().is_loopback() => {
+            Err(error)
+                if !address.ip().is_loopback()
+                    && error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|error| error.raw_os_error() == Some(libc::EADDRNOTAVAIL)) =>
+            {
                 eprintln!("waiting for private address {address}: {error}")
             }
             Err(error) => return Err(error),
@@ -305,20 +574,38 @@ pub fn run(mut config: Config) -> Result<()> {
         bail!("no loopback listener available");
     }
     config.addresses = bound;
-    let own_binary = snapshot(&std::env::current_exe()?, &config)?;
-    let mut active: Active = std::fs::read(config.active_path())
+    let own_binary = snapshot(&installation.executable, &config)?;
+    let recorded: Option<Active> = std::fs::read(config.active_path())
         .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or(Active {
-            current: own_binary.clone(),
-            previous: None,
-        });
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let valid_record = recorded
+        .as_ref()
+        .is_some_and(|active| same_installation && valid_snapshot(&active.current, &config));
+    if recorded.is_some() && !valid_record {
+        eprintln!(
+            "Ignoring stale supervisor state from before this stable installation; using {}.",
+            installation.executable.display()
+        );
+    }
+    let mut active = recorded.filter(|_| valid_record).unwrap_or(Active {
+        current: own_binary.clone(),
+        previous: None,
+    });
+    if active
+        .previous
+        .as_ref()
+        .is_some_and(|previous| !valid_snapshot(previous, &config))
+    {
+        eprintln!("Ignoring stale previous-worker snapshot.");
+        active.previous = None;
+    }
     if config.activate_current {
         active.previous = Some(active.current);
         active.current = own_binary;
     }
     let signals = ArcSignal::new()?;
-    let mut worker = start(&active.current, &config, &listeners, Duration::from_secs(3))?;
+    reconcile_installation(&mut active, &config)?;
+    let mut worker = start_or_restore(&mut active, &mut config, &listeners)?;
     atomic_json(&config.active_path(), &active)?;
     println!(
         "Supervisor {} holds {:?}; worker {} is ready.",
@@ -336,8 +623,24 @@ pub fn run(mut config: Config) -> Result<()> {
             return Ok(());
         }
         if worker.try_wait()?.is_some() {
+            // This is only observation data from the child we actually spawned,
+            // never a PID to signal or a process identity loaded from disk.
+            if let Ok(bytes) = std::fs::read(config.db.with_extension("addresses.json"))
+                && let Ok(observed) =
+                    serde_json::from_slice::<crate::addresses::Observation>(&bytes)
+                && observed.pid == worker.id()
+            {
+                config.required_ready = crate::addresses::ready(&observed.addresses);
+            }
+            let replaced = reconcile_installation(&mut active, &config)?;
+            if replaced {
+                crashes.clear();
+                activated = Instant::now();
+            }
             crashes.retain(|at| at.elapsed() < Duration::from_secs(60));
-            crashes.push(Instant::now());
+            if !replaced {
+                crashes.push(Instant::now());
+            }
             let mut rolled_back = false;
             if crashes.len() >= 3
                 && activated.elapsed() < Duration::from_secs(60)
@@ -350,7 +653,17 @@ pub fn run(mut config: Config) -> Result<()> {
             std::thread::sleep(Duration::from_millis(
                 (200 * crashes.len() as u64).min(5000),
             ));
-            match start(&active.current, &config, &listeners, Duration::from_secs(3)) {
+            let restart = if replaced {
+                start_or_restore(&mut active, &mut config, &listeners)
+            } else {
+                start(
+                    &active.current,
+                    &mut config,
+                    &listeners,
+                    Duration::from_secs(3),
+                )
+            };
+            match restart {
                 Ok(child) => {
                     eprintln!("Worker {} is ready after restart.", child.id());
                     worker = child;
@@ -374,21 +687,41 @@ pub fn run(mut config: Config) -> Result<()> {
         }
         if bind_retry.elapsed() >= Duration::from_secs(1) {
             bind_retry = Instant::now();
-            let mut changed = false;
-            for address in &requested {
-                if config.addresses.contains(address) {
-                    continue;
-                }
-                if let Ok(listener) = bind_listener(*address) {
-                    listener.set_nonblocking(true)?;
-                    listeners.push(listener);
-                    config.addresses.push(*address);
-                    changed = true;
-                }
+            // /tmp may be cleaned while the supervisor still owns its listener.
+            // Recover the directory entry rather than leaving upgrade unreachable.
+            if !control.exists() {
+                crate::runtime::prepare(&config.db)?;
+                socket = UnixListener::bind(&control)?;
+                std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o600))?;
+                socket.set_nonblocking(true)?;
             }
+            let changed = attach_pending(&mut config, &mut listeners, &requested, bind_listener)?;
             if changed {
+                let build = crate::updates::inspect(&active.current)?.build;
+                let replaced = reconcile_installation(&mut active, &config)?;
+                worker.addresses = crate::addresses::probe(&config, &build);
+                config.required_ready = crate::addresses::ready(&worker.addresses);
                 terminate(&mut worker, Duration::from_secs(4))?;
-                worker = start(&active.current, &config, &listeners, Duration::from_secs(3))?;
+                let restart = if replaced {
+                    start_or_restore(&mut active, &mut config, &listeners)
+                } else {
+                    start(
+                        &active.current,
+                        &mut config,
+                        &listeners,
+                        Duration::from_secs(3),
+                    )
+                };
+                match restart {
+                    Ok(next) => worker = next,
+                    Err(error) => eprintln!(
+                        "listener handoff failed; retaining sockets and retrying worker: {error:#}"
+                    ),
+                }
+                if replaced {
+                    activated = Instant::now();
+                    crashes.clear();
+                }
             }
         }
         match socket.accept() {
@@ -416,19 +749,57 @@ pub fn run(mut config: Config) -> Result<()> {
                     if crate::updates::sha256(&std::fs::read(&swap.binary)?) != swap.sha256 {
                         bail!("candidate checksum changed before handoff");
                     }
-                    let info = crate::updates::inspect(&swap.binary)?;
+                    let candidate = snapshot(&swap.binary, &config)?;
+                    if candidate
+                        .parent()
+                        .and_then(|path| path.file_name())
+                        .and_then(|name| name.to_str())
+                        != Some(swap.sha256.as_str())
+                    {
+                        bail!("candidate changed while it was being staged");
+                    }
+                    let info = crate::updates::inspect(&candidate)?;
+                    crate::installation::check_writable(
+                        config
+                            .worker_path
+                            .as_deref()
+                            .context("stable worker path missing")?,
+                    )?;
+                    // Assess the exact final file while the old worker serves.
+                    // A fresh Mach-O's first execution may otherwise consume the
+                    // handoff deadline. start reuses this inode when unchanged.
+                    let executable = config.worker_path.as_deref().context("stable worker path missing")?;
+                    let prepared = (|| -> Result<()> {
+                        crate::installation::activate_verified(&candidate, executable, &swap.sha256)?;
+                        crate::updates::inspect(executable)?;
+                        if crate::updates::sha256(&std::fs::read(executable)?) != swap.sha256 { bail!("installed image changed during final-path preflight"); }
+                        Ok(())
+                    })();
+                    if let Err(error) = prepared {
+                        let previous_sha = active.current.parent().and_then(|parent| parent.file_name()).and_then(|name| name.to_str()).context("previous image checksum missing")?;
+                        if let Err(restore) = crate::installation::activate_verified(&active.current, executable, previous_sha) {
+                            eprintln!("could not restore installed image; existing worker is still serving: {restore:#}");
+                        }
+                        return Err(error.context("candidate final-path preflight failed; existing worker retained"));
+                    }
+                    // Probe before draining: already-pending/blocked addresses do
+                    // not prevent an upgrade, but every ready address is protected.
+                    worker.addresses = crate::addresses::probe(&config, &previous_build);
+                    config.required_ready = crate::addresses::ready(&worker.addresses);
+                    let protected_before_swap = config.required_ready.clone();
                     terminate(&mut worker, Duration::from_secs(4))?;
-                    match start(&swap.binary, &config, &listeners, Duration::from_secs(3)) {
+                    match start(&candidate, &mut config, &listeners, Duration::from_secs(3)) {
                         Ok(mut child) => {
                             let next = Active {
-                                current: swap.binary,
+                                current: candidate,
                                 previous: Some(active.current.clone()),
                             };
                             if let Err(error) = atomic_json(&config.active_path(), &next) {
                                 terminate(&mut child, Duration::ZERO)?;
+                                config.required_ready = protected_before_swap;
                                 worker = start(
                                     &active.current,
-                                    &config,
+                                    &mut config,
                                     &listeners,
                                     Duration::from_millis(2500),
                                 )?;
@@ -437,6 +808,7 @@ pub fn run(mut config: Config) -> Result<()> {
                                     previous: previous_build.clone(),
                                     rolled_back: true,
                                     reason: Some(format!("activation failed: {error:#}")),
+                                    addresses: worker.addresses.clone(),
                                 });
                             }
                             worker = child;
@@ -448,12 +820,13 @@ pub fn run(mut config: Config) -> Result<()> {
                                 previous: previous_build.clone(),
                                 rolled_back: false,
                                 reason: None,
+                                addresses: worker.addresses.clone(),
                             })
                         }
                         Err(error) => {
                             worker = start(
                                 &active.current,
-                                &config,
+                                &mut config,
                                 &listeners,
                                 Duration::from_millis(2500),
                             )
@@ -463,6 +836,7 @@ pub fn run(mut config: Config) -> Result<()> {
                                 previous: previous_build.clone(),
                                 rolled_back: true,
                                 reason: Some(error.to_string()),
+                                addresses: worker.addresses.clone(),
                             })
                         }
                     }
@@ -472,6 +846,7 @@ pub fn run(mut config: Config) -> Result<()> {
                     previous: previous_build,
                     rolled_back: true,
                     reason: Some(format!("{error:#}")),
+                    addresses: Vec::new(),
                 });
                 let _ = writeln!(stream, "{}", serde_json::to_string(&reply)?);
             }
@@ -541,5 +916,54 @@ impl ArcSignal {
     }
     fn stopped(&self) -> bool {
         self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pending_address_is_attached_once_when_it_can_be_bound() {
+        let first = bind_listener("127.0.0.1:0".parse().unwrap()).unwrap();
+        let initial = first.local_addr().unwrap();
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let pending = probe.local_addr().unwrap();
+        drop(probe);
+        let requested = vec![initial, pending];
+        let mut config = Config {
+            addresses: vec![initial],
+            requested_addresses: requested.clone(),
+            required_ready: Vec::new(),
+            worker_path: None,
+            db: PathBuf::from("unused.db"),
+            away_after: 60_000,
+            forget_after: 120_000,
+            reconnect_grace: 0,
+            activate_current: false,
+        };
+        let mut listeners = vec![first];
+        assert!(
+            !attach_pending(&mut config, &mut listeners, &requested, |_| Err(
+                std::io::Error::from_raw_os_error(libc::EADDRNOTAVAIL).into()
+            ))
+            .unwrap()
+        );
+        assert_eq!(config.addresses, vec![initial]);
+        assert!(attach_pending(&mut config, &mut listeners, &requested, bind_listener).unwrap());
+        assert_eq!(config.addresses, requested);
+        assert_eq!(
+            listeners
+                .iter()
+                .map(|listener| listener.local_addr().unwrap())
+                .collect::<Vec<_>>(),
+            config.addresses
+        );
+        assert!(
+            !attach_pending(&mut config, &mut listeners, &requested, |_| panic!(
+                "an already-bound address must not be rebound"
+            ))
+            .unwrap()
+        );
     }
 }

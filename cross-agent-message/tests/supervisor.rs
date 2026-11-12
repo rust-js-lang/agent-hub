@@ -19,6 +19,8 @@ struct Running {
     process: Child,
     url: String,
     binary: PathBuf,
+    source: PathBuf,
+    db: PathBuf,
 }
 fn wait(mut condition: impl FnMut() -> bool, seconds: u64) {
     let deadline = Instant::now() + Duration::from_secs(seconds);
@@ -32,6 +34,12 @@ fn wait(mut condition: impl FnMut() -> bool, seconds: u64) {
 }
 impl Running {
     fn new() -> Self {
+        Self::database(false)
+    }
+    fn database(long_path: bool) -> Self {
+        Self::configured(long_path, &[])
+    }
+    fn configured(long_path: bool, extra: &[&str]) -> Self {
         static SERIAL: Mutex<()> = Mutex::new(());
         let serial = SERIAL.lock().unwrap_or_else(|error| error.into_inner());
         static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -41,15 +49,26 @@ impl Running {
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let db = if long_path {
+            root.join("long-".repeat(20))
+                .join("path-".repeat(20))
+                .join("hub.db")
+        } else {
+            root.join("hub.db")
+        };
         let probe = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
-        let binary = PathBuf::from(env!("CARGO_BIN_EXE_cross-agent-message"));
+        let source = PathBuf::from(env!("CARGO_BIN_EXE_cross-agent-message"));
+        let binary = root.join("cross-agent-message");
+        std::fs::copy(&source, &binary).unwrap();
         let log = std::fs::File::create(root.join("log")).unwrap();
         let process = Command::new(&binary)
             .args(["serve", "--db"])
-            .arg(root.join("hub.db"))
+            .arg(&db)
             .args(["--port", &port.to_string()])
+            .args(extra.iter().flat_map(|address| ["--listen", *address]))
             .env("CROSS_AGENT_STATE_DIR", &root)
             .stdout(log.try_clone().unwrap())
             .stderr(log)
@@ -62,10 +81,12 @@ impl Running {
             process,
             url: format!("http://127.0.0.1:{port}"),
             binary,
+            source,
+            db,
         };
         wait(
             || {
-                result.root.join("hub.active.json").exists()
+                result.db.with_extension("active.json").exists()
                     && result.client().info().is_ok_and(|info| info.supervised)
             },
             10,
@@ -80,7 +101,7 @@ impl Running {
             .arg("upgrade")
             .arg(binary)
             .arg("--db")
-            .arg(self.root.join("hub.db"))
+            .arg(&self.db)
             .env("CROSS_AGENT_STATE_DIR", &self.root)
             .output()
             .unwrap()
@@ -93,11 +114,69 @@ impl Running {
         // Only fixed fixture actions enter this trusted test script.
         let text = format!(
             "#!/bin/sh\nif [ \"$1\" = worker ]; then {action}; fi\nexec '{}' \"$@\"\n",
-            self.binary.display()
+            self.source.display()
         );
         std::fs::write(&path, text).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+    fn worker_pid(&self) -> i32 {
+        std::fs::read_to_string(self.root.join("log"))
+            .unwrap()
+            .lines()
+            .rev()
+            .find_map(|line| {
+                line.strip_prefix("Worker ")
+                    .and_then(|tail| tail.split_whitespace().next())
+                    .and_then(|pid| pid.parse().ok())
+            })
+            .unwrap()
+    }
+    fn restart(&mut self) {
+        assert!(self.process.try_wait().unwrap().is_some());
+        let before = self.worker_pid();
+        let log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(self.root.join("log"))
+            .unwrap();
+        let port = self.url.rsplit(':').next().unwrap();
+        self.process = Command::new(&self.binary)
+            .args(["serve", "--db"])
+            .arg(&self.db)
+            .args(["--port", port])
+            .env("CROSS_AGENT_STATE_DIR", &self.root)
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        wait(
+            || {
+                self.worker_pid() != before
+                    && self.client().info().is_ok_and(|info| info.supervised)
+            },
+            10,
+        );
+    }
+    fn assert_worker_path(&self) {
+        let pid = self.worker_pid();
+        #[cfg(target_os = "macos")]
+        {
+            let output = Command::new("ps")
+                .args(["-p", &pid.to_string(), "-o", "comm="])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap().trim(),
+                self.binary.to_str().unwrap()
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            std::fs::read_link(format!("/proc/{pid}/exe")).unwrap(),
+            self.binary
+        );
     }
 }
 impl Drop for Running {
@@ -280,7 +359,11 @@ fn failed_and_hung_candidates_roll_back_on_the_same_live_database() {
     let message = client
         .send("a", "b", "must survive both rollbacks")
         .unwrap();
-    for action in ["exit 17", "exec sleep 60"] {
+    for action in [
+        "exit 17",
+        "exec sleep 60",
+        "printf 'invalid readiness\\n' >&4; exec sleep 60",
+    ] {
         eprintln!("testing rollback action: {action}");
         let probe = Availability::start(&running.url);
         let start = Instant::now();
@@ -294,6 +377,16 @@ fn failed_and_hung_candidates_roll_back_on_the_same_live_database() {
             "must survive both rollbacks"
         );
         assert!(client.info().unwrap().supervised);
+        let children = Command::new("pgrep")
+            .args(["-P", &running.process.id().to_string()])
+            .output()
+            .unwrap();
+        assert!(children.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&children.stdout).lines().count(),
+            1,
+            "a rejected candidate must be reaped before rollback"
+        );
     }
 }
 
@@ -497,7 +590,7 @@ fn three_post_ready_crashes_restore_the_previous_binary_without_erasing_new_writ
     let script = running.candidate(&format!(
         "echo $$ > '{}'; exec '{}' \"$@\"",
         pid_file.display(),
-        running.binary.display()
+        running.source.display()
     ));
     let result = running.upgrade(&script);
     assert!(
@@ -604,4 +697,292 @@ fn a_fresh_connection_can_send_its_first_request_after_drain_starts() {
     );
     let output = upgrade.join().unwrap().unwrap();
     assert!(!output.rolled_back, "{:?}", output.reason);
+}
+
+#[test]
+fn successful_and_failed_swaps_keep_the_accepting_executable_at_the_installed_path() {
+    let running = Running::new();
+    running.assert_worker_path();
+    assert!(running.upgrade(&running.source).status.success());
+    running.assert_worker_path();
+    assert!(
+        !running
+            .upgrade(&running.candidate("exit 17"))
+            .status
+            .success()
+    );
+    running.assert_worker_path();
+    let config = cross_agent_message::supervisor::load_config(&running.db).unwrap();
+    assert_eq!(config.worker_path.as_ref(), Some(&running.binary));
+}
+
+#[test]
+fn a_second_supervisor_cannot_upgrade_the_same_installation_from_another_database() {
+    let running = Running::new();
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let output = Command::new(&running.binary)
+        .args(["serve", "--port", &port.to_string(), "--db"])
+        .arg(running.root.join("other.db"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("already supervises") && error.contains(running.db.to_str().unwrap()),
+        "{error}"
+    );
+    assert!(running.client().info().is_ok());
+}
+
+#[test]
+fn long_database_paths_and_removed_socket_directories_remain_upgradeable() {
+    let running = Running::database(true);
+    let client = running.client();
+    client.register("a").unwrap();
+    client.register("b").unwrap();
+    let message = client.send("a", "b", "survives runtime cleanup").unwrap();
+    let config = cross_agent_message::supervisor::load_config(&running.db).unwrap();
+    assert!(running.db.as_os_str().len() > 104);
+    std::fs::remove_dir_all(config.control().parent().unwrap()).unwrap();
+    wait(
+        || config.control().exists() && config.worker_control().exists(),
+        5,
+    );
+    let output = running.upgrade(&running.source);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        client.read_message("b", message.id).unwrap().body,
+        "survives runtime cleanup"
+    );
+}
+
+#[test]
+fn an_external_installation_change_requires_preflight_before_worker_recovery() {
+    let running = Running::new();
+    let marker = running.root.join("preflight-ran");
+    let candidate = running.root.join("external-candidate");
+    std::fs::write(
+        &candidate,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = self-check ]; then touch '{}'; fi\nexec '{}' \"$@\"\n",
+            marker.display(),
+            running.source.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let pid = running.worker_pid();
+    cross_agent_message::installation::activate(&candidate, &running.binary).unwrap();
+    unsafe {
+        assert_eq!(libc::kill(pid, libc::SIGKILL), 0);
+    }
+    wait(|| marker.exists() && running.client().info().is_ok(), 10);
+    assert!(
+        std::fs::read_to_string(running.root.join("log"))
+            .unwrap()
+            .contains("changed outside upgrade")
+    );
+}
+
+#[test]
+fn an_external_replacement_that_fails_readiness_restores_the_previous_image() {
+    let running = Running::new();
+    let old_image = std::fs::read(&running.binary).unwrap();
+    let pid = running.worker_pid();
+    cross_agent_message::installation::activate(&running.candidate("exit 17"), &running.binary)
+        .unwrap();
+    unsafe {
+        assert_eq!(libc::kill(pid, libc::SIGKILL), 0);
+    }
+    wait(
+        || {
+            running.worker_pid() != pid
+                && std::fs::read(&running.binary).is_ok_and(|bytes| bytes == old_image)
+                && running.client().info().is_ok()
+        },
+        10,
+    );
+    running.assert_worker_path();
+    assert!(
+        std::fs::read_to_string(running.root.join("log"))
+            .unwrap()
+            .contains("restoring the previous installed image")
+    );
+}
+
+#[test]
+fn a_pending_private_address_does_not_prevent_a_safe_upgrade() {
+    let running = Running::configured(false, &["203.0.113.243"]);
+    let before = running.client().info().unwrap();
+    assert!(
+        before
+            .addresses
+            .iter()
+            .any(|address| address.address.starts_with("203.0.113.243:")
+                && address.state == protocol::AddressState::Pending)
+    );
+    let output = running.upgrade(&running.source);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let after = running.client().info().unwrap();
+    assert!(
+        after
+            .addresses
+            .iter()
+            .any(|address| address.address.starts_with("203.0.113.243:")
+                && address.state == protocol::AddressState::Pending)
+    );
+    assert!(
+        after
+            .addresses
+            .iter()
+            .any(|address| address.address.starts_with("127.0.0.1:")
+                && address.state == protocol::AddressState::Ready)
+    );
+}
+
+#[test]
+fn an_upgrade_rolls_back_when_a_previously_ready_listener_stops_answering_http() {
+    let running = Running::configured(false, &["::1"]);
+    assert_eq!(
+        running
+            .client()
+            .info()
+            .unwrap()
+            .addresses
+            .iter()
+            .filter(|address| address.state == protocol::AddressState::Ready)
+            .count(),
+        2
+    );
+    let candidate = running.root.join("unreachable-listener");
+    // Both inherited FDs now accept from loopback v4. The supervisor retains
+    // the real v6 listener: TCP connects there, but no worker answers HTTP.
+    // This reproduces the firewall symptom without changing the host firewall.
+    std::fs::write(&candidate, format!("#!/usr/bin/env python3\nimport os, sys\nif sys.argv[1] == 'worker':\n    os.dup2(3, 4)\nos.execv({source:?}, [{source:?}] + sys.argv[1:])\n", source = running.source.to_str().unwrap())).unwrap();
+    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let probe = Availability::start(&running.url);
+    let output = running.upgrade(&candidate);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("rolled back") && error.contains("not ready") && error.contains("firewall"),
+        "{error}"
+    );
+    assert_eq!(
+        running
+            .client()
+            .info()
+            .unwrap()
+            .addresses
+            .iter()
+            .filter(|address| address.state == protocol::AddressState::Ready)
+            .count(),
+        2
+    );
+    running.assert_worker_path();
+    probe.finish();
+}
+
+#[test]
+fn stale_state_never_executes_or_signals_an_unrelated_program() {
+    let mut running = Running::new();
+    let client = running.client();
+    client.register("a").unwrap();
+    client.register("b").unwrap();
+    let message = client.send("a", "b", "survives stale state").unwrap();
+    let mut unrelated = Watcher(Command::new("sleep").arg("30").spawn().unwrap());
+    for legacy in [true, false] {
+        client.stop().unwrap();
+        wait(|| running.process.try_wait().unwrap().is_some(), 6);
+        let mut config: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(running.db.with_extension("worker.json")).unwrap(),
+        )
+        .unwrap();
+        if legacy {
+            config["worker_path"] = serde_json::Value::Null;
+        }
+        std::fs::write(
+            running.db.with_extension("worker.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(running.db.with_extension("active.json"), serde_json::to_vec(&serde_json::json!({"current":"/bin/sleep","previous":null,"pid":unrelated.0.id(),"worker_pid":unrelated.0.id()})).unwrap()).unwrap();
+        running.restart();
+        assert_eq!(
+            client.read_message("b", message.id).unwrap().body,
+            "survives stale state"
+        );
+        running.assert_worker_path();
+        if legacy {
+            assert!(unrelated.0.try_wait().unwrap().is_none());
+            unrelated.0.kill().unwrap();
+            unrelated.0.wait().unwrap();
+        }
+    }
+    assert!(
+        std::fs::read_to_string(running.root.join("log"))
+            .unwrap()
+            .contains("Ignoring stale supervisor state")
+    );
+}
+
+#[test]
+fn a_read_only_installation_fails_preflight_without_draining_the_worker() {
+    if unsafe { libc::getuid() } == 0 {
+        return;
+    } // Root bypasses directory permission bits.
+    let running = Running::new();
+    let before = running.worker_pid();
+    let permissions = std::fs::metadata(&running.root).unwrap().permissions();
+    std::fs::set_permissions(&running.root, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let output = running.upgrade(&running.source);
+    std::fs::set_permissions(&running.root, permissions).unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("must be writable before upgrading"));
+    assert_eq!(running.worker_pid(), before);
+    assert!(running.client().info().is_ok());
+}
+
+#[test]
+fn final_path_preflight_and_worker_exec_use_the_same_inode_before_drain() {
+    let running = Running::new();
+    let before = running.client().info().unwrap();
+    let marker = running.root.join("executions.jsonl");
+    let candidate = running.root.join("recording-candidate");
+    std::fs::write(&candidate, format!("#!/usr/bin/env python3\nimport os, sys, json, urllib.request\nrow = {{'role': sys.argv[1], 'path': os.path.realpath(sys.argv[0]), 'inode': os.stat(sys.argv[0]).st_ino}}\nif sys.argv[1] == 'build-info' and row['path'] == {installed:?}:\n    with urllib.request.urlopen({url:?} + '/api/hub', timeout=2) as response:\n        row['serving'] = json.load(response)['started']\nwith open({marker:?}, 'a') as output:\n    output.write(json.dumps(row) + '\\n')\nos.execv({source:?}, [{source:?}] + sys.argv[1:])\n",
+        installed=running.binary.to_str().unwrap(), marker=marker.to_str().unwrap(), source=running.source.to_str().unwrap(), url=running.url)).unwrap();
+    std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = running.upgrade(&candidate);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let executions: Vec<serde_json::Value> = std::fs::read_to_string(marker)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let warm = executions
+        .iter()
+        .find(|row| row["role"] == "build-info" && row["path"] == running.binary.to_str().unwrap())
+        .unwrap();
+    let worker = executions
+        .iter()
+        .find(|row| row["role"] == "worker")
+        .unwrap();
+    assert_eq!(warm["inode"], worker["inode"]);
+    assert_eq!(warm["serving"], before.started);
 }

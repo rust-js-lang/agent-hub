@@ -11,7 +11,7 @@ use agent_list::AgentList;
 use compose::Compose;
 use js::{clear_interval, date, set_interval, spawn};
 use message_list::MessageList;
-use protocol::{Agent, Channel, EVENTS, Message};
+use protocol::{AddressState, Agent, Channel, EVENTS, ListenAddress, Message};
 use react::{JSX, jsx, use_effect, use_ref, use_state};
 use webapi::{Event, EventTargetExt, MessageEvent, event_source, events};
 
@@ -25,8 +25,18 @@ pub fn App() -> JSX::Element {
     let build = use_ref(None::<String>);
     let activity = use_ref(date::now());
     let (upgraded, set_upgraded) = use_state(|| false);
+    let (addresses, set_addresses) = use_state(Vec::<ListenAddress>::new);
     // The person, where they signed in on this device: they write here.
     let (me, set_me) = use_state(api::me);
+
+    use_effect(move || {
+        let refresh = move || spawn(Box::new(async move {
+            if let Ok(info) = api::hub().await { set_addresses.set(info.addresses); }
+        }));
+        refresh();
+        let timer = set_interval(Box::new(refresh), Some(15_000.0));
+        move || clear_interval(Some(timer))
+    }, Some(&()));
 
     // Every event says something changed: fetch the agents and the history
     // again, so the page is the hub's own answer, whatever it missed.
@@ -128,6 +138,18 @@ pub fn App() -> JSX::Element {
                     {if *live { "Live" } else { "Connecting…" }}
                 </span>
             </header>
+            {(!addresses.is_empty()).then(|| jsx! {
+                <ul className="listener-status" aria-label="Hub addresses">
+                    {addresses.iter().map(|address| jsx! {
+                        <li key={address.address.clone()} className={if address.state == AddressState::Blocked { "blocked" } else { "" }}>
+                            <code>{address.address.clone()}</code>{" · "}
+                            {match address.state { AddressState::Ready => "ready", AddressState::Pending => "pending", AddressState::Blocked => "blocked", AddressState::Unknown => "unknown" }}
+                            {address.remote_seen.then(|| " · seen from another machine")}
+                            {(address.state == AddressState::Blocked).then(|| address.reason.clone()).flatten().map(|reason| jsx! { <span className="listener-reason">{reason}</span> })}
+                        </li>
+                    }).collect::<Vec<_>>()}
+                </ul>
+            })}
             {(*upgraded).then(|| jsx! {
                 <p className="upgrade-notice" role="status">{"The hub was upgraded: "}
                     <button type="button" className="link" onClick={move |_| webapi::window.location().reload()}>{"reload"}</button>
