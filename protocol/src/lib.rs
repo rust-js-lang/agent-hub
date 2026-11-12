@@ -24,8 +24,24 @@ pub const INBOX: &str = "/api/inbox";
 /// the stream is open.
 pub const EVENTS: &str = "/api/events";
 
+/// `GET`: every hold held now, by name, as [`Hold`]s. `POST` a [`Take`]: the
+/// hub answers with a [`Taken`], the hold as it is now and whether it's the
+/// asker's.
+pub const HOLDS: &str = "/api/holds";
+
+/// `POST` a [`Release`]: its holder lets a hold go. The hub answers with the
+/// [`Hold`]s still held.
+pub const RELEASE: &str = "/api/holds/release";
+
 /// The most messages `GET` [`MESSAGES`] gives.
 pub const HISTORY_LIMIT: u32 = 500;
+
+/// How long a hold lasts where its taker doesn't say, in minutes.
+pub const HOLD_MINUTES: u32 = 30;
+
+/// The longest a hold may be taken for at once, in minutes. Taking it again
+/// keeps it longer.
+pub const HOLD_MINUTES_MAX: u32 = 240;
 
 /// An agent the hub knows: one that ran a command, or is watching.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,6 +101,43 @@ pub struct Inbox {
     pub remaining: u32,
 }
 
+/// Something one agent has at a time, by its name: `check`, say, for a long
+/// run that wants all of a machine's cores. It lapses at `until`, so an agent
+/// that stopped without letting go doesn't keep it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hold {
+    pub name: String,
+    /// The agent that has it.
+    pub holder: String,
+    /// When its holder first took it, in milliseconds since the Unix epoch.
+    pub since: u64,
+    /// When it lapses unless taken again.
+    pub until: u64,
+}
+
+/// An agent asks for a hold, for `minutes` from now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Take {
+    pub name: String,
+    pub holder: String,
+    pub minutes: u32,
+}
+
+/// What a [`Take`] came to: the hold as it is now, the asker's where it was
+/// free, lapsed or already its own, and another agent's otherwise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Taken {
+    pub hold: Hold,
+    pub yours: bool,
+}
+
+/// An agent lets go of a hold it has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Release {
+    pub name: String,
+    pub holder: String,
+}
+
 /// Why the hub refused a request: the body of every answer that isn't 200.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Refusal {
@@ -109,20 +162,28 @@ pub const NAME_MAX: usize = 64;
 /// Whether `name` may name an agent: 1 to [`NAME_MAX`] ASCII letters, digits,
 /// `-`, `_` and `.`, so it's the same in a URL, a shell and a terminal.
 pub fn check_name(name: &str) -> Result<(), String> {
+    check(name, "an agent's name")
+}
+
+/// Whether `name` may name a hold: what an agent's name may be.
+pub fn check_hold(name: &str) -> Result<(), String> {
+    check(name, "a hold's name")
+}
+
+/// Whether `name` is a name, of `what` it names.
+fn check(name: &str, what: &str) -> Result<(), String> {
     if name.is_empty() {
-        return Err("an agent's name can't be empty".to_string());
+        return Err(format!("{what} can't be empty"));
     }
     if name.len() > NAME_MAX {
-        return Err(format!(
-            "an agent's name has at most {NAME_MAX} characters: {name}"
-        ));
+        return Err(format!("{what} has at most {NAME_MAX} characters: {name}"));
     }
     if let Some(bad) = name
         .chars()
         .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
     {
         return Err(format!(
-            "an agent's name is letters, digits, `-`, `_` and `.`, and {name:?} has {bad:?}"
+            "{what} is letters, digits, `-`, `_` and `.`, and {name:?} has {bad:?}"
         ));
     }
     Ok(())
@@ -141,6 +202,20 @@ mod tests {
         assert!(check_name("é").is_err());
         assert_eq!(check_name(&"a".repeat(NAME_MAX)), Ok(()));
         assert!(check_name(&"a".repeat(NAME_MAX + 1)).is_err());
+    }
+
+    #[test]
+    fn a_hold_is_named_as_an_agent_is() {
+        assert_eq!(check_hold("check"), Ok(()));
+        assert_eq!(
+            check_hold(""),
+            Err("a hold's name can't be empty".to_string())
+        );
+        assert_eq!(
+            check_name(""),
+            Err("an agent's name can't be empty".to_string())
+        );
+        assert!(check_hold("all cores").is_err());
     }
 
     #[test]

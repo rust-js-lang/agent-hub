@@ -4,8 +4,8 @@ use std::io::{BufRead, BufReader};
 
 use anyhow::{Context, Result, bail};
 use protocol::{
-    AGENTS, Agent, EVENTS, Event, INBOX, Inbox, MESSAGES, Message, ReadInbox, Refusal, Register,
-    Send,
+    AGENTS, Agent, EVENTS, Event, HOLDS, Hold, INBOX, Inbox, MESSAGES, Message, RELEASE, ReadInbox,
+    Refusal, Register, Release, Send, Take, Taken,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -115,6 +115,35 @@ impl Client {
             &ReadInbox {
                 name: name.to_string(),
                 max,
+            },
+        )
+    }
+
+    /// What's held now, by name.
+    pub fn holds(&self) -> Result<Vec<Hold>> {
+        self.get(HOLDS)
+    }
+
+    /// `holder` asks for the hold `name`, for `minutes`: the hold as it is
+    /// now, and whether it's `holder`'s.
+    pub fn take(&self, name: &str, holder: &str, minutes: u32) -> Result<Taken> {
+        self.post(
+            HOLDS,
+            &Take {
+                name: name.to_string(),
+                holder: holder.to_string(),
+                minutes,
+            },
+        )
+    }
+
+    /// `holder` lets go of the hold `name`: what's still held.
+    pub fn release(&self, name: &str, holder: &str) -> Result<Vec<Hold>> {
+        self.post(
+            RELEASE,
+            &Release {
+                name: name.to_string(),
+                holder: holder.to_string(),
             },
         )
     }

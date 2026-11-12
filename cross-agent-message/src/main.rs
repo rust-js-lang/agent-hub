@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand};
 use cross_agent_message::client::Client;
 use cross_agent_message::hub::{self, Hub};
 use cross_agent_message::store::Store;
-use protocol::{Agent, Event, check_name};
+use protocol::{Agent, Event, HOLD_MINUTES, Hold, check_hold, check_name};
 
 /// Lets AI coding agents, on any tool or machine, message each other through
 /// a hub. Each agent picks a name and passes it as `--as`. A message from
@@ -78,6 +78,34 @@ enum Command {
         #[command(flatten)]
         me: Me,
     },
+    /// Take a hold: something one agent has at a time, by a name you agree
+    /// on, such as `check` for a long run that wants all the machine's
+    /// cores. It fails while another agent has it, or with `--wait` waits
+    /// until it's yours. Let it go with `release`; it lapses by itself.
+    Hold {
+        #[command(flatten)]
+        me: Me,
+        /// What to hold: letters, digits, `-`, `_` and `.`.
+        name: String,
+        /// How many minutes it's yours unless you take it again.
+        #[arg(long = "for", value_name = "MINUTES", default_value_t = HOLD_MINUTES)]
+        minutes: u32,
+        /// Wait until it's yours, where another agent has it.
+        #[arg(long)]
+        wait: bool,
+    },
+    /// Let go of a hold you have, so the next agent's `hold` takes it.
+    Release {
+        #[command(flatten)]
+        me: Me,
+        /// The hold to let go.
+        name: String,
+    },
+    /// List what's held now, by whom, and for how much longer.
+    Holds {
+        #[command(flatten)]
+        me: Me,
+    },
 }
 
 fn default_db() -> PathBuf {
@@ -100,6 +128,14 @@ fn main() -> Result<()> {
         Command::Send { me, to, message } => send(&client, &me, &to, &message),
         Command::Inbox { me, max } => inbox(&client, &me, max),
         Command::Watch { me } => watch(&client, &me),
+        Command::Hold {
+            me,
+            name,
+            minutes,
+            wait,
+        } => hold(&client, &me, &name, minutes, wait),
+        Command::Release { me, name } => release(&client, &me, &name),
+        Command::Holds { me } => holds(&client, &me),
     }
 }
 
@@ -238,6 +274,79 @@ fn watch(client: &Client, me: &Me) -> Result<()> {
     bail!("the hub closed the stream")
 }
 
+/// How often a waiting `hold` asks again.
+const HOLD_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+fn hold(client: &Client, me: &Me, name: &str, minutes: u32, wait: bool) -> Result<()> {
+    register(client, me)?;
+    if let Err(reason) = check_hold(name) {
+        bail!("{reason}");
+    }
+    let mut waiting = false;
+    loop {
+        let taken = client.take(name, &me.name, minutes)?;
+        let left = until(hub::now(), taken.hold.until);
+        if taken.yours {
+            println!("You hold {name} for {left}: `release {name}` when you're done.");
+            return Ok(());
+        }
+        if !wait {
+            bail!(
+                "{} holds {name} for {left} more: `hold {name} --wait` waits for it",
+                taken.hold.holder
+            );
+        }
+        if !waiting {
+            println!(
+                "{} holds {name} for {left} more. Waiting for it.",
+                taken.hold.holder
+            );
+            waiting = true;
+        }
+        std::thread::sleep(HOLD_POLL);
+    }
+}
+
+fn release(client: &Client, me: &Me, name: &str) -> Result<()> {
+    register(client, me)?;
+    client.release(name, &me.name)?;
+    println!("Released {name}.");
+    Ok(())
+}
+
+fn holds(client: &Client, me: &Me) -> Result<()> {
+    register(client, me)?;
+    let holds: Vec<Hold> = client.holds()?;
+    if holds.is_empty() {
+        println!("Nothing is held.");
+        return Ok(());
+    }
+    let now = hub::now();
+    for hold in holds {
+        let whose = match hold.holder == me.name {
+            true => "you".to_string(),
+            false => hold.holder,
+        };
+        println!(
+            "  {} · {whose} · since {} · {} more",
+            hold.name,
+            ago(now, hold.since),
+            until(now, hold.until)
+        );
+    }
+    Ok(())
+}
+
+/// How long after `now` `then` is, roughly: "under a minute", "27m".
+fn until(now: u64, then: u64) -> String {
+    let seconds = then.saturating_sub(now) / 1000;
+    match seconds {
+        0..60 => "under a minute".to_string(),
+        60..3600 => format!("{}m", seconds / 60),
+        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
+    }
+}
+
 /// How long before `now` `then` was, roughly: "just now", "5m ago".
 fn ago(now: u64, then: u64) -> String {
     let seconds = now.saturating_sub(then) / 1000;
@@ -252,7 +361,15 @@ fn ago(now: u64, then: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::ago;
+    use super::{ago, until};
+
+    #[test]
+    fn until_rounds_down_to_minutes() {
+        assert_eq!(until(0, 59_000), "under a minute");
+        assert_eq!(until(0, 30 * 60_000), "30m");
+        assert_eq!(until(0, 95 * 60_000), "1h 35m");
+        assert_eq!(until(9, 0), "under a minute");
+    }
 
     #[test]
     fn ago_rounds_down_to_one_unit() {

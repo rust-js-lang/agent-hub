@@ -36,8 +36,30 @@ export const INBOX = "/api/inbox";
  */
 export const EVENTS = "/api/events";
 
+/**
+ * `GET`: every hold held now, by name, as [`Hold`]s. `POST` a [`Take`]: the
+ * hub answers with a [`Taken`], the hold as it is now and whether it's the
+ * asker's.
+ */
+export const HOLDS = "/api/holds";
+
+/**
+ * `POST` a [`Release`]: its holder lets a hold go. The hub answers with the
+ * [`Hold`]s still held.
+ */
+export const RELEASE = "/api/holds/release";
+
 /** The most messages `GET` [`MESSAGES`] gives. */
 export const HISTORY_LIMIT = 500;
+
+/** How long a hold lasts where its taker doesn't say, in minutes. */
+export const HOLD_MINUTES = 30;
+
+/**
+ * The longest a hold may be taken for at once, in minutes. Taking it again
+ * keeps it longer.
+ */
+export const HOLD_MINUTES_MAX = 240;
 
 /** An agent the hub knows: one that ran a command, or is watching. */
 export function agentSerialize_serialize(agent, json) {
@@ -204,6 +226,106 @@ export function inboxDeserialize_deserialize(json) {
   );
 }
 
+/**
+ * Something one agent has at a time, by its name: `check`, say, for a long
+ * run that wants all of a machine's cores. It lapses at `until`, so an agent
+ * that stopped without letting go doesn't keep it.
+ */
+export function holdSerialize_serialize(hold, json) {
+  json.beginObject();
+  json.key("name");
+  json.string(hold.name);
+  json.key("holder");
+  json.string(hold.holder);
+  json.key("since");
+  json.int(hold.since);
+  json.key("until");
+  json.int(hold.until);
+  json.endObject();
+}
+
+export function holdDeserialize_deserialize(json) {
+  return json.struct(
+    "struct Hold",
+    [
+      ["name", $json.string],
+      ["holder", $json.string],
+      ["since", $json.u64],
+      ["until", $json.u64],
+    ],
+    ([name, holder, since, until]) => ({ name, holder, since, until }),
+  );
+}
+
+/** An agent asks for a hold, for `minutes` from now. */
+export function takeSerialize_serialize(take, json) {
+  json.beginObject();
+  json.key("name");
+  json.string(take.name);
+  json.key("holder");
+  json.string(take.holder);
+  json.key("minutes");
+  json.int(take.minutes);
+  json.endObject();
+}
+
+export function takeDeserialize_deserialize(json) {
+  return json.struct(
+    "struct Take",
+    [
+      ["name", $json.string],
+      ["holder", $json.string],
+      ["minutes", $json.u32],
+    ],
+    ([name, holder, minutes]) => ({ name, holder, minutes }),
+  );
+}
+
+/**
+ * What a [`Take`] came to: the hold as it is now, the asker's where it was
+ * free, lapsed or already its own, and another agent's otherwise.
+ */
+export function takenSerialize_serialize(taken, json) {
+  json.beginObject();
+  json.key("hold");
+  holdSerialize_serialize(taken.hold, json);
+  json.key("yours");
+  json.bool(taken.yours);
+  json.endObject();
+}
+
+export function takenDeserialize_deserialize(json) {
+  return json.struct(
+    "struct Taken",
+    [
+      ["hold", holdDeserialize_deserialize],
+      ["yours", $json.bool],
+    ],
+    ([hold, yours]) => ({ hold, yours }),
+  );
+}
+
+/** An agent lets go of a hold it has. */
+export function releaseSerialize_serialize(release, json) {
+  json.beginObject();
+  json.key("name");
+  json.string(release.name);
+  json.key("holder");
+  json.string(release.holder);
+  json.endObject();
+}
+
+export function releaseDeserialize_deserialize(json) {
+  return json.struct(
+    "struct Release",
+    [
+      ["name", $json.string],
+      ["holder", $json.string],
+    ],
+    ([name, holder]) => ({ name, holder }),
+  );
+}
+
 /** Why the hub refused a request: the body of every answer that isn't 200. */
 export function refusalSerialize_serialize(refusal, json) {
   json.beginObject();
@@ -289,11 +411,21 @@ export const NAME_MAX = 64;
  * `-`, `_` and `.`, so it's the same in a URL, a shell and a terminal.
  */
 export function checkName(name) {
+  return check(name, "an agent's name");
+}
+
+/** Whether `name` may name a hold: what an agent's name may be. */
+export function checkHold(name) {
+  return check(name, "a hold's name");
+}
+
+/** Whether `name` is a name, of `what` it names. */
+function check(name, what) {
   if (name === "") {
-    return { TAG: "Err", _0: "an agent's name can't be empty" };
+    return { TAG: "Err", _0: `${what} can't be empty` };
   }
   if ($byteLen(name) > NAME_MAX) {
-    return { TAG: "Err", _0: `an agent's name has at most ${NAME_MAX} characters: ${name}` };
+    return { TAG: "Err", _0: `${what} has at most ${NAME_MAX} characters: ${name}` };
   }
   const bad = Array.from(name).find(
     (c) => !(/^[A-Za-z0-9]$/.test(c) || c === "-" || c === "_" || c === "."),
@@ -301,7 +433,7 @@ export function checkName(name) {
   if (bad != null) {
     return {
       TAG: "Err",
-      _0: `an agent's name is letters, digits, \`-\`, \`_\` and \`.\`, and ${$debugStr(name)} has ${$debugStr(bad, "'")}`,
+      _0: `${what} is letters, digits, \`-\`, \`_\` and \`.\`, and ${$debugStr(name)} has ${$debugStr(bad, "'")}`,
     };
   }
   return { TAG: "Ok" };

@@ -25,8 +25,30 @@ export const INBOX: string;
  */
 export const EVENTS: string;
 
+/**
+ * `GET`: every hold held now, by name, as [`Hold`]s. `POST` a [`Take`]: the
+ * hub answers with a [`Taken`], the hold as it is now and whether it's the
+ * asker's.
+ */
+export const HOLDS: string;
+
+/**
+ * `POST` a [`Release`]: its holder lets a hold go. The hub answers with the
+ * [`Hold`]s still held.
+ */
+export const RELEASE: string;
+
 /** The most messages `GET` [`MESSAGES`] gives. */
 export const HISTORY_LIMIT: number;
+
+/** How long a hold lasts where its taker doesn't say, in minutes. */
+export const HOLD_MINUTES: number;
+
+/**
+ * The longest a hold may be taken for at once, in minutes. Taking it again
+ * keeps it longer.
+ */
+export const HOLD_MINUTES_MAX: number;
 
 /** An agent the hub knows: one that ran a command, or is watching. */
 export interface Agent {
@@ -78,6 +100,43 @@ export interface Inbox {
     remaining: number;
 }
 
+/**
+ * Something one agent has at a time, by its name: `check`, say, for a long
+ * run that wants all of a machine's cores. It lapses at `until`, so an agent
+ * that stopped without letting go doesn't keep it.
+ */
+export interface Hold {
+    name: string;
+    /** The agent that has it. */
+    holder: string;
+    /** When its holder first took it, in milliseconds since the Unix epoch. */
+    since: bigint;
+    /** When it lapses unless taken again. */
+    until: bigint;
+}
+
+/** An agent asks for a hold, for `minutes` from now. */
+export interface Take {
+    name: string;
+    holder: string;
+    minutes: number;
+}
+
+/**
+ * What a [`Take`] came to: the hold as it is now, the asker's where it was
+ * free, lapsed or already its own, and another agent's otherwise.
+ */
+export interface Taken {
+    hold: Hold;
+    yours: boolean;
+}
+
+/** An agent lets go of a hold it has. */
+export interface Release {
+    name: string;
+    holder: string;
+}
+
 /** Why the hub refused a request: the body of every answer that isn't 200. */
 export interface Refusal {
     reason: string;
@@ -104,3 +163,6 @@ export const NAME_MAX: number;
  * `-`, `_` and `.`, so it's the same in a URL, a shell and a terminal.
  */
 export function checkName(name: string): any;
+
+/** Whether `name` may name a hold: what an agent's name may be. */
+export function checkHold(name: string): any;

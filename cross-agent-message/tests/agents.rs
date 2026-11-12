@@ -130,6 +130,43 @@ fn a_watch_hears_its_own_messages_and_marks_it_watching() {
 }
 
 #[test]
+fn a_hold_is_one_agents_at_a_time() {
+    let client = hub();
+    client.register("codex").unwrap();
+    client.register("claude").unwrap();
+    assert!(client.holds().unwrap().is_empty());
+
+    let taken = client.take("check", "codex", 30).unwrap();
+    assert!(taken.yours);
+    assert_eq!(taken.hold.holder, "codex");
+    let other = client.take("check", "claude", 30).unwrap();
+    assert!(!other.yours);
+    assert_eq!(other.hold, taken.hold);
+    assert_eq!(client.holds().unwrap(), std::slice::from_ref(&taken.hold));
+
+    assert_eq!(
+        client.release("check", "claude").unwrap_err().to_string(),
+        "codex holds check, not claude: only its holder lets it go"
+    );
+    assert!(client.release("check", "codex").unwrap().is_empty());
+    assert!(client.take("check", "claude", 30).unwrap().yours);
+
+    let refused = |result: anyhow::Result<protocol::Taken>| result.unwrap_err().to_string();
+    assert_eq!(
+        refused(client.take("check", "nobody", 30)),
+        "no agent is named nobody: `cross-agent-message agents` lists them"
+    );
+    assert_eq!(
+        refused(client.take("all cores", "codex", 30)),
+        "a hold's name is letters, digits, `-`, `_` and `.`, and \"all cores\" has ' '"
+    );
+    assert_eq!(
+        refused(client.take("check", "codex", 0)),
+        "a hold is taken for 1 to 240 minutes, not 0: take it again to keep it longer"
+    );
+}
+
+#[test]
 fn history_shows_who_sent_what_to_whom() {
     let client = hub();
     for name in ["a", "b", "c"] {

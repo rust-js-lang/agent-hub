@@ -14,8 +14,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use protocol::{
-    AGENTS, Agent, EVENTS, Event, HISTORY_LIMIT, INBOX, Inbox, MESSAGES, Message, ReadInbox,
-    Refusal, Register, Send, check_name,
+    AGENTS, Agent, EVENTS, Event, HISTORY_LIMIT, HOLD_MINUTES_MAX, HOLDS, Hold, INBOX, Inbox,
+    MESSAGES, Message, RELEASE, ReadInbox, Refusal, Register, Release, Send, Take, Taken,
+    check_hold, check_name,
 };
 use serde::Deserialize;
 use tokio::sync::broadcast;
@@ -29,6 +30,57 @@ pub struct Hub {
     events: broadcast::Sender<Event>,
     /// How many `watch`es of each agent are connected.
     watchers: Mutex<HashMap<String, usize>>,
+    /// What's held now, by its name. Not kept in the store: a hold is of
+    /// what runs now, and a hub started again has none.
+    holds: Mutex<HashMap<String, Hold>>,
+}
+
+/// What a [`Take`] of `holds` at `now` comes to: the hold is `take.holder`'s
+/// where it was free, lapsed or its own already, until `take.minutes` from
+/// now, held since it first took it; another agent's is left as it is.
+pub fn take_hold(holds: &mut HashMap<String, Hold>, take: &Take, now: u64) -> Taken {
+    let held = holds.get(&take.name).filter(|hold| hold.until > now);
+    if let Some(hold) = held.filter(|hold| hold.holder != take.holder) {
+        return Taken {
+            hold: hold.clone(),
+            yours: false,
+        };
+    }
+    let hold = Hold {
+        name: take.name.clone(),
+        holder: take.holder.clone(),
+        since: held.map_or(now, |hold| hold.since),
+        until: now + u64::from(take.minutes) * 60_000,
+    };
+    holds.insert(take.name.clone(), hold.clone());
+    Taken { hold, yours: true }
+}
+
+/// `release.holder` lets go of its hold at `now`: gone, as one that lapsed
+/// or was never taken is already. Another agent's is refused, naming it.
+pub fn release_hold(
+    holds: &mut HashMap<String, Hold>,
+    release: &Release,
+    now: u64,
+) -> Result<(), String> {
+    match holds.get(&release.name).filter(|hold| hold.until > now) {
+        Some(hold) if hold.holder != release.holder => Err(format!(
+            "{} holds {}, not {}: only its holder lets it go",
+            hold.holder, release.name, release.holder
+        )),
+        _ => {
+            holds.remove(&release.name);
+            Ok(())
+        }
+    }
+}
+
+/// What's held at `now`, by name: a hold that lapsed is forgotten.
+pub fn held(holds: &mut HashMap<String, Hold>, now: u64) -> Vec<Hold> {
+    holds.retain(|_, hold| hold.until > now);
+    let mut held: Vec<Hold> = holds.values().cloned().collect();
+    held.sort_by(|a, b| a.name.cmp(&b.name));
+    held
 }
 
 /// Milliseconds since the Unix epoch.
@@ -67,7 +119,14 @@ impl Hub {
             store: Mutex::new(store),
             events: broadcast::channel(256).0,
             watchers: Mutex::new(HashMap::new()),
+            holds: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn holds(&self) -> std::sync::MutexGuard<'_, HashMap<String, Hold>> {
+        self.holds
+            .lock()
+            .expect("no request panicked holding the holds")
     }
 
     fn store(&self) -> std::sync::MutexGuard<'_, Store> {
@@ -116,6 +175,8 @@ pub fn router(hub: Arc<Hub>, dashboard: PathBuf) -> Router {
         .route(AGENTS, get(agents).post(register))
         .route(MESSAGES, get(history).post(send))
         .route(INBOX, post(read_inbox))
+        .route(HOLDS, get(holds).post(take))
+        .route(RELEASE, post(release))
         .route(EVENTS, get(events))
         .fallback_service(ServeDir::new(dashboard))
         .with_state(hub)
@@ -200,6 +261,35 @@ async fn read_inbox(
     Ok(Json(inbox))
 }
 
+async fn holds(State(hub): State<Arc<Hub>>) -> Json<Vec<Hold>> {
+    Json(held(&mut hub.holds(), now()))
+}
+
+async fn take(State(hub): State<Arc<Hub>>, Json(take): Json<Take>) -> Result<Json<Taken>, Refused> {
+    check_hold(&take.name).map_err(bad_request)?;
+    hub.agent(&take.holder)?;
+    if take.minutes == 0 || take.minutes > HOLD_MINUTES_MAX {
+        return Err(bad_request(format!(
+            "a hold is taken for 1 to {HOLD_MINUTES_MAX} minutes, not {}: take it again to keep it longer",
+            take.minutes
+        )));
+    }
+    Ok(Json(take_hold(&mut hub.holds(), &take, now())))
+}
+
+async fn release(
+    State(hub): State<Arc<Hub>>,
+    Json(release): Json<Release>,
+) -> Result<Json<Vec<Hold>>, Refused> {
+    check_hold(&release.name).map_err(bad_request)?;
+    hub.agent(&release.holder)?;
+    let now = now();
+    let mut holds = hub.holds();
+    release_hold(&mut holds, &release, now)
+        .map_err(|reason| Refused(StatusCode::CONFLICT, reason))?;
+    Ok(Json(held(&mut holds, now)))
+}
+
 #[derive(Deserialize)]
 struct EventsQuery {
     agent: Option<String>,
@@ -262,4 +352,81 @@ async fn events(
         Some(Ok(sse::Event::default().data(json)))
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn take(name: &str, holder: &str, minutes: u32) -> Take {
+        Take {
+            name: name.to_string(),
+            holder: holder.to_string(),
+            minutes,
+        }
+    }
+
+    fn release(name: &str, holder: &str) -> Release {
+        Release {
+            name: name.to_string(),
+            holder: holder.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_hold_is_one_agents_until_released_or_lapsed() {
+        let mut holds = HashMap::new();
+        let minute = 60_000;
+
+        let first = take_hold(&mut holds, &take("check", "a", 30), 1_000);
+        assert!(first.yours);
+        assert_eq!(
+            (first.hold.since, first.hold.until),
+            (1_000, 1_000 + 30 * minute)
+        );
+
+        // Another's take leaves it, and says whose it is.
+        let other = take_hold(&mut holds, &take("check", "b", 30), 2_000);
+        assert!(!other.yours);
+        assert_eq!(other.hold, first.hold);
+        // Another name is another hold.
+        assert!(take_hold(&mut holds, &take("deploy", "b", 5), 2_000).yours);
+
+        // Its holder's take again keeps it longer, held since it first was.
+        let again = take_hold(&mut holds, &take("check", "a", 10), 5_000);
+        assert!(again.yours);
+        assert_eq!(
+            (again.hold.since, again.hold.until),
+            (1_000, 5_000 + 10 * minute)
+        );
+
+        // Only its holder lets it go.
+        assert_eq!(
+            release_hold(&mut holds, &release("check", "b"), 6_000),
+            Err("a holds check, not b: only its holder lets it go".to_string())
+        );
+        assert_eq!(
+            release_hold(&mut holds, &release("check", "a"), 6_000),
+            Ok(())
+        );
+        // One not held is let go already.
+        assert_eq!(
+            release_hold(&mut holds, &release("check", "a"), 6_000),
+            Ok(())
+        );
+        let taken = take_hold(&mut holds, &take("check", "b", 1), 7_000);
+        assert!(taken.yours);
+        assert_eq!(taken.hold.since, 7_000);
+
+        // Past its time it's anyone's, and no longer listed.
+        let names = |held: Vec<Hold>| held.into_iter().map(|hold| hold.name).collect::<Vec<_>>();
+        assert_eq!(
+            names(held(&mut holds, 7_000 + minute - 1)),
+            ["check", "deploy"]
+        );
+        assert_eq!(names(held(&mut holds, 7_000 + minute)), ["deploy"]);
+        let lapsed = take_hold(&mut holds, &take("deploy", "a", 5), 2_000 + 5 * minute);
+        assert!(lapsed.yours);
+        assert_eq!(lapsed.hold.since, 2_000 + 5 * minute);
+    }
 }
