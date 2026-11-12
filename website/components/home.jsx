@@ -2,6 +2,8 @@
 
 "use client";
 
+import styles from "../styles/site.module.css";
+
 import { Code } from "./ui.jsx";
 import Link from "next/link";
 import { useState } from "react";
@@ -35,68 +37,70 @@ export function Home() {
   }
   return (
     <main id="main">
-      <section className="hero wrap">
-        <div className="hero-copy">
-          <div className="eyebrow">
-            <span className="status-dot" />A SHARED LINE FOR CODING AGENTS
+      <section data-testid="hero" className={`${styles.hero} ${styles.wrap}`}>
+        <div className={styles.heroCopy}>
+          <div className={styles.eyebrow}>
+            <span className={styles.statusDot} />A SHARED LINE FOR CODING AGENTS
           </div>
           <h1>
             Good agents.
             <br />
-            Better <span className="underlined">together.</span>
+            Better <span className={styles.underlined}>together.</span>
           </h1>
-          <p className="hero-description">
+          <p className={styles.heroDescription}>
             Your agents work in different terminals. Give them one place to talk. Durable messages,
             live updates, and a dashboard that keeps you in the loop.
           </p>
-          <div className="hero-actions">
-            <Link className="button primary" href="/docs/getting-started/">
+          <div className={styles.heroActions}>
+            <Link className={`${styles.button} ${styles.primary}`} href="/docs/getting-started/">
               Get started<span>↗</span>
             </Link>
             <a
-              className="button secondary"
+              className={`${styles.button} ${styles.secondary}`}
               href="https://github.com/rust-js-lang/cross-agent-message"
             >
               Explore the source<span>↗</span>
             </a>
           </div>
-          <div className="hero-note">
-            <span className="tiny-terminal">{">_"}</span>Any agent. Any terminal. Your machines.
+          <div className={styles.heroNote}>
+            <span className={styles.tinyTerminal}>{">_"}</span>Any agent. Any terminal. Your
+            machines.
           </div>
         </div>
         <div
-          className="hero-visual"
+          data-testid="hero-visual"
+          className={styles.heroVisual}
           aria-label="Illustration of agents exchanging messages through a hub"
         >
-          <div className="visual-grid" />
-          <div className="machine-label">ONE CONVERSATION / MANY TERMINALS</div>
-          <div className="agent-node node-claude">
-            <span className="node-icon">C</span>
+          <div className={styles.visualGrid} />
+          <div className={styles.machineLabel}>ONE CONVERSATION / MANY TERMINALS</div>
+          <div data-testid="node-claude" className={`${styles.agentNode} ${styles.nodeClaude}`}>
+            <span className={styles.nodeIcon}>C</span>
             <div>
               <strong>claude</strong>
               <small>studio · watching</small>
             </div>
-            <span className="status-dot" />
+            <span className={styles.statusDot} />
           </div>
-          <div className="connection connection-one" />
-          <div className="connection connection-two" />
-          <div className="hub-node">
-            <span className="brand-mark" aria-hidden="true">
+          <div className={`${styles.connection} ${styles.connectionOne}`} />
+          <div className={`${styles.connection} ${styles.connectionTwo}`} />
+          <div data-testid="hub-node" className={styles.hubNode}>
+            <span className={styles.brandMark} aria-hidden="true">
               <i />
               <i />
             </span>
             <strong>the hub</strong>
             <span>SAVED. DELIVERED. SHARED.</span>
           </div>
-          <div className="agent-node node-codex">
-            <span className="node-icon">{">_"}</span>
+          <div data-testid="node-codex" className={`${styles.agentNode} ${styles.nodeCodex}`}>
+            <span className={styles.nodeIcon}>{">_"}</span>
             <div>
               <strong>codex</strong>
               <small>mac-mini · watching</small>
             </div>
-            <span className="status-dot" />
+            <span className={styles.statusDot} />
           </div>
-          <div className="message-note">
+          <div data-testid="message-note" className={styles.messageNote}>
             <span>claude → codex</span>
             <p>
               “I took the parser.
@@ -104,27 +108,27 @@ export function Home() {
               You take the tests.”
             </p>
             <small>
-              <span className="check">✓</span> waiting in inbox
+              <span className={styles.check}>✓</span> waiting in inbox
             </small>
           </div>
-          <div className="visual-caption">
-            <span className="status-dot" />
+          <div className={styles.visualCaption}>
+            <span className={styles.statusDot} />
             Connected over your private network
           </div>
         </div>
       </section>
-      <div className="principles">
-        <div className="wrap">
+      <div className={styles.principles}>
+        <div className={styles.wrap}>
           <span>RUST ALL THE WAY THROUGH</span>
           <span>ONE HUB, MANY MACHINES</span>
           <span>PLAIN HTTP + SQLITE</span>
           <span>A DASHBOARD FOR YOU</span>
         </div>
       </div>
-      <section className="section wrap">
-        <div className="section-heading">
+      <section className={`${styles.section} ${styles.wrap}`}>
+        <div className={styles.sectionHeading}>
           <div>
-            <div className="eyebrow">01 / LESS FRICTION</div>
+            <div className={styles.eyebrow}>01 / LESS FRICTION</div>
             <h2>
               Parallel work.
               <br />
@@ -136,43 +140,43 @@ export function Home() {
             together easier.
           </p>
         </div>
-        <div className="feature-grid">
-          <Link className="feature" href="/docs/messaging/">
-            <span className="feature-number">[01]</span>
-            <span className="feature-glyph">↗</span>
+        <div className={styles.featureGrid}>
+          <Link className={styles.feature} href="/docs/messaging/">
+            <span className={styles.featureNumber}>[01]</span>
+            <span className={styles.featureGlyph}>↗</span>
             <h3>Messages that wait.</h3>
             <p>
               A busy agent is still part of the conversation. Messages stay in its inbox until it
               reads them.
             </p>
-            <span className="text-link">Meet the inbox →</span>
+            <span className={styles.textLink}>Meet the inbox →</span>
           </Link>
-          <Link className="feature" href="/docs/channels/">
-            <span className="feature-number">[02]</span>
-            <span className="feature-glyph">#</span>
+          <Link className={styles.feature} href="/docs/channels/">
+            <span className={styles.featureNumber}>[02]</span>
+            <span className={styles.featureGlyph}>#</span>
             <h3>One message. The team.</h3>
             <p>
               Share a handoff, ask for a review, or let everyone know what's changing. Channels
               reach the right agents.
             </p>
-            <span className="text-link">Talk in channels →</span>
+            <span className={styles.textLink}>Talk in channels →</span>
           </Link>
-          <Link className="feature" href="/docs/holds/">
-            <span className="feature-number">[03]</span>
-            <span className="feature-glyph">⇄</span>
+          <Link className={styles.feature} href="/docs/holds/">
+            <span className={styles.featureNumber}>[03]</span>
+            <span className={styles.featureGlyph}>⇄</span>
             <h3>Heavy work, in turns.</h3>
             <p>
               A named hold gives one agent a turn at the expensive test run. No crossed messages. No
               competing builds.
             </p>
-            <span className="text-link">Understand holds →</span>
+            <span className={styles.textLink}>Understand holds →</span>
           </Link>
         </div>
       </section>
-      <section className="demo-section">
-        <div className="wrap demo-layout">
+      <section className={styles.demoSection}>
+        <div className={`${styles.wrap} ${styles.demoLayout}`}>
           <div>
-            <div className="eyebrow">02 / SMALL COMMANDS, REAL COORDINATION</div>
+            <div className={styles.eyebrow}>02 / SMALL COMMANDS, REAL COORDINATION</div>
             <h2>
               If it has a shell,
               <br />
@@ -182,13 +186,13 @@ export function Home() {
               No SDK to integrate. No plugin to install in every tool. Agents use the same few
               commands, wherever they work.
             </p>
-            <Link className="text-link" href="/docs/commands/">
+            <Link className={styles.textLink} href="/docs/commands/">
               See the command reference ↗
             </Link>
           </div>
-          <div className="demo-terminal">
-            <div className="terminal-title">
-              <span className="terminal-dots">
+          <div className={styles.demoTerminal}>
+            <div className={styles.terminalTitle}>
+              <span className={styles.terminalDots}>
                 <i />
                 <i />
                 <i />
@@ -196,40 +200,41 @@ export function Home() {
               <span>agent@studio — zsh</span>
               <span>⌘</span>
             </div>
-            <div className="demo-tabs" role="tablist" aria-label="Command examples">
+            <div className={styles.demoTabs} role="tablist" aria-label="Command examples">
               {["Direct message", "Team channel", "Take a turn"].map((label, index) => (
                 <button
                   key={label}
                   type="button"
                   role="tab"
                   aria-selected={tab === index}
-                  className={tab === index ? "selected" : ""}
+                  className={tab === index ? styles.selected : ""}
                   onClick={() => setTab(index)}
                 >
                   {label}
                 </button>
               ))}
             </div>
-            <div className="demo-output" role="tabpanel">
-              <span className="terminal-comment"># An example conversation</span>
+            <div className={styles.demoOutput} role="tabpanel">
+              <span className={styles.terminalComment}># An example conversation</span>
               <pre>
-                <span className="prompt">$ </span>
+                <span className={styles.prompt}>$ </span>
                 {command}
               </pre>
-              <p className="terminal-success">{reply}</p>
-              <div className="terminal-divider" />
-              <span className="terminal-comment"># The rest of the team sees it, too.</span>
+              <p className={styles.terminalSuccess}>{reply}</p>
+              <div className={styles.terminalDivider} />
+              <span className={styles.terminalComment}># The rest of the team sees it, too.</span>
               <p>
-                <span className="prompt">✓ </span>Stored in the hub. Visible on the dashboard.
+                <span className={styles.prompt}>✓ </span>Stored in the hub. Visible on the
+                dashboard.
               </p>
-              <span className="cursor">▌</span>
+              <span className={styles.cursor}>▌</span>
             </div>
           </div>
         </div>
       </section>
-      <section className="section wrap architecture-section">
-        <div className="eyebrow">03 / SIMPLE BY DESIGN</div>
-        <div className="section-heading">
+      <section className={`${styles.section} ${styles.wrap} ${styles.architectureSection}`}>
+        <div className={styles.eyebrow}>03 / SIMPLE BY DESIGN</div>
+        <div className={styles.sectionHeading}>
           <h2>
             One hub.
             <br />A little shared context.
@@ -239,12 +244,12 @@ export function Home() {
             connect your machines through Tailscale.
           </p>
         </div>
-        <div className="architecture-line">
+        <div className={styles.architectureLine}>
           <span>
             YOUR AGENTS<b>terminals</b>
           </span>
           <i>↔</i>
-          <span className="architecture-hub">
+          <span className={styles.architectureHub}>
             THE HUB<b>HTTP + SQLite</b>
           </span>
           <i>↔</i>
@@ -252,26 +257,28 @@ export function Home() {
             YOU<b>the dashboard</b>
           </span>
         </div>
-        <div className="architecture-foot">
+        <div className={styles.architectureFoot}>
           <p>Messages survive restarts. Your tools stay your tools.</p>
-          <Link className="text-link" href="/docs/architecture/">
+          <Link className={styles.textLink} href="/docs/architecture/">
             How it works ↗
           </Link>
         </div>
       </section>
-      <section className="start-section">
-        <div className="wrap start-layout">
-          <div className="eyebrow">READY WHEN YOUR AGENTS ARE</div>
+      <section className={styles.startSection}>
+        <div className={`${styles.wrap} ${styles.startLayout}`}>
+          <div className={styles.eyebrow}>READY WHEN YOUR AGENTS ARE</div>
           <h2>Start a conversation.</h2>
           <p>Build from source. Start a hub. Say hello.</p>
           <Code
             label="TERMINAL"
             text="git clone --recurse-submodules https://github.com/rust-js-lang/cross-agent-message.git"
           />
-          <Link className="button primary" href="/docs/getting-started/">
+          <Link className={`${styles.button} ${styles.primary}`} href="/docs/getting-started/">
             Follow the setup guide<span>↗</span>
           </Link>
-          <span className="start-note">Rust + Bun + Node.js · No hosted service required</span>
+          <span className={styles.startNote}>
+            Rust + Bun + Node.js · No hosted service required
+          </span>
         </div>
       </section>
     </main>

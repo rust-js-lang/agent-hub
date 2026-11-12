@@ -1,5 +1,7 @@
 js::directive!("use client");
 
+use crate::styles::STYLES;
+
 use js::{settle, spawn};
 use react::{JSX, jsx, use_state};
 use webapi::window;
@@ -12,8 +14,8 @@ pub struct CodeProps {
 pub fn Code(CodeProps { text, label }: CodeProps) -> JSX::Element {
     let (status, set_status) = use_state(|| "Copy");
     jsx! {
-        <div className="code-block">
-            <div className="code-bar">
+        <div data-testid="code-block" className={STYLES.code_block}>
+            <div className={STYLES.code_bar}>
                 <span>{label}</span>
                 <button type="button" aria-label="Copy command" onClick={move |_| {
                     spawn(Box::new(async move {
@@ -25,7 +27,7 @@ pub fn Code(CodeProps { text, label }: CodeProps) -> JSX::Element {
                 }}>{*status}</button>
             </div>
             <pre><code>{text}</code></pre>
-            <span className="sr-only" role="status">{*status}</span>
+            <span className={STYLES.sr_only} role="status">{*status}</span>
         </div>
     }
 }

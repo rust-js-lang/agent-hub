@@ -524,7 +524,12 @@ The public landing page and documentation are a Next.js App Router app in
 `website/`. Routes, layouts, metadata, links, and React components are written
 in Rust through the rust-js `next` and `react` bindings. Styling is plain CSS.
 Routes and layouts live in `website/app/`, shared UI in `website/components/`,
-and documentation content in `website/lib/`. The site exports static HTML,
+and documentation content in `website/lib/`. Component styles live in
+`website/styles/site.module.css`, with a manually maintained Rust class-map
+binding in `website/styles/mod.rs`. Next.js scopes and bundles the CSS;
+the binding does not validate class names against the stylesheet. Global
+resets and design variables stay in `website/app/globals.css`.
+The site exports static HTML,
 independently of the hub; no Next.js server is needed in production.
 Vite still builds the hub dashboard.
 

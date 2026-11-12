@@ -10,6 +10,8 @@ pub mod layout;
 pub mod not_found;
 #[path = "../components/shell.rs"]
 pub mod shell;
+#[path = "../styles/mod.rs"]
+pub mod styles;
 #[path = "../components/ui.rs"]
 pub mod ui;
 pub mod docs {

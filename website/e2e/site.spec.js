@@ -18,6 +18,25 @@ const guides = [
   ["development", "Build it. Make it yours."],
 ];
 
+test("CSS Modules scope website classes away from global class names", async ({
+  page,
+}) => {
+  await page.goto("./");
+  const hero = page.getByTestId("hero");
+  const code = page.getByTestId("code-block");
+  await expect(hero).toHaveCSS("display", "grid");
+  await expect(code).toHaveCSS("overflow", "hidden");
+  expect(await hero.getAttribute("class")).not.toMatch(/(?:^|\s)hero(?:\s|$)/);
+  expect(await code.getAttribute("class")).not.toMatch(/(?:^|\s)codeBlock(?:\s|$)/);
+
+  await page.addStyleTag({
+    content: ".hero { display: none !important; } .codeBlock { overflow: visible !important; }",
+  });
+  await expect(hero).toBeVisible();
+  await expect(hero).toHaveCSS("display", "grid");
+  await expect(code).toHaveCSS("overflow", "hidden");
+});
+
 test("landing page loads its assets under the configured deployment path", async ({
   page,
 }) => {
@@ -36,7 +55,7 @@ test("landing page loads its assets under the configured deployment path", async
   await expect(
     page.getByRole("link", { name: "Get started", exact: false }).first(),
   ).toBeVisible();
-  await expect(page.locator(".hero")).toHaveCSS("display", "grid");
+  await expect(page.locator('[data-testid="hero"]')).toHaveCSS("display", "grid");
   expect(
     await page
       .locator("body")
@@ -154,7 +173,7 @@ test("copy button puts the actual command on the clipboard", async ({
 }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto("./docs/getting-started/");
-  const code = page.locator(".code-block").first();
+  const code = page.locator('[data-testid="code-block"]').first();
   const text = await code.locator("code").innerText();
   await code.getByRole("button", { name: "Copy command" }).click();
   await expect(code.getByRole("status")).toHaveText("Copied!");
@@ -214,12 +233,12 @@ test("responsive layouts keep diagram cards separate and docs content near the t
     const layout = await page.evaluate(() => {
       const rect = (selector) =>
         document.querySelector(selector).getBoundingClientRect();
-      const frame = rect(".hero-visual");
+      const frame = rect('[data-testid="hero-visual"]');
       const cards = [
-        ".node-claude",
-        ".hub-node",
-        ".message-note",
-        ".node-codex",
+        '[data-testid="node-claude"]',
+        '[data-testid="hub-node"]',
+        '[data-testid="message-note"]',
+        '[data-testid="node-codex"]',
       ].map(rect);
       const overlapping = cards.some((a, i) =>
         cards
@@ -241,7 +260,7 @@ test("responsive layouts keep diagram cards separate and docs content near the t
             r.top >= frame.top &&
             r.bottom <= frame.bottom,
         ),
-        brandHeight: rect(".brand > span:last-child").height,
+        brandHeight: rect('[aria-label="cross-agent-message home"] > span:last-child').height,
         overflow: document.documentElement.scrollWidth > innerWidth,
       };
     });
@@ -265,7 +284,7 @@ test("responsive layouts keep diagram cards separate and docs content near the t
       ).toHaveAttribute("aria-expanded", "false");
       expect(
         await page
-          .locator(".doc-article")
+          .locator('[data-testid="doc-article"]')
           .evaluate((article) => article.getBoundingClientRect().top),
       ).toBeLessThan(260);
       await openGuideMenu(page);

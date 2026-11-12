@@ -2,14 +2,16 @@
 
 "use client";
 
+import styles from "../styles/site.module.css";
+
 import { useState } from "react";
 import { $settle } from "@rust-js/std";
 
 export function Code({ text, label }) {
   const [status, setStatus] = useState("Copy");
   return (
-    <div className="code-block">
-      <div className="code-bar">
+    <div data-testid="code-block" className={styles.codeBlock}>
+      <div className={styles.codeBar}>
         <span>{label}</span>
         <button
           type="button"
@@ -28,7 +30,7 @@ export function Code({ text, label }) {
       <pre>
         <code>{text}</code>
       </pre>
-      <span className="sr-only" role="status">
+      <span className={styles.srOnly} role="status">
         {status}
       </span>
     </div>

@@ -2,6 +2,8 @@
 
 "use client";
 
+import styles from "../styles/site.module.css";
+
 import { PAGES } from "../lib/content.js";
 import { Code } from "./ui.jsx";
 import Link from "next/link";
@@ -16,8 +18,8 @@ export function Docs({ slug }) {
   const found = PAGES.some(
     (page) => page.title.toLowerCase().includes(needle) || page.slug.includes(needle),
   );
-  const children = ["START HERE", "WORK TOGETHER", "OPERATE", "REFERENCE"].map((group) => (
-    <div className="sidebar-group" key={group}>
+  const value = ["START HERE", "WORK TOGETHER", "OPERATE", "REFERENCE"].map((group) => (
+    <div className={styles.sidebarGroup} key={group}>
       <h2>{group}</h2>
       {PAGES.filter(
         (page) =>
@@ -26,7 +28,9 @@ export function Docs({ slug }) {
       ).map((page) => (
         <Link
           key={page.slug}
-          className={page.slug === slug ? "sidebar-link current" : "sidebar-link"}
+          className={
+            page.slug === slug ? `${styles.sidebarLink} ${styles.current}` : styles.sidebarLink
+          }
           href={`/docs/${page.slug}/`}
           aria-current={page.slug === slug ? "page" : "false"}
         >
@@ -53,11 +57,16 @@ export function Docs({ slug }) {
       ))}
     </div>
   ));
+  const children = !found && (
+    <p className={styles.noResults} role="status">
+      No guides found. Try “channels” or “messaging”.
+    </p>
+  );
   let element;
   if (index !== -1) {
     const page = $index(PAGES, index);
     const value$2 = page.sections.map((section, i) => (
-      <section key={section.title} className="doc-section" id={`section-${i}`}>
+      <section key={section.title} className={styles.docSection} id={`section-${i}`}>
         <h2>{section.title}</h2>
         <p>{section.prose}</p>
         {section.code !== "" && <Code label="TERMINAL / REFERENCE" text={section.code} />}
@@ -83,22 +92,22 @@ export function Docs({ slug }) {
       );
     }
     element = (
-      <article className="doc-article">
-        <div className="doc-breadcrumb">
+      <article data-testid="doc-article" className={styles.docArticle}>
+        <div className={styles.docBreadcrumb}>
           DOCUMENTATION<span>/</span>
           {page.group}
         </div>
         <h1>{page.title}</h1>
-        <p className="doc-description">{page.description}</p>
-        <div className="doc-rule" />
+        <p className={styles.docDescription}>{page.description}</p>
+        <div className={styles.docRule} />
         {value$2}
-        <div className="doc-feedback">
+        <div className={styles.docFeedback}>
           <span>Something unclear?</span>
           <a href="https://github.com/rust-js-lang/cross-agent-message/issues">
             Start a conversation on GitHub ↗
           </a>
         </div>
-        <nav className="doc-pagination" aria-label="Adjacent guides">
+        <nav className={styles.docPagination} aria-label="Adjacent guides">
           {value$3}
           {(index + 1) >>> 0 < PAGES.length && value$1()}
         </nav>
@@ -106,22 +115,22 @@ export function Docs({ slug }) {
     );
   } else {
     element = (
-      <article className="doc-article">
-        <div className="eyebrow">GUIDE NOT FOUND</div>
+      <article data-testid="doc-article" className={styles.docArticle}>
+        <div className={styles.eyebrow}>GUIDE NOT FOUND</div>
         <h1>Let's get you back on track.</h1>
-        <p className="doc-description">That documentation link doesn't match a guide.</p>
-        <Link className="button primary" href="/docs/introduction/">
+        <p className={styles.docDescription}>That documentation link doesn't match a guide.</p>
+        <Link className={`${styles.button} ${styles.primary}`} href="/docs/introduction/">
           Back to introduction →
         </Link>
       </article>
     );
   }
   return (
-    <main id="main" className="docs-layout wrap">
-      <aside className="docs-sidebar">
+    <main id="main" className={`${styles.docsLayout} ${styles.wrap}`}>
+      <aside className={styles.docsSidebar}>
         <button
           type="button"
-          className="docs-menu-toggle"
+          className={styles.docsMenuToggle}
           aria-expanded={menuOpen}
           aria-controls="guide-navigation"
           onClick={() => setMenuOpen(!menuOpen)}
@@ -130,12 +139,14 @@ export function Docs({ slug }) {
         </button>
         <div
           id="guide-navigation"
-          className={menuOpen ? "docs-navigation expanded" : "docs-navigation"}
+          className={
+            menuOpen ? `${styles.docsNavigation} ${styles.expanded}` : styles.docsNavigation
+          }
         >
-          <label className="search-label" htmlFor="docs-search">
+          <label className={styles.searchLabel} htmlFor="docs-search">
             FIND A GUIDE
           </label>
-          <div className="search-box">
+          <div className={styles.searchBox}>
             <span aria-hidden="true">⌕</span>
             <input
               id="docs-search"
@@ -146,21 +157,20 @@ export function Docs({ slug }) {
             />
           </div>
           <nav aria-label="Documentation">
+            {value}
             {children}
-            {!found && (
-              <p className="no-results" role="status">
-                No guides found. Try “channels” or “messaging”.
-              </p>
-            )}
           </nav>
-          <a className="sidebar-source" href="https://github.com/rust-js-lang/cross-agent-message">
+          <a
+            className={styles.sidebarSource}
+            href="https://github.com/rust-js-lang/cross-agent-message"
+          >
             View source on GitHub ↗
           </a>
         </div>
       </aside>
       {element}
-      <aside className="docs-note">
-        <span className="status-dot" />
+      <aside className={styles.docsNote}>
+        <span className={styles.statusDot} />
         <strong>A little context</strong>
         <p>The hub connects your agents. These guides help you connect the pieces.</p>
         <Link href="/docs/getting-started/">New here? Start with setup ↗</Link>

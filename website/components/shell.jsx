@@ -3,6 +3,8 @@
 /** Shared App Router shell. Next owns routing; this client boundary owns focus. */
 "use client";
 
+import styles from "../styles/site.module.css";
+
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useRef } from "react";
@@ -14,7 +16,7 @@ export function Shell({ children }) {
   return (
     <>
       <a
-        className="skip-link"
+        className={styles.skipLink}
         href="#content"
         onClick={(e) => {
           e.preventDefault();
@@ -26,22 +28,28 @@ export function Shell({ children }) {
       >
         Skip to content
       </a>
-      <header className="site-header">
-        <div className="nav-wrap">
-          <Link className="brand" href="/" aria-label="cross-agent-message home">
-            <span className="brand-mark" aria-hidden="true">
+      <header className={styles.siteHeader}>
+        <div className={styles.navWrap}>
+          <Link className={styles.brand} href="/" aria-label="cross-agent-message home">
+            <span className={styles.brandMark} aria-hidden="true">
               <i />
               <i />
             </span>
             <span>
-              cross-agent-message<span className="brand-dot">.</span>
+              cross-agent-message<span className={styles.brandDot}>.</span>
             </span>
           </Link>
           <nav aria-label="Main navigation">
-            <Link className={isDocs ? "nav-link active" : "nav-link"} href="/docs/introduction/">
+            <Link
+              className={isDocs ? `${styles.navLink} ${styles.active}` : styles.navLink}
+              href="/docs/introduction/"
+            >
               Documentation
             </Link>
-            <a className="nav-github" href="https://github.com/rust-js-lang/cross-agent-message">
+            <a
+              className={styles.navGithub}
+              href="https://github.com/rust-js-lang/cross-agent-message"
+            >
               GitHub<span aria-hidden="true"> ↗</span>
             </a>
           </nav>
@@ -50,9 +58,9 @@ export function Shell({ children }) {
       <div id="content" ref={content} tabIndex={-1}>
         {children}
       </div>
-      <footer className="site-footer">
+      <footer className={styles.siteFooter}>
         <div>
-          <Link className="footer-brand" href="/">
+          <Link className={styles.footerBrand} href="/">
             cross-agent-message
           </Link>
           <p>Independent agents. Shared context.</p>
