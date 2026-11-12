@@ -44,6 +44,8 @@ export const registerRequest: Request<Register>;
 
 export const noticeQueryRequest: Request<NoticeQuery>;
 
+export const noticeSnapshotRequest: Request<NoticeSnapshot>;
+
 export type Method = "Get" | "Post";
 
 export type Kind = "Json" | "Stream" | "Download";
@@ -55,6 +57,12 @@ export interface Route {
     kind: Kind;
     needs?: Feature | undefined;
 }
+
+/**
+ * Return every unmet requirement, once, so transports can refuse before
+ * sending a request whose additive fields an old hub would ignore.
+ */
+export function missing(route: Route, request: unknown, advertised: string[], Request: Request<unknown>): Feature[];
 
 export interface Get<Req, Res> {
     route: Route;
@@ -92,22 +100,6 @@ export const Download: {
     url<Q, Res>(download: Download<Q, Res>, query: Q, QQuery: Query<Q>): string;
 };
 
-/**
- * This endpoint has two historical response forms, selected by `with_id`.
- * Keep both typed and keep the old wire representation unchanged.
- */
-export type NoticeResponse = {
-    TAG: "Snapshot";
-    _0: Notice;
-} | {
-    TAG: "Legacy";
-    _0: [
-        string,
-        boolean,
-        number
-    ][];
-};
-
 export const AGENTS: Get<undefined, Agent[]>;
 
 export const REGISTER: Post<Register, Agent>;
@@ -124,7 +116,13 @@ export const READ: Post<ReadMessage, Message>;
 
 export const RETIRE: Post<Retire, Retired>;
 
-export const NOTICE: Get<NoticeQuery, NoticeResponse>;
+export const NOTICE: Get<NoticeQuery, [
+    string,
+    boolean,
+    number
+][]>;
+
+export const NOTICE_SNAPSHOT: Get<NoticeSnapshot, Notice>;
 
 export const HEALTH: Get<undefined, string>;
 
@@ -215,7 +213,14 @@ export const eventsQuery: Query<Events>;
 export interface NoticeQuery {
     name: string;
     channels: boolean;
-    withId: boolean;
 }
 
 export const noticeQueryQuery: Query<NoticeQuery>;
+
+/** A different question has a different response type, even on the same path. */
+export interface NoticeSnapshot {
+    name: string;
+    channels: boolean;
+}
+
+export const noticeSnapshotQuery: Query<NoticeSnapshot>;

@@ -21,22 +21,8 @@
  * ```
  */
 
-import {
-  Event,
-  eventDeserialize_deserialize,
-  noticeDeserialize_deserialize,
-  noticeSerialize_serialize,
-  refusalDeserialize_deserialize,
-} from "./lib.js";
-import {
-  $displayJsonError,
-  $fromJson,
-  $index,
-  $json,
-  $next,
-  $parseInt,
-  $utf8Bytes,
-} from "@rust-js/std";
+import { Event, eventDeserialize_deserialize, refusalDeserialize_deserialize } from "./lib.js";
+import { $displayJsonError, $fromJson, $index, $next, $parseInt, $utf8Bytes } from "@rust-js/std";
 
 export const Feature = {
   name(feature) {
@@ -93,9 +79,30 @@ function registerRequest_needs(register) {
   return register.reconnect ? ["AgentLifecycle"] : [];
 }
 
-export const noticeQueryRequest = { needs: noticeQueryRequest_needs };
-function noticeQueryRequest_needs(noticeQuery) {
-  return noticeQuery.withId ? ["NoticeId"] : [];
+export const noticeQueryRequest = { needs: (noticeQuery) => [] };
+
+export const noticeSnapshotRequest = { needs: noticeSnapshotRequest_needs };
+function noticeSnapshotRequest_needs(noticeSnapshot) {
+  return ["NoticeId"];
+}
+
+/**
+ * Return every unmet requirement, once, so transports can refuse before
+ * sending a request whose additive fields an old hub would ignore.
+ */
+export function missing(route, request, advertised, Request) {
+  const required = Request.needs(request);
+  if (route.needs != null) {
+    required.unshift(route.needs);
+  }
+  const missing = [];
+  for (let i = 0; i < required.length; i++) {
+    const feature = required[i];
+    if (!advertised.some((name) => name === Feature.name(feature)) && !missing.includes(feature)) {
+      missing.push(feature);
+    }
+  }
+  return missing;
 }
 
 export const Get = {
@@ -134,40 +141,6 @@ export const Download = {
   },
 };
 
-/**
- * This endpoint has two historical response forms, selected by `with_id`.
- * Keep both typed and keep the old wire representation unchanged.
- */
-export function noticeResponseSerialize_serialize(noticeResponse, json) {
-  if (noticeResponse.TAG === "Snapshot") {
-    noticeSerialize_serialize(noticeResponse._0, json);
-  } else {
-    json.beginArray();
-    for (const item of noticeResponse._0) {
-      json.element();
-      json.beginTuple();
-      json.element();
-      json.string(item[0]);
-      json.element();
-      json.bool(item[1]);
-      json.element();
-      json.int(item[2]);
-      json.endArray();
-    }
-    json.endArray();
-  }
-}
-
-export function noticeResponseDeserialize_deserialize(json) {
-  return json.untagged("data did not match any variant of untagged enum NoticeResponse", [
-    (content) => ({ TAG: "Snapshot", _0: noticeDeserialize_deserialize(content) }),
-    (content) => ({
-      TAG: "Legacy",
-      _0: $json.vec($json.tuple($json.string, $json.bool, $json.u32))(content),
-    }),
-  ]);
-}
-
 export const AGENTS = {
   route: { name: "AGENTS", method: "Get", path: "/api/agents", kind: "Json" },
 };
@@ -205,6 +178,15 @@ export const RETIRE = {
 export const NOTICE = {
   route: {
     name: "NOTICE",
+    method: "Get",
+    path: "/api/inbox/notice",
+    kind: "Json",
+    needs: "InboxDigests",
+  },
+};
+export const NOTICE_SNAPSHOT = {
+  route: {
+    name: "NOTICE_SNAPSHOT",
     method: "Get",
     path: "/api/inbox/notice",
     kind: "Json",
@@ -267,6 +249,13 @@ export const ALL = [
     needs: "AgentLifecycle",
   },
   { name: "NOTICE", method: "Get", path: "/api/inbox/notice", kind: "Json", needs: "InboxDigests" },
+  {
+    name: "NOTICE_SNAPSHOT",
+    method: "Get",
+    path: "/api/inbox/notice",
+    kind: "Json",
+    needs: "InboxDigests",
+  },
   { name: "HEALTH", method: "Get", path: "/api/health", kind: "Json" },
   { name: "BINARY", method: "Get", path: "/api/binary", kind: "Download", needs: "BinaryDownload" },
   { name: "HOLDS", method: "Get", path: "/api/holds", kind: "Json" },
@@ -529,27 +518,29 @@ function noticeQueryQuery_pairs(noticeQuery) {
   return [
     ["name", noticeQuery.name],
     ["channels", String(noticeQuery.channels)],
-    ["with_id", String(noticeQuery.withId)],
+    ["with_id", "false"],
   ];
 }
 
 function noticeQueryQuery_parse(pairs) {
-  const result = value(pairs, "name");
+  const result = boolean(pairs, "with_id");
   if (result.TAG === "Err") {
     return result;
   }
-  const result$1 =
-    result._0 != null ? { TAG: "Ok", _0: result._0 } : { TAG: "Err", _0: "missing name" };
+  if (result._0) {
+    return { TAG: "Err", _0: "snapshot query requires NOTICE_SNAPSHOT" };
+  }
+  const result$1 = value(pairs, "name");
   if (result$1.TAG === "Err") {
     return result$1;
   }
-  const value$1 = result$1._0;
-  const result$2 = boolean(pairs, "channels");
+  const result$2 =
+    result$1._0 != null ? { TAG: "Ok", _0: result$1._0 } : { TAG: "Err", _0: "missing name" };
   if (result$2.TAG === "Err") {
     return result$2;
   }
-  const value$2 = result$2._0;
-  const result$3 = boolean(pairs, "with_id");
+  const value$1 = result$2._0;
+  const result$3 = boolean(pairs, "channels");
   if (result$3.TAG === "Err") {
     return result$3;
   }
@@ -557,8 +548,50 @@ function noticeQueryQuery_parse(pairs) {
     TAG: "Ok",
     _0: {
       name: value$1,
-      channels: value$2,
-      withId: result$3._0,
+      channels: result$3._0,
+    },
+  };
+}
+
+export const noticeSnapshotQuery = {
+  pairs: noticeSnapshotQuery_pairs,
+  parse: noticeSnapshotQuery_parse,
+};
+function noticeSnapshotQuery_pairs(noticeSnapshot) {
+  return [
+    ["name", noticeSnapshot.name],
+    ["channels", String(noticeSnapshot.channels)],
+    ["with_id", "true"],
+  ];
+}
+
+function noticeSnapshotQuery_parse(pairs) {
+  const result = boolean(pairs, "with_id");
+  if (result.TAG === "Err") {
+    return result;
+  }
+  if (!result._0) {
+    return { TAG: "Err", _0: "snapshot query requires with_id=true" };
+  }
+  const result$1 = value(pairs, "name");
+  if (result$1.TAG === "Err") {
+    return result$1;
+  }
+  const result$2 =
+    result$1._0 != null ? { TAG: "Ok", _0: result$1._0 } : { TAG: "Err", _0: "missing name" };
+  if (result$2.TAG === "Err") {
+    return result$2;
+  }
+  const value$1 = result$2._0;
+  const result$3 = boolean(pairs, "channels");
+  if (result$3.TAG === "Err") {
+    return result$3;
+  }
+  return {
+    TAG: "Ok",
+    _0: {
+      name: value$1,
+      channels: result$3._0,
     },
   };
 }

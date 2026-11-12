@@ -105,13 +105,11 @@ impl Request for crate::Register {
     }
 }
 
-impl Request for NoticeQuery {
+impl Request for NoticeQuery {}
+
+impl Request for NoticeSnapshot {
     fn needs(&self) -> Vec<Feature> {
-        if self.with_id {
-            vec![Feature::NoticeId]
-        } else {
-            Vec::new()
-        }
+        vec![Feature::NoticeId]
     }
 }
 
@@ -135,6 +133,22 @@ pub struct Route {
     pub path: &'static str,
     pub kind: Kind,
     pub needs: Option<Feature>,
+}
+
+/// Return every unmet requirement, once, so transports can refuse before
+/// sending a request whose additive fields an old hub would ignore.
+pub fn missing(route: &Route, request: &impl Request, advertised: &[String]) -> Vec<Feature> {
+    let mut required = request.needs();
+    if let Some(feature) = route.needs {
+        required.insert(0, feature);
+    }
+    let mut missing = Vec::new();
+    for feature in required {
+        if !advertised.iter().any(|name| name == feature.name()) && !missing.contains(&feature) {
+            missing.push(feature);
+        }
+    }
+    missing
 }
 
 macro_rules! endpoint_kind {
@@ -181,15 +195,6 @@ impl<B, Res> Post<B, Res> {
     }
 }
 
-/// This endpoint has two historical response forms, selected by `with_id`.
-/// Keep both typed and keep the old wire representation unchanged.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(untagged)]
-pub enum NoticeResponse {
-    Snapshot(crate::Notice),
-    Legacy(Vec<(String, bool, u32)>),
-}
-
 macro_rules! endpoints {
     ($($name:ident: $kind:ident<$req:ty, $res:ty> = $path:expr, $needs:expr;)*) => {
         $(pub const $name: $kind<$req, $res> = $kind::new(stringify!($name), $path, $needs);)*
@@ -206,7 +211,8 @@ endpoints! {
     ACK: Post<crate::Acknowledge, Vec<u64>> = crate::ACK, Some(Feature::ReadAck);
     READ: Post<crate::ReadMessage, crate::Message> = crate::READ, Some(Feature::InboxDigests);
     RETIRE: Post<crate::Retire, crate::Retired> = crate::RETIRE, Some(Feature::AgentLifecycle);
-    NOTICE: Get<NoticeQuery, NoticeResponse> = crate::NOTICE, Some(Feature::InboxDigests);
+    NOTICE: Get<NoticeQuery, Vec<(String, bool, u32)>> = crate::NOTICE, Some(Feature::InboxDigests);
+    NOTICE_SNAPSHOT: Get<NoticeSnapshot, crate::Notice> = crate::NOTICE, Some(Feature::InboxDigests);
     HEALTH: Get<(), String> = "/api/health", None;
     BINARY: Download<(), Vec<u8>> = crate::BINARY, Some(Feature::BinaryDownload);
     HOLDS: Get<(), Vec<crate::Hold>> = crate::HOLDS, None;
@@ -433,7 +439,6 @@ impl Query for Events {
 pub struct NoticeQuery {
     pub name: String,
     pub channels: bool,
-    pub with_id: bool,
 }
 
 impl Query for NoticeQuery {
@@ -441,17 +446,48 @@ impl Query for NoticeQuery {
         vec![
             ("name", self.name.clone()),
             ("channels", self.channels.to_string()),
-            ("with_id", self.with_id.to_string()),
+            ("with_id", "false".to_string()),
         ]
     }
 
     fn parse(pairs: &[(String, String)]) -> Result<Self, String> {
+        if boolean(pairs, "with_id")? {
+            return Err("snapshot query requires NOTICE_SNAPSHOT".to_string());
+        }
         Ok(Self {
             name: value(pairs, "name")?
                 .ok_or_else(|| "missing name".to_string())?
                 .to_string(),
             channels: boolean(pairs, "channels")?,
-            with_id: boolean(pairs, "with_id")?,
+        })
+    }
+}
+
+/// A different question has a different response type, even on the same path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoticeSnapshot {
+    pub name: String,
+    pub channels: bool,
+}
+
+impl Query for NoticeSnapshot {
+    fn pairs(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("name", self.name.clone()),
+            ("channels", self.channels.to_string()),
+            ("with_id", "true".to_string()),
+        ]
+    }
+
+    fn parse(pairs: &[(String, String)]) -> Result<Self, String> {
+        if !boolean(pairs, "with_id")? {
+            return Err("snapshot query requires with_id=true".to_string());
+        }
+        Ok(Self {
+            name: value(pairs, "name")?
+                .ok_or_else(|| "missing name".to_string())?
+                .to_string(),
+            channels: boolean(pairs, "channels")?,
         })
     }
 }
@@ -477,6 +513,14 @@ mod tests {
                 Feature::BoundedSkip
             ]
         );
+        assert_eq!(
+            missing(&INBOX.route, &request, &["future-feature".to_string()]),
+            request.needs()
+        );
+        assert_eq!(
+            missing(&INBOX.route, &request, &["inbox-digests".to_string()]),
+            vec![Feature::ReadAck, Feature::BoundedSkip]
+        );
         request.sender = None;
         for field in ["digest", "skip", "channel"] {
             let json = match field {
@@ -491,23 +535,41 @@ mod tests {
 
     #[test]
     fn notice_wire_variants_are_both_typed_and_round_trip_unchanged() {
-        for json in [
-            r#"[["a",true,3]]"#,
-            r#"{"senders":[["a",true,3]],"newest_unread_id":9}"#,
-        ] {
-            let response: NoticeResponse = read(200, json).unwrap();
-            assert_eq!(serde_json::to_string(&response).unwrap(), json);
-        }
-        assert!(read::<NoticeResponse>(200, r#"{"senders":"wrong"}"#).is_err());
+        let legacy = r#"[["a",true,3]]"#;
+        let response: Vec<(String, bool, u32)> = read(200, legacy).unwrap();
+        assert_eq!(serde_json::to_string(&response).unwrap(), legacy);
+        let snapshot = r#"{"senders":[["a",true,3]],"newest_unread_id":9}"#;
+        let response: crate::Notice = read(200, snapshot).unwrap();
+        assert_eq!(serde_json::to_string(&response).unwrap(), snapshot);
+        assert!(read::<crate::Notice>(200, legacy).is_err());
+        assert!(read::<Vec<(String, bool, u32)>>(200, snapshot).is_err());
+        assert!(NoticeQuery::parse(&pairs(&[("name", "a"), ("with_id", "true")])).is_err());
+        assert!(NoticeSnapshot::parse(&pairs(&[("name", "a")])).is_err());
+        assert!(
+            NoticeQuery {
+                name: "a".to_string(),
+                channels: false
+            }
+            .needs()
+            .is_empty()
+        );
+        assert_eq!(
+            NoticeSnapshot {
+                name: "a".to_string(),
+                channels: false
+            }
+            .needs(),
+            vec![Feature::NoticeId]
+        );
     }
 
     #[test]
-    fn definition_table_has_unique_method_paths_and_distinct_transport_kinds() {
+    fn definition_table_has_unique_names_and_distinct_transport_kinds() {
         for (index, route) in ALL.iter().enumerate() {
             assert!(
                 !ALL[..index]
                     .iter()
-                    .any(|previous| previous.method == route.method && previous.path == route.path)
+                    .any(|previous| previous.name == route.name)
             );
         }
         assert_eq!(BINARY.route.kind, Kind::Download);
@@ -515,6 +577,10 @@ mod tests {
         assert_eq!(SEND.route.kind, Kind::Json);
         assert_eq!(REGISTER.route.path, AGENTS.route.path);
         assert_ne!(REGISTER.route.method, AGENTS.route.method);
+        // These definitions deliberately share one HTTP route. The hub must
+        // register their group once while checking both typed handlers.
+        assert_eq!(NOTICE.route.path, NOTICE_SNAPSHOT.route.path);
+        assert_eq!(NOTICE.route.method, NOTICE_SNAPSHOT.route.method);
     }
 
     fn pairs(input: &[(&str, &str)]) -> Vec<(String, String)> {
@@ -554,7 +620,10 @@ mod tests {
         round_trip(NoticeQuery {
             name: "a".to_string(),
             channels: true,
-            with_id: false,
+        });
+        round_trip(NoticeSnapshot {
+            name: "a".to_string(),
+            channels: true,
         });
         assert!(!Events::default().accepts(&Event::Restarting));
         let empty = Events::parse(&pairs(&[("types", "")])).unwrap();
