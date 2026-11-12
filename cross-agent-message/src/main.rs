@@ -86,7 +86,8 @@ enum Command {
         #[command(flatten)]
         me: Me,
         /// What to hold: letters, digits, `-`, `_` and `.`.
-        name: String,
+        #[arg(value_name = "HOLD")]
+        hold: String,
         /// How many minutes it's yours unless you take it again.
         #[arg(long = "for", value_name = "MINUTES", default_value_t = HOLD_MINUTES)]
         minutes: u32,
@@ -99,7 +100,8 @@ enum Command {
         #[command(flatten)]
         me: Me,
         /// The hold to let go.
-        name: String,
+        #[arg(value_name = "HOLD")]
+        hold: String,
     },
     /// List what's held now, by whom, and for how much longer.
     Holds {
@@ -130,11 +132,11 @@ fn main() -> Result<()> {
         Command::Watch { me } => watch(&client, &me),
         Command::Hold {
             me,
-            name,
+            hold: name,
             minutes,
             wait,
         } => hold(&client, &me, &name, minutes, wait),
-        Command::Release { me, name } => release(&client, &me, &name),
+        Command::Release { me, hold: name } => release(&client, &me, &name),
         Command::Holds { me } => holds(&client, &me),
     }
 }
@@ -337,13 +339,14 @@ fn holds(client: &Client, me: &Me) -> Result<()> {
     Ok(())
 }
 
-/// How long after `now` `then` is, roughly: "under a minute", "27m".
+/// How long after `now` `then` is, to the minute above: "under a minute",
+/// "30m" of one taken for thirty a moment ago.
 fn until(now: u64, then: u64) -> String {
-    let seconds = then.saturating_sub(now) / 1000;
-    match seconds {
-        0..60 => "under a minute".to_string(),
-        60..3600 => format!("{}m", seconds / 60),
-        _ => format!("{}h {}m", seconds / 3600, seconds % 3600 / 60),
+    let minutes = then.saturating_sub(now).div_ceil(60_000);
+    match minutes {
+        0..=1 => "under a minute".to_string(),
+        2..60 => format!("{minutes}m"),
+        _ => format!("{}h {}m", minutes / 60, minutes % 60),
     }
 }
 
@@ -364,8 +367,10 @@ mod tests {
     use super::{ago, until};
 
     #[test]
-    fn until_rounds_down_to_minutes() {
+    fn until_rounds_up_to_minutes() {
         assert_eq!(until(0, 59_000), "under a minute");
+        assert_eq!(until(0, 60_000), "under a minute");
+        assert_eq!(until(250, 30 * 60_000), "30m");
         assert_eq!(until(0, 30 * 60_000), "30m");
         assert_eq!(until(0, 95 * 60_000), "1h 35m");
         assert_eq!(until(9, 0), "under a minute");
