@@ -2,5 +2,12 @@
   // rust-analyzer checks the dashboard through rust-js, which reads inside
   // `jsx!` as a plain rustc doesn't, and the hub, the command line and the
   // protocol natively (rust-js's ADRs 0222 and 1094).
-  "rust-analyzer.check.overrideCommand": ["node", "rust-js/tooling/check.js", "--package", "dashboard"]
+  "rust-analyzer.check.overrideCommand": [
+    "node",
+    "rust-js/tooling/check.js",
+    "--package",
+    "dashboard",
+    "--package",
+    "website"
+  ]
 }

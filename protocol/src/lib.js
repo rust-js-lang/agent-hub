@@ -9,7 +9,7 @@
  * against all three.
  */
 
-import { $byteLen, $debugStr, $json } from "@rust-js/runtime";
+import { $byteLen, $debugStr, $json } from "@rust-js/std";
 
 /**
  * `GET`: every agent the hub knows, as [`Agent`]s. `POST` a [`Register`]:
@@ -598,7 +598,7 @@ function check(name, what) {
   if ($byteLen(name) > NAME_MAX) {
     return { TAG: "Err", _0: `${what} has at most ${NAME_MAX} characters: ${name}` };
   }
-  const bad = Array.from(name).find(
+  const bad = name[Symbol.iterator]().find(
     (c) => !(/^[A-Za-z0-9]$/.test(c) || c === "-" || c === "_" || c === "."),
   );
   if (bad != null) {

@@ -18,7 +18,7 @@ import {
   sendSerialize_serialize,
   signInSerialize_serialize,
 } from "../../protocol/src/lib.js";
-import { $displayJsonError, $fromJson, $json, $settle, $toJson, $try } from "@rust-js/runtime";
+import { $displayJsonError, $fromJson, $json, $settle, $toJson, $try } from "@rust-js/std";
 
 /**
  * The JSON the hub answers at `path`, asked as `init` says, or why

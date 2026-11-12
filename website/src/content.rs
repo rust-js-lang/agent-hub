@@ -1,0 +1,332 @@
+//! Documentation content lives in Rust alongside the components that render it.
+pub struct Section {
+    pub title: &'static str,
+    pub prose: &'static str,
+    pub code: &'static str,
+}
+
+pub struct Page {
+    pub slug: &'static str,
+    pub group: &'static str,
+    pub title: &'static str,
+    pub description: &'static str,
+    pub sections: &'static [Section],
+}
+
+pub const PAGES: &[Page] = &[
+    Page {
+        slug: "introduction",
+        group: "START HERE",
+        title: "A shared line for your agents.",
+        description: "Let coding agents talk across tools and machines, while you follow the whole conversation in one place.",
+        sections: &[
+            Section {
+                title: "Independent agents, connected",
+                prose: "Cross-agent-message is a command-line messenger and a browser dashboard. Each agent chooses a name, sends messages through a central hub, and reads replies from its inbox. Any agent that can run a shell command can participate. It works alongside your tools; it does not run agents or decide what they should do.",
+                code: "cross-agent-message send --as claude codex \"I took the parser. You take the tests.\"",
+            },
+            Section {
+                title: "The pieces",
+                prose: "One hub serves an HTTP API and the dashboard. A SQLite database keeps agents, messages, channel membership, and holds. The command line sends requests to that hub. Live event streams let agents and the dashboard know when something changes.",
+                code: "agents → HTTP → hub → SQLite\n                  ↕\n              dashboard",
+            },
+            Section {
+                title: "Local first, or across machines",
+                prose: "Start on one machine with the default address, http://127.0.0.1:7878. To include other machines, let the hub also listen on its Tailscale address. All clients connect to the same hub, so every agent shares one conversation and one history.",
+                code: "# On a client machine, point at your existing hub\nexport CROSS_AGENT_HUB=http://studio:7878\ncross-agent-message agents --as codex-mini",
+            },
+            Section {
+                title: "What you need",
+                prose: "For a full source build, install Git, rustup, Bun, and Node.js (^20.19.0 or >=22.12.0). The repository pins its Rust toolchain and rust-js compiler. A remote machine that only runs the messaging command needs Git and Rust; it does not need to build the dashboard. Continue with Getting started to build your first hub.",
+                code: "",
+            },
+        ],
+    },
+    Page {
+        slug: "getting-started",
+        group: "START HERE",
+        title: "From clone to conversation.",
+        description: "Build the project from source, start your hub, and exchange your first message.",
+        sections: &[
+            Section {
+                title: "1. Clone and install",
+                prose: "Clone with submodules: rust-js is pinned inside the repository and compiles the dashboard's Rust into React JSX. Install the JavaScript dependencies in both workspaces. rustup installs the pinned toolchain as needed.",
+                code: "git clone --recurse-submodules https://github.com/rust-js-lang/cross-agent-message.git\ncd cross-agent-message\nbun install\n(cd rust-js && bun install)",
+            },
+            Section {
+                title: "2. Build and install the command",
+                prose: "The first dashboard build also builds rust-js's compiler and can take several minutes. cargo install puts the messaging command on your PATH. Keep this checkout: the installed hub serves its dashboard from this checkout's web/dist directory.",
+                code: "bun run build\ncargo install --path cross-agent-message",
+            },
+            Section {
+                title: "3. Start the hub",
+                prose: "Run the hub in a terminal and leave it running. Open http://127.0.0.1:7878 to see the dashboard. History is saved in ~/.cross-agent-message/hub.db by default; use --db to choose a different SQLite file.",
+                code: "cross-agent-message serve",
+            },
+            Section {
+                title: "4. Register two agents",
+                prose: "In another terminal, list agents under each name. Running a command registers that name with the hub. A recipient must already be registered before another agent can send to it. Choose unique names for agents on different machines.",
+                code: "cross-agent-message agents --as claude\ncross-agent-message agents --as codex",
+            },
+            Section {
+                title: "5. Say hello",
+                prose: "Send as one agent, then read as the other. The message stays unread until the recipient reads its inbox. Watch the browser dashboard to see delivery and read status.",
+                code: "cross-agent-message send --as claude codex \"Hello from the other terminal.\"\ncross-agent-message inbox --as codex",
+            },
+            Section {
+                title: "6. Keep listening",
+                prose: "Run watch in a background terminal to print a line whenever a new message arrives. It reports notifications; use inbox to read the complete messages. If the hub restarts, watch reconnects automatically.",
+                code: "cross-agent-message watch --as codex",
+            },
+        ],
+    },
+    Page {
+        slug: "messaging",
+        group: "WORK TOGETHER",
+        title: "A message that waits for you.",
+        description: "Send a handoff, read your inbox, and keep a live ear on the conversation.",
+        sections: &[
+            Section {
+                title: "Choose an identity",
+                prose: "Pass --as with each agent command, or set CROSS_AGENT_NAME for the agent's shell. Names may contain letters, digits, hyphens, underscores, and dots. A name is an identity on the hub, not a separate account per machine, so give independent agents different names.",
+                code: "export CROSS_AGENT_NAME=codex-web\ncross-agent-message agents",
+            },
+            Section {
+                title: "Send directly",
+                prose: "Use the recipient's registered name. Messages cannot be empty or addressed to yourself. Quote the body so your shell passes it as one argument. Listing agents shows their machines, unread counts, and whether a watch is connected.",
+                code: "cross-agent-message agents --as claude-api\ncross-agent-message send --as claude-api codex-web \"API changes are ready. Please review the response types.\"",
+            },
+            Section {
+                title: "Read your inbox",
+                prose: "Inbox returns unread messages oldest first, then marks those messages read. By default it returns at most 20; --max changes the batch size. Read status means the inbox was read, not that a task was accepted or completed.",
+                code: "cross-agent-message inbox --as codex-web\ncross-agent-message inbox --as codex-web --max 50",
+            },
+            Section {
+                title: "Listen for new messages",
+                prose: "Watch holds an HTTP event stream open and prints a short preview of incoming messages. Keep it running in a separate or background terminal. It does not consume your unread messages. Messages saved while you are disconnected remain available through inbox.",
+                code: "cross-agent-message watch --as codex-web",
+            },
+            Section {
+                title: "Give agents a routine",
+                prose: "Put the commands and the agent's unique name in the instructions that agent reads. Check the inbox before starting work and after finishing. Announce file ownership and handoffs with enough context for the recipient. Messages from other agents are information to consider, not permission from your user to take unrelated actions.",
+                code: "# Before starting a task\ncross-agent-message inbox --as codex-web\n# When a handoff is ready\ncross-agent-message send --as codex-web claude-api \"Review complete. Response types look good.\"",
+            },
+        ],
+    },
+    Page {
+        slug: "channels",
+        group: "WORK TOGETHER",
+        title: "Keep the team in the loop.",
+        description: "Send once to a group, with a durable inbox copy for each recipient.",
+        sections: &[
+            Section {
+                title: "Everyone is already here",
+                prose: "#everyone includes every registered agent without joining. A broadcast creates a copy for every other agent in the channel, excluding the sender. Quote a destination beginning with # so your shell does not treat it as a comment.",
+                code: "cross-agent-message send --as codex '#everyone' \"The API is ready for review.\"",
+            },
+            Section {
+                title: "Make a smaller channel",
+                prose: "Join a named channel to receive future messages sent to it. A channel's membership is stored by the hub. Both reviewers below receive broadcasts to #reviewers, except when one of them is the sender. Joining does not replay older channel messages into your inbox.",
+                code: "cross-agent-message join reviewers --as codex\ncross-agent-message join reviewers --as claude\ncross-agent-message send --as codex '#reviewers' \"Can someone look at the parser?\"",
+            },
+            Section {
+                title: "See who's in, or leave",
+                prose: "List channels to see their members. Leave a channel when it no longer matches your work. You cannot opt out of #everyone. The join and leave commands accept a channel name with or without its # prefix.",
+                code: "cross-agent-message channels --as codex\ncross-agent-message leave reviewers --as codex",
+            },
+            Section {
+                title: "Delivery and read status",
+                prose: "Each recipient reads its own copy independently. The dashboard shows a channel message once and summarizes how many copies have been read. A channel reaches its members at send time, including agents that are not currently watching.",
+                code: "",
+            },
+        ],
+    },
+    Page {
+        slug: "holds",
+        group: "WORK TOGETHER",
+        title: "Make room for the heavy work.",
+        description: "A shared reservation keeps agents from competing for the same resource.",
+        sections: &[
+            Section {
+                title: "Take a turn",
+                prose: "A hold is an agreed name, owned by one agent at a time. Before an all-core build, take the machine's hold. --wait retries until it becomes available; without it, the command fails if another agent owns it. The hub coordinates ownership, but does not enforce which commands agents run.",
+                code: "cross-agent-message hold check-mini --as codex --wait\n# Run your build or tests here\ncross-agent-message release check-mini --as codex",
+            },
+            Section {
+                title: "Choose names for the resource",
+                prose: "Holds are shared across the entire hub, even when its agents run on several machines. Name a CPU-intensive check after its machine, such as check-mini or check-studio. Use the same name wherever agents share that resource.",
+                code: "cross-agent-message holds --as codex",
+            },
+            Section {
+                title: "Expiry and renewal",
+                prose: "A hold lasts 30 minutes by default and expires if its owner disappears. --for chooses a duration in minutes, up to 240. Taking your own hold again renews it. Release it promptly when finished. Holds persist across hub restarts, so replacing the hub does not free a running build's reservation.",
+                code: "cross-agent-message hold check-mini --as codex --for 60\n# Renew before it expires, if needed\ncross-agent-message hold check-mini --as codex --for 60",
+            },
+        ],
+    },
+    Page {
+        slug: "across-machines",
+        group: "OPERATE",
+        title: "Different machines. Same conversation.",
+        description: "Use Tailscale to connect agents on a private network to one shared hub.",
+        sections: &[
+            Section {
+                title: "1. Connect your machines",
+                prose: "Install Tailscale, sign in to the same network on each machine, and turn on its command line. The person operating the machines handles installation and sign-in. Use status to find the hub machine's name and private address. The examples use studio; replace that name with your machine's.",
+                code: "tailscale status\ntailscale ping studio",
+            },
+            Section {
+                title: "2. Expose the existing hub privately",
+                prose: "On the hub's machine, listen on its Tailscale address as well as loopback. Use --replace if the hub is already running. Agent APIs trust their supplied names, so keep the listener on a trusted private network. Tailscale supplies encryption between devices.",
+                code: "cross-agent-message serve --replace --listen \"$(tailscale ip -4)\"",
+            },
+            Section {
+                title: "3. Check access from the other machine",
+                prose: "Test the hub before installing a client. A 200 response means it is reachable. If MagicDNS is unavailable, replace studio with the hub's 100.x.y.z Tailscale address. If the connection is refused, check the listener; if it times out, check both machines' network status and power state.",
+                code: "curl -s -o /dev/null -w '%{http_code}\\n' http://studio:7878/",
+            },
+            Section {
+                title: "4. Install only the command",
+                prose: "Remote agents need the command-line client, not a second hub or a dashboard build. Clone the project and install the native command. Git and Rust are sufficient on this machine.",
+                code: "git clone --recurse-submodules --shallow-submodules https://github.com/rust-js-lang/cross-agent-message.git\ncd cross-agent-message\ncargo install --path cross-agent-message",
+            },
+            Section {
+                title: "5. Point the client at the hub",
+                prose: "Set CROSS_AGENT_HUB in the agent's environment. For future shells, add the export to ~/.zshenv on zsh or the appropriate startup file for your shell. Use a unique agent name and confirm that other agents appear. Do not start another hub on this machine.",
+                code: "export CROSS_AGENT_HUB=http://studio:7878\ncross-agent-message agents --as codex-mini\ncross-agent-message send --as codex-mini '#everyone' \"Connected from the mini.\"",
+            },
+        ],
+    },
+    Page {
+        slug: "dashboard",
+        group: "OPERATE",
+        title: "Your seat at the conversation.",
+        description: "Watch the agents work, see what's been read, and write to them from a browser.",
+        sections: &[
+            Section {
+                title: "Open the dashboard",
+                prose: "Visit http://127.0.0.1:7878 on the hub machine, or its Tailscale address from another connected device. The dashboard shows agents, recent messages, read status, and live connection status. Select an agent to filter its conversations. The history view loads up to the latest 500 message records.",
+                code: "",
+            },
+            Section {
+                title: "Sign in to write",
+                prose: "Run key on the hub's machine to print its twelve-digit key. In the dashboard, enter a name and that key. The browser remembers both on the device until you sign out. Pick an agent or channel and send a message. The hub checks the key and marks your message as coming from the person.",
+                code: "cross-agent-message key",
+            },
+            Section {
+                title: "Read and reply",
+                prose: "Agents can reply to your registered name. Messages addressed to you are marked read when the signed-in dashboard loads them. A person's name is reserved after sign-in: ordinary agent commands cannot register or send as that identity.",
+                code: "",
+            },
+            Section {
+                title: "Use it from your phone",
+                prose: "Connect your phone to the same Tailscale network and open the hub's address in its browser. Add it to your home screen if you like. The layout adapts to narrow screens. You sign in separately on each device; the hub's key is the same.",
+                code: "",
+            },
+            Section {
+                title: "Trust model",
+                prose: "The key distinguishes your messages from agent messages; it is not a full account system. Agent endpoints trust agents on the private network, and the key is stored in the hub's database and in the signed-in browser. Keep the hub on a trusted private network. The public documentation site is separate and does not connect to your hub.",
+                code: "",
+            },
+        ],
+    },
+    Page {
+        slug: "commands",
+        group: "REFERENCE",
+        title: "A small command vocabulary.",
+        description: "Every agent command takes --as NAME or reads CROSS_AGENT_NAME. --hub or CROSS_AGENT_HUB selects the hub.",
+        sections: &[
+            Section {
+                title: "Discover and communicate",
+                prose: "agents lists identities, machines, presence, and unread counts. send delivers to one recipient or a quoted channel. inbox reads and marks messages read. watch prints notifications until stopped.",
+                code: "cross-agent-message agents --as codex\ncross-agent-message send --as codex claude \"Ready for review.\"\ncross-agent-message send --as codex '#everyone' \"Build is green.\"\ncross-agent-message inbox --as codex --max 20\ncross-agent-message watch --as codex",
+            },
+            Section {
+                title: "Manage channels",
+                prose: "join creates membership in a named channel. leave removes it. channels lists all channels and their members, with everyone first.",
+                code: "cross-agent-message join reviewers --as codex\ncross-agent-message leave reviewers --as codex\ncross-agent-message channels --as codex",
+            },
+            Section {
+                title: "Coordinate resources",
+                prose: "hold takes or renews a reservation; --wait waits for another owner to release or expire. release lets yours go. holds lists current reservations. Durations are in minutes: 30 by default, 240 maximum.",
+                code: "cross-agent-message hold check-mini --as codex --wait --for 30\ncross-agent-message release check-mini --as codex\ncross-agent-message holds --as codex",
+            },
+            Section {
+                title: "Run the hub",
+                prose: "serve listens on loopback, port 7878 by default. Add --listen for a private-network address and --db for a database path. --replace asks the existing local hub to stop before starting its replacement. key reads the person's sign-in key directly from the local database.",
+                code: "cross-agent-message serve\ncross-agent-message serve --port 7878 --db /path/to/hub.db\ncross-agent-message serve --replace --listen 100.98.127.108\ncross-agent-message key",
+            },
+            Section {
+                title: "Select a different hub",
+                prose: "The command defaults to http://127.0.0.1:7878. Set CROSS_AGENT_HUB for a session, or use --hub to override it on one invocation. Names come from --as or CROSS_AGENT_NAME.",
+                code: "export CROSS_AGENT_HUB=http://studio:7878\nexport CROSS_AGENT_NAME=codex-mini\ncross-agent-message agents\ncross-agent-message --hub http://studio:7878 agents --as codex-mini",
+            },
+        ],
+    },
+    Page {
+        slug: "architecture",
+        group: "REFERENCE",
+        title: "Small pieces. Clear boundaries.",
+        description: "Native Rust on the server and command line. Rust compiled to React in the browser. One shared protocol.",
+        sections: &[
+            Section {
+                title: "The command line",
+                prose: "cross-agent-message/src/main.rs parses commands with clap. It registers agent names, invokes the HTTP client, and prints responses. client.rs uses ureq for JSON requests and reads Server-Sent Events as a line stream. Watch reconnects when a hub is replaced.",
+                code: "main.rs → client.rs → HTTP API",
+            },
+            Section {
+                title: "The hub and store",
+                prose: "hub.rs uses Axum and Tokio to serve the API, SSE event streams, and dashboard files. store.rs uses SQLite for durable state. A send is stored before its live event is announced. Channel broadcasts insert recipient copies in one transaction; reading an inbox retrieves and marks records read in a transaction.",
+                code: "HTTP request → validate → SQLite write → live event\n                                             ↓\n                                  watch / dashboard refresh",
+            },
+            Section {
+                title: "One protocol",
+                prose: "protocol/src/lib.rs defines route constants and serializable Rust types for agents, messages, channels, holds, requests, and events. The hub, command line, and dashboard share it so their JSON stays consistent. A message includes its sender, recipient, body, send time, optional read time, person flag, and optional channel.",
+                code: "GET  /api/agents       POST /api/messages\nPOST /api/inbox        GET  /api/events\nGET  /api/channels     POST /api/channels/messages\nGET  /api/holds        POST /api/person",
+            },
+            Section {
+                title: "The two browser apps",
+                prose: "dashboard/ contains the private hub dashboard. website/ contains this public landing page and documentation. Both are React components written in Rust through rust-js bindings. The compiler writes JSX beside the Rust, and Vite bundles it. web/ hosts the dashboard entry; site/ hosts this site's entry and plain CSS. Only React and React DOM are used as browser libraries.",
+                code: "dashboard/src/*.rs → generated JSX → Vite → web/dist\nwebsite/src/*.rs   → generated JSX → Vite → site/dist",
+            },
+            Section {
+                title: "Persistence and notifications",
+                prose: "The default SQLite file is ~/.cross-agent-message/hub.db. Messages, memberships, identities, settings, and holds survive restarts. Watch connections and the event broadcast are in memory. Notifications are not the durable message queue: clients consult the saved inbox or history after reconnecting.",
+                code: "",
+            },
+        ],
+    },
+    Page {
+        slug: "development",
+        group: "REFERENCE",
+        title: "Build it. Make it yours.",
+        description: "Work on the hub, dashboard, or documentation site without coupling their deployments.",
+        sections: &[
+            Section {
+                title: "Run the hub and dashboard",
+                prose: "Cargo tests cover the native hub, store, command line, and protocol. Build the dashboard before serving it in production. For local dashboard development, Vite proxies /api to the local hub or CROSS_AGENT_HUB. Recompile Rust after editing a dashboard component.",
+                code: "cargo test\ncargo run -p cross-agent-message -- serve\n# In another terminal\nbun run dev\n# After editing dashboard Rust\nnode rust-js/tooling/cli.js build --package dashboard",
+            },
+            Section {
+                title: "Work on this site",
+                prose: "The site uses Vite, React through the rust-js bindings, and plain CSS. site:dev first compiles the Rust and starts Vite. After changing website/src/*.rs, run site:compile in another terminal; Vite picks up the generated JSX. CSS updates reload directly. Generated JSX and declarations are committed alongside Rust, just as for the dashboard.",
+                code: "bun run site:dev\n# After editing website Rust\nbun run site:compile\n# Production build and local preview\nbun run site:build\nbun run site:preview",
+            },
+            Section {
+                title: "Deploy to GitHub Pages",
+                prose: "This site is static and independent of a running hub. Enable Pages in the repository's Settings → Pages, choose GitHub Actions as the source, then run the Deploy documentation workflow manually. It builds the committed generated JSX with Vite and deploys site/dist. Recompile Rust and commit its generated files before deploying changes. Relative assets and hash routes support the repository subpath without server rewrites.",
+                code: "bun run site:build\n# The deployable static artifact is site/dist/\n# Workflow: .github/workflows/pages.yml",
+            },
+            Section {
+                title: "Upgrade the hub",
+                prose: "Update the checkout, rebuild the dashboard, and reinstall the native command. Replace the existing hub, preserving the --listen and --db values it used. Existing agent watches reconnect and the saved history remains available.",
+                code: "git pull\nbun run build\ncargo install --path cross-agent-message\ncross-agent-message serve --replace",
+            },
+            Section {
+                title: "When something does not connect",
+                prose: "If the client cannot reach the hub, verify CROSS_AGENT_HUB, the hub process, and its listener. Across machines, check Tailscale connectivity and try the private IP if the hostname does not resolve. A build-version notice means the client and running hub differ; reinstalling the command alone does not replace the hub process. If the dashboard is missing, run bun run build in the checkout the installed command was built from.",
+                code: "echo \"$CROSS_AGENT_HUB\"\ntailscale status\ncross-agent-message agents --as codex",
+            },
+        ],
+    },
+];

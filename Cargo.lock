@@ -1354,6 +1354,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "website"
+version = "0.1.0"
+dependencies = [
+ "rust-js-builtins",
+ "rust-js-react",
+ "rust-js-webapi",
+]
+
+[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

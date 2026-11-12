@@ -518,6 +518,56 @@ in `~/.zshenv`. Never start a hub here. Your machine's hold is
 `check-mini`, not `check`.
 ```
 
+## Documentation website
+
+The public landing page and documentation live in `website/` (React components
+written in Rust through the rust-js bindings) and `site/` (Vite entry and plain
+CSS). This is a separate static site; it does not need or connect to a hub.
+Its only browser libraries are React and React DOM, plus rust-js's standard
+library when generated code needs it.
+
+```bash
+bun run site:dev        # compile website Rust, then start Vite
+bun run site:compile    # after editing website/src/*.rs; Vite reloads the JSX
+bun run site:build      # compile Rust and bundle to site/dist
+bun run site:preview    # preview the production bundle
+```
+
+Vite reloads CSS directly. Generated JSX and declarations beside the Rust
+are committed, as they are for `dashboard/`. `bun run clients:compile`
+regenerates both browser apps in one compiler invocation. The rust-js
+submodule is pinned to the team's verified `f308e07d9` build; its generated
+imports use the single `@rust-js/std` package.
+
+### Browser tests
+
+The site has its own Playwright configuration, separate from the dashboard
+suite. It tests desktop and mobile Chromium against the production bundle
+at `/cross-agent-message/`, including deep links, navigation, command demos,
+guide search, clipboard copying, and horizontal overflow.
+
+```bash
+bun run site:build
+bunx playwright install chromium
+bun run site:test
+```
+
+### GitHub Pages
+
+The site is prepared for GitHub Pages, with relative asset URLs and
+hash-based documentation routes. It works at a repository subpath or a
+custom domain without a server rewrite. To deploy later:
+
+1. Commit the website sources **and their generated JSX/declarations**.
+2. In the repository's **Settings → Pages**, choose **GitHub Actions**.
+3. Run **Deploy documentation** in Actions (`.github/workflows/pages.yml`).
+
+The manual workflow installs locked dependencies, bundles the committed
+JSX, runs the browser tests, and deploys `site/dist`. It does not need to
+build the Rust compiler on the runner. All actions are pinned to full commit
+SHAs of their latest stable releases. No automatic production deployment
+is configured.
+
 ## Work on it
 
 ```bash
@@ -537,10 +587,10 @@ bun run build
 bun run test
 ```
 
-In VS Code, rust-analyzer checks the dashboard through rust-js, which reads
-inside `jsx!`, and the rest natively: `.vscode/settings.json` sets its
-check to `node rust-js/tooling/check.js --package dashboard`. Other
-editors take the same command as rust-analyzer's `check.overrideCommand`.
+In VS Code, rust-analyzer checks both browser apps through rust-js, which
+reads inside `jsx!`, and the rest natively. `.vscode/settings.json` sets its
+check to `node rust-js/tooling/check.js --package dashboard --package website`.
+Other editors take the same command as rust-analyzer's `check.overrideCommand`.
 
 `bun run dev` sends `/api` to the hub at `127.0.0.1:7878`, or to
 `CROSS_AGENT_HUB`. The JavaScript rust-js writes beside `dashboard/src/*.rs`
@@ -551,7 +601,9 @@ is committed, so diffs show what a change does to it.
 | `protocol/` | The routes and their JSON, shared by the hub, the command line and the dashboard. |
 | `cross-agent-message/` | The hub (`hub.rs`), its SQLite store (`store.rs`), and the command line (`main.rs`, `client.rs`). |
 | `dashboard/` | The page, in Rust, compiled to JSX by rust-js. |
-| `web/` | The page's HTML, CSS and Vite config. |
+| `web/` | The dashboard's HTML, CSS and Vite config. |
+| `website/` | The landing page and documentation, React written in Rust. |
+| `site/` | The public site's Vite entry, plain CSS, and Playwright tests. |
 | `rust-js/` | rust-js, pinned. |
 
 ### Move rust-js to another commit

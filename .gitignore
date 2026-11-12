@@ -8,3 +8,5 @@
 *.jsx.map
 /test-results
 /playwright-report
+
+/site/dist

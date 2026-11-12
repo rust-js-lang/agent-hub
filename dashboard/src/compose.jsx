@@ -8,7 +8,7 @@
 import { useState } from "react";
 
 import * as Api from "./api.js";
-import { $chunks, $trim } from "@rust-js/runtime";
+import { $chunks, $trim } from "@rust-js/std";
 
 /**
  * The key as it's typed, its digits in groups of four, `4821-7730-1182`:
@@ -16,8 +16,7 @@ import { $chunks, $trim } from "@rust-js/runtime";
  */
 function grouped(typed) {
   const digits = Array.from(
-    Array.from(typed)
-      .values()
+    typed[Symbol.iterator]()
       .filter((c) => /^[0-9]$/.test(c))
       .take(12),
   );
