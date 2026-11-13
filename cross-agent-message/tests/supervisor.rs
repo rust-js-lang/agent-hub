@@ -798,8 +798,11 @@ fn a_short_drain_upgrades_and_serves_a_fresh_connections_first_request() {
 
 #[test]
 fn a_slow_drain_serves_the_request_and_defers_without_launching_a_candidate() {
-    fresh_request_during_drain(Duration::from_secs(3), true);
+    fresh_request_during_drain(HTTP_HEADER_LIMIT - Duration::from_secs(1), true);
 }
+
+// Keep aligned with the HTTP/1 header_read_timeout in src/worker.rs.
+const HTTP_HEADER_LIMIT: Duration = Duration::from_secs(4);
 
 #[test]
 fn a_slow_legacy_departure_moves_forward_without_admission_deferral() {
@@ -894,14 +897,66 @@ fn fresh_request_during_drain(delay: Duration, deferred: bool) {
     client.register("observer").unwrap();
     let mut events = client.watch("observer").unwrap();
     let probe = Availability::start(&running.url);
-    let mut connection =
-        std::net::TcpStream::connect(running.url.trim_start_matches("http://")).unwrap();
-    connection
-        .set_read_timeout(Some(Duration::from_secs(5)))
+    let ready = running.root.join("final-preflight-ready");
+    let release = running.root.join("release-final-preflight");
+    let candidate = if deferred {
+        // The four-second HTTP header deadline starts at accept, not at drain.
+        // Complete expensive executable preflight before opening the connection
+        // whose first request we deliberately delay by three seconds.
+        let info = Command::new(&running.source)
+            .arg("build-info")
+            .output()
+            .unwrap();
+        assert!(info.status.success());
+        let path = running.root.join("gated-candidate");
+        std::fs::write(
+            &path,
+            format!(
+                "#!/usr/bin/env python3\nimport os, sys, time\nif sys.argv[1] == 'build-info' and os.path.realpath(sys.argv[0]) == {installed:?}:\n    open({ready:?}, 'w').close()\n    while not os.path.exists({release:?}):\n        time.sleep(0.005)\n    print({info:?})\n    sys.exit(0)\nos.execv({source:?}, [{source:?}] + sys.argv[1:])\n",
+                installed = running.binary.to_str().unwrap(),
+                ready = ready.to_str().unwrap(),
+                release = release.to_str().unwrap(),
+                info = String::from_utf8(info.stdout).unwrap(),
+                source = running.source.to_str().unwrap(),
+            ),
+        )
         .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    } else {
+        running.binary.clone()
+    };
     std::thread::scope(|scope| {
-        let upgrade = scope.spawn(|| running.upgrade(&running.binary));
+        // For the short-drain case, retain the genuine executable path and
+        // establish the socket before starting the upgrade.
+        let connect = || {
+            let connected = Instant::now();
+            let connection =
+                std::net::TcpStream::connect(running.url.trim_start_matches("http://")).unwrap();
+            // A full response on a later connection proves the listener has
+            // accepted this earlier socket from its FIFO backlog.
+            client.info().unwrap();
+            (connection, connected)
+        };
+        let early_connection = (!deferred).then(connect);
+        let upgrade = scope.spawn(|| running.upgrade(&candidate));
+        let (mut connection, connected) = if deferred {
+            wait(|| ready.exists(), 10);
+            let connection = connect();
+            std::fs::write(&release, b"").unwrap();
+            connection
+        } else {
+            early_connection.unwrap()
+        };
+        connection
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
         assert_eq!(events.next().unwrap().unwrap(), protocol::Event::Restarting);
+        assert!(
+            connected.elapsed() + delay < HTTP_HEADER_LIMIT,
+            "fixture consumed the HTTP header deadline before drain: socket age {:?}, delay {delay:?}, limit {HTTP_HEADER_LIMIT:?}",
+            connected.elapsed()
+        );
         let exposed = Instant::now();
         std::thread::sleep(delay);
         connection
@@ -911,7 +966,8 @@ fn fresh_request_during_drain(delay: Duration, deferred: bool) {
         connection.read_to_string(&mut response).unwrap();
         assert!(
             response.starts_with("HTTP/1.1 200"),
-            "fresh request failed during drain: {response}"
+            "fresh request failed during drain (socket age {:?}): {response}",
+            connected.elapsed()
         );
         let output = upgrade.join().unwrap();
         assert!(exposed.elapsed() < Duration::from_secs(10));
