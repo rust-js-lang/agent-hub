@@ -42,9 +42,11 @@ impl Fixture {
             handoff_protocol: 1,
             handoff_startup: true,
             activate_current: false,
-            away_after: 60_000,
-            forget_after: 120_000,
-            reconnect_grace: 30_000,
+            application: cross_agent_message::supervisor::HubApplication {
+                away_after: 60_000,
+                forget_after: 120_000,
+                reconnect_grace: 30_000,
+            },
         };
         std::fs::write(config.config_path(), serde_json::to_vec(&config).unwrap()).unwrap();
         Self {

@@ -5,133 +5,43 @@ use crate::{
     supervisor::Config,
 };
 use anyhow::{Context, Result, bail};
+use process_supervisor::worker::Outcome;
 use std::collections::BTreeMap;
-use std::os::fd::{FromRawFd, RawFd};
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Result<()> {
     let count: usize = std::env::var("CROSS_AGENT_LISTEN_COUNT")?.parse()?;
-    if count == 0 || count > 64 || count != config.addresses.len() {
-        bail!("invalid inherited listener count");
-    }
-    let ready_fd: RawFd = std::env::var("CROSS_AGENT_READY_FD")?.parse()?;
-    if ready_fd != 3 + count as RawFd {
-        bail!("invalid readiness descriptor");
-    }
-    let mut listeners = Vec::new();
-    for fd in 3..ready_fd {
-        // SAFETY: the supervisor hands exactly these unique socket descriptors
-        // to this worker. fcntl verifies they are open before ownership transfers.
-        if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
-            bail!("listener descriptor is not open");
-        }
-        let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
-        listener.set_nonblocking(true)?;
-        // Keep the inherited descriptors outside the serving runtime. During
-        // quiescence the process still owns them but no task accepts on them.
-        listeners.push(listener);
-    }
-    if unsafe { libc::fcntl(ready_fd, libc::F_GETFD) } < 0 {
-        bail!("readiness descriptor is not open");
-    }
-    // SAFETY: this unique endpoint is owned solely by this worker after exec.
-    let ready = unsafe { std::os::unix::net::UnixStream::from_raw_fd(ready_fd) };
-    let mut ready = crate::handoff::Channel::new(ready)?;
+    let ready_fd = std::env::var("CROSS_AGENT_READY_FD")?.parse()?;
+    // SAFETY: this private worker entry point is exec'd by the supervisor,
+    // which transfers the validated unique listener and lifecycle descriptors.
+    let mut inherited = unsafe {
+        process_supervisor::worker::Inherited::take(count, ready_fd, config.addresses.len())?
+    };
     if config.worker_path.is_none() {
-        ready.write("refused: this worker requires a stable installed-path supervisor; run the new serve --replace first\n", std::time::Instant::now() + Duration::from_secs(1))?;
+        inherited.channel.write("refused: this worker requires a stable installed-path supervisor; run the new serve --replace first\n", std::time::Instant::now() + Duration::from_secs(1))?;
         bail!(
             "this worker requires a stable installed-path supervisor; run the new serve --replace first"
         );
     }
-    // Expensive executable hashing belongs to the paused startup window.
+    // Hash the executable before the application starts serving.
     let _ = crate::updates::binary();
-    let signals = crate::supervisor::ArcSignal::new()?;
-    let mut request = 0;
-    loop {
-        let outcome = serve(&config, dashboard.clone(), &listeners, &mut ready, request)?;
-        let Outcome::Quiesced {
-            id,
-            stopped_accepting_ns,
-            first_accepted_ns,
-        } = outcome
-        else {
-            return Ok(());
-        };
-        // serve's runtime has now been dropped: all Hub/Router clones and
-        // SQLite connections are gone before this acknowledgement is sent.
-        ready.send(
-            &crate::handoff::Reply::Drained {
-                id,
-                stopped_accepting_ns: stopped_accepting_ns.clone(),
-                first_accepted_ns: first_accepted_ns.clone(),
-            },
-            std::time::Instant::now() + Duration::from_secs(1),
-        )?;
-        eprintln!(
-            "Worker {} drained and closed SQLite; awaiting resume or retire.",
-            std::process::id()
-        );
-        let deadline = std::time::Instant::now() + crate::handoff::PARK_LIMIT;
-        loop {
-            if signals.stopped() {
-                return Ok(());
-            }
-            if std::time::Instant::now() >= deadline {
-                bail!(
-                    "parked worker received no resume or retire within {} seconds",
-                    crate::handoff::PARK_LIMIT.as_secs()
-                );
-            }
-            if let Some(line) = ready.poll()? {
-                match serde_json::from_str::<crate::handoff::Command>(&line)? {
-                    crate::handoff::Command::Resume { id } => {
-                        request = id;
-                        break;
-                    }
-                    crate::handoff::Command::Retire { .. } => return Ok(()),
-                    crate::handoff::Command::Quiesce { id } => ready.send(
-                        &crate::handoff::Reply::Drained {
-                            id,
-                            stopped_accepting_ns: stopped_accepting_ns.clone(),
-                            first_accepted_ns: first_accepted_ns.clone(),
-                        },
-                        deadline,
-                    )?,
-                }
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
+    process_supervisor::worker::run(inherited, |listeners, channel, request| {
+        serve(&config, dashboard.clone(), listeners, channel, request)
+    })
 }
 
-enum Outcome {
-    Stopped,
-    Quiesced {
-        id: u64,
-        stopped_accepting_ns: BTreeMap<String, u64>,
-        first_accepted_ns: BTreeMap<String, u64>,
-    },
-}
-
-struct ListenerTiming {
-    address: String,
-    first_accepted_ns: AtomicU64,
-    stopped_accepting_ns: AtomicU64,
-}
+use process_supervisor::listener::{Listener, Timing as ListenerTiming};
 
 fn readiness(
     config: &Config,
     addresses: Vec<protocol::ListenAddress>,
-    timing: &[ListenerTiming],
+    timing: &[Arc<ListenerTiming>],
     request: u64,
 ) -> crate::addresses::Ready {
     let mut first_accepted_ns = BTreeMap::<String, u64>::new();
     for listener in timing {
-        let first = listener.first_accepted_ns.load(Ordering::SeqCst);
+        let first = listener.first_accepted_ns();
         if first != 0 {
             first_accepted_ns
                 .entry(listener.address.clone())
@@ -141,7 +51,10 @@ fn readiness(
     }
     crate::addresses::Ready {
         build: hub::BUILD.to_string(),
-        addresses,
+        addresses: addresses
+            .into_iter()
+            .map(crate::addresses::process_address)
+            .collect(),
         handoff_protocol: if config.handoff_protocol == crate::handoff::VERSION {
             crate::handoff::VERSION
         } else {
@@ -213,36 +126,20 @@ async fn serve(
         None
     };
     // Finish fallible startup before any task can accept a TCP connection.
+    let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::unbounded_channel();
     let listeners = listeners
         .iter()
-        .map(|listener| {
-            let address = listener.local_addr()?.to_string();
-            Ok((
-                tokio::net::TcpListener::from_std(listener.try_clone()?)?,
-                address,
-            ))
-        })
-        .collect::<std::io::Result<Vec<_>>>()?;
-    let timing: Arc<Vec<ListenerTiming>> = Arc::new(
-        listeners
-            .iter()
-            .map(|(_, address)| ListenerTiming {
-                address: address.clone(),
-                first_accepted_ns: AtomicU64::new(0),
-                stopped_accepting_ns: AtomicU64::new(0),
-            })
-            .collect(),
-    );
-    let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::unbounded_channel();
+        .map(|listener| Listener::new(listener, request, accepted_tx.clone()))
+        .collect::<Result<Vec<_>>>()?;
+    let timing: Vec<Arc<ListenerTiming>> = listeners.iter().map(Listener::timing).collect();
     if config.handoff_startup && config.handoff_protocol == crate::handoff::VERSION {
         ready.write(
             &format!("accepting {request}\n"),
             std::time::Instant::now() + Duration::from_secs(1),
         )?;
     }
-    for (index, (listener, local_address)) in listeners.into_iter().enumerate() {
-        let timing = timing.clone();
-        let accepted_tx = accepted_tx.clone();
+    for listener in listeners {
+        let local_address = listener.timing().address.clone();
         let app = app.clone();
         let peer_hub = hub.clone();
         let local_ips = local_ips.clone();
@@ -254,17 +151,12 @@ async fn serve(
                 tokio::select! {
                     biased;
                     _ = shutdown.changed() => {
-                        timing[index].stopped_accepting_ns.store(crate::handoff::monotonic_ns()?, Ordering::SeqCst);
+                        listener.stop_accepting()?;
                         break;
                     },
                     _ = connections.join_next(), if !connections.is_empty() => {},
                     accepted = listener.accept() => {
                         let (socket, peer) = accepted?;
-                        if timing[index].first_accepted_ns.load(Ordering::SeqCst) == 0 {
-                            let at_ns = crate::handoff::monotonic_ns()?;
-                            timing[index].first_accepted_ns.store(at_ns, Ordering::SeqCst);
-                            let _ = accepted_tx.send(crate::handoff::Acceptance { request, address: local_address.clone(), at_ns });
-                        }
                         let external = crate::addresses::is_remote(peer.ip(), &local_ips);
                         let peer_hub = peer_hub.clone(); let local_address = local_address.clone();
                         let app = app.clone(); let mut shutdown = shutdown.clone();
@@ -295,7 +187,7 @@ async fn serve(
                                     // keep-alive. Let its first request reach the
                                     // service before closing, within the drain bound.
                                     if observed.load(std::sync::atomic::Ordering::SeqCst) { connection.as_mut().graceful_shutdown(); }
-                                    let _ = tokio::time::timeout(crate::handoff::REQUEST_DRAIN, &mut connection).await;
+                                    let _ = process_supervisor::listener::drain_connection(&mut connection).await;
                                 },
                             }
                         });
@@ -393,7 +285,7 @@ async fn serve(
         Some(id) => {
             let mut stopped_accepting_ns = BTreeMap::<String, u64>::new();
             for listener in timing.iter() {
-                let stopped = listener.stopped_accepting_ns.load(Ordering::SeqCst);
+                let stopped = listener.stopped_accepting_ns();
                 if stopped != 0 {
                     stopped_accepting_ns
                         .entry(listener.address.clone())

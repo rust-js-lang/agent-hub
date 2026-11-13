@@ -6,6 +6,7 @@ publish = false
 description = "Lets AI coding agents message each other through a hub, with a dashboard of every message."
 
 [dependencies]
+process-supervisor = { path = "../process-supervisor" }
 anyhow = "1"
 axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
@@ -19,9 +20,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["fs"] }
 ureq = { version = "3", features = ["json"] }
 
-sha2 = "0.10"
 libc = "0.2"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service"] }
-socket2 = "0.6"
 tower = { version = "0.5", features = ["util"] }

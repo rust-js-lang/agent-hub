@@ -307,9 +307,11 @@ fn run() -> Result<()> {
                 cross_agent_message::service::install(&cross_agent_message::supervisor::Config {
                     addresses,
                     db,
-                    away_after: protocol::default_away_after(),
-                    forget_after: protocol::default_forget_after(),
-                    reconnect_grace: 30_000,
+                    application: cross_agent_message::supervisor::HubApplication {
+                        away_after: protocol::default_away_after(),
+                        forget_after: protocol::default_forget_after(),
+                        reconnect_grace: 30_000,
+                    },
                     activate_current: false,
                     worker_path: None,
                     requested_addresses: Vec::new(),
@@ -449,9 +451,11 @@ fn serve(
         cross_agent_message::supervisor::run(cross_agent_message::supervisor::Config {
             addresses: addresses.to_vec(),
             db,
-            away_after,
-            forget_after,
-            reconnect_grace,
+            application: cross_agent_message::supervisor::HubApplication {
+                away_after,
+                forget_after,
+                reconnect_grace,
+            },
             activate_current: replace,
             worker_path: None,
             requested_addresses: Vec::new(),
@@ -541,9 +545,11 @@ async fn serve_at(
         handoff_startup: false,
         worker_path: Some(std::fs::canonicalize(std::env::current_exe()?)?),
         db,
-        away_after,
-        forget_after,
-        reconnect_grace,
+        application: cross_agent_message::supervisor::HubApplication {
+            away_after,
+            forget_after,
+            reconnect_grace,
+        },
         activate_current: false,
     };
     let observed = cross_agent_message::addresses::initial(&config, &hub).await?;

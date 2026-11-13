@@ -5,20 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Ready {
-    pub build: String,
-    pub addresses: Vec<ListenAddress>,
-    #[serde(default)]
-    pub handoff_protocol: u32,
-    #[serde(default)]
-    pub request: u64,
-    #[serde(default)]
-    pub accepted: Vec<String>,
-    #[serde(default)]
-    pub first_accepted_ns: std::collections::BTreeMap<String, u64>,
-}
-
+pub use process_supervisor::addresses::Ready;
 #[derive(Serialize, Deserialize)]
 pub struct Observation {
     pub pid: u32,
@@ -223,6 +210,24 @@ pub fn local_ips() -> std::collections::HashSet<IpAddr> {
     found
 }
 
+/// Convert only at the application boundary; the engine has no hub protocol dependency.
+pub(crate) fn process_address(
+    address: protocol::ListenAddress,
+) -> process_supervisor::addresses::ListenAddress {
+    use process_supervisor::addresses::AddressState as State;
+    process_supervisor::addresses::ListenAddress {
+        address: address.address,
+        state: match address.state {
+            protocol::AddressState::Ready => State::Ready,
+            protocol::AddressState::Pending => State::Pending,
+            protocol::AddressState::Blocked => State::Blocked,
+            protocol::AddressState::Unknown => State::Unknown,
+        },
+        reason: address.reason,
+        remote_seen: address.remote_seen,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,9 +309,11 @@ mod tests {
             handoff_startup: false,
             worker_path: Some(std::env::current_exe().unwrap()),
             db: std::path::PathBuf::from("unused.db"),
-            away_after: 60_000,
-            forget_after: 120_000,
-            reconnect_grace: 0,
+            application: crate::supervisor::HubApplication {
+                away_after: 60_000,
+                forget_after: 120_000,
+                reconnect_grace: 0,
+            },
             activate_current: false,
         };
         let hub = std::sync::Arc::new(
