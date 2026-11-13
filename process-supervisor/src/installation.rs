@@ -9,7 +9,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct Installation {
     pub executable: PathBuf,
-    _lock: File,
+    lock: File,
+}
+
+impl Drop for Installation {
+    fn drop(&mut self) {
+        // Closing alone leaves the lock held if a concurrent fork still owns
+        // the open file description before exec. Release it with its owner.
+        // SAFETY: the lock's file descriptor remains live throughout drop.
+        if unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN) } != 0 {
+            eprintln!(
+                "cannot unlock installation {}: {}",
+                self.executable.display(),
+                std::io::Error::last_os_error()
+            );
+        }
+    }
 }
 
 pub fn temporary(parent: &Path, purpose: &str) -> PathBuf {
@@ -96,10 +111,7 @@ impl Installation {
         lock.rewind()?;
         writeln!(lock, "{}", db.display())?;
         lock.sync_all()?;
-        Ok(Self {
-            executable,
-            _lock: lock,
-        })
+        Ok(Self { executable, lock })
     }
 }
 
@@ -187,9 +199,15 @@ mod tests {
         assert!(error.to_string().contains("/first/hub.db"));
         assert!(activate(&root.join("missing"), &binary).is_err());
         assert_eq!(std::fs::read(&binary).unwrap(), b"new");
+        // A concurrent fork can retain this same open file description until
+        // exec, even with close-on-exec set. Duplicate it to pin that race
+        // deterministically without depending on another test's subprocess.
+        let inherited_lock = first.lock.try_clone().unwrap();
         drop(first);
         let second = Installation::acquire(&binary, Path::new("/second/hub.db")).unwrap();
+        assert!(Installation::acquire(&binary, Path::new("/third/hub.db")).is_err());
         drop(second);
+        drop(inherited_lock);
         drop(independent_lock);
         std::fs::remove_dir_all(root).unwrap();
     }
