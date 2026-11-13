@@ -1,7 +1,6 @@
 //! Explicit executable updates. Downloads are staged and verified before rename.
 use anyhow::{Context, Result, bail};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -12,9 +11,7 @@ pub struct Binary {
     pub sha256: String,
 }
 
-pub fn sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
-}
+pub use process_supervisor::{BuildInfo, sha256};
 
 pub fn binary() -> Result<&'static Binary, &'static str> {
     static BINARY: OnceLock<Result<Binary, String>> = OnceLock::new();
@@ -31,28 +28,13 @@ pub fn binary() -> Result<&'static Binary, &'static str> {
         .map_err(String::as_str)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BuildInfo {
-    pub version: String,
-    pub build: String,
-    pub target: String,
-    pub protocol: u32,
-    /// Supported private lifecycle protocol, independent of the active parent.
-    #[serde(default)]
-    pub handoff_protocol: u32,
-    #[serde(default)]
-    pub handoff_startup: bool,
-}
-
 pub fn build_info() -> BuildInfo {
-    BuildInfo {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        build: crate::hub::BUILD.to_string(),
-        target: TARGET.to_string(),
-        protocol: protocol::PROTOCOL,
-        handoff_protocol: crate::handoff::VERSION,
-        handoff_startup: true,
-    }
+    BuildInfo::new(
+        env!("CARGO_PKG_VERSION").to_string(),
+        crate::hub::BUILD.to_string(),
+        TARGET.to_string(),
+        protocol::PROTOCOL,
+    )
 }
 
 pub fn inspect(path: &Path) -> Result<BuildInfo> {

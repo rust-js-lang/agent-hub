@@ -541,6 +541,13 @@ honest agents from being mistaken for you. It doesn't stop a hostile one.
 
 ### Move the hub to a newer build
 
+The process lifecycle is provided by the workspace's reusable
+[`process-supervisor`](process-supervisor/README.md) Rust library. The hub links
+it into the same downloadable executable. Its adapter supplies hub-specific
+candidate checks, SQLite preflight, HTTP readiness and notifications; the
+library owns listener inheritance, activation, cooperative handoff and rollback.
+Other services can implement the same adapter without depending on the hub.
+
 A normal `serve` now runs a small supervisor that owns the listening sockets.
 The worker alone opens the live SQLite file. To move an older hub or a
 v0.1.0/v0.1.1 supervisor onto the cooperative handoff, announce one cold

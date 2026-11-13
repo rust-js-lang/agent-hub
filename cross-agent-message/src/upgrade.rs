@@ -224,7 +224,7 @@ pub fn run(path: &Path, db: &Path, checksum: Option<&str>) -> Result<()> {
     let ready_addresses: Vec<&str> = result
         .addresses
         .iter()
-        .filter(|address| address.state == protocol::AddressState::Ready)
+        .filter(|address| address.state == process_supervisor::addresses::AddressState::Ready)
         .map(|address| address.address.as_str())
         .collect();
     let mut message = format!(
@@ -247,7 +247,7 @@ pub fn run(path: &Path, db: &Path, checksum: Option<&str>) -> Result<()> {
     for address in result
         .addresses
         .iter()
-        .filter(|address| address.state != protocol::AddressState::Ready)
+        .filter(|address| address.state != process_supervisor::addresses::AddressState::Ready)
     {
         eprintln!(
             "{}: {}",
@@ -277,6 +277,7 @@ pub fn announce(config: &Config, message: &str) -> Result<()> {
             std::os::unix::net::UnixStream::connect(config.db.with_extension("worker.sock"))
         })?;
     socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+    socket.set_write_timeout(Some(Duration::from_secs(5)))?;
     writeln!(socket, "{}", serde_json::json!({"announce":message}))?;
     let mut text = String::new();
     socket.read_to_string(&mut text)?;
