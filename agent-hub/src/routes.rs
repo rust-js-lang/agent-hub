@@ -8,14 +8,14 @@ use protocol::endpoints::Feature;
 /// ```compile_fail
 /// use std::sync::Arc;
 /// use axum::{Json, extract::State, http::HeaderMap};
-/// use cross_agent_message::{hub::{Hub, Refused}, routes::Routes};
+/// use agent_hub::{hub::{Hub, Refused}, routes::Routes};
 /// async fn wrong(_: State<Arc<Hub>>, _: HeaderMap, _: Json<protocol::Register>) -> Result<Json<protocol::Message>, Refused> { unreachable!() }
 /// Routes::new().post(&protocol::endpoints::SEND, wrong);
 /// ```
 /// ```compile_fail
 /// use std::sync::Arc;
 /// use axum::{Json, extract::State, http::HeaderMap};
-/// use cross_agent_message::{hub::{Hub, Refused}, routes::Routes};
+/// use agent_hub::{hub::{Hub, Refused}, routes::Routes};
 /// async fn wrong(_: State<Arc<Hub>>, _: HeaderMap, _: Json<protocol::Send>) -> Result<Json<protocol::Agent>, Refused> { unreachable!() }
 /// Routes::new().post(&protocol::endpoints::SEND, wrong);
 /// ```
@@ -52,7 +52,7 @@ pub(crate) fn protocol(headers: &HeaderMap, query: Option<u32>) -> Result<(), Re
         return Err(Refused(
             StatusCode::UPGRADE_REQUIRED,
             format!(
-                "This hub speaks protocol {}; this client claims {}. Upgrade the client: cross-agent-message upgrade-self",
+                "This hub speaks protocol {}; this client claims {}. Upgrade the client: agent-hub upgrade-self",
                 protocol::PROTOCOL,
                 version.map_or("invalid".to_string(), |value| value.to_string())
             ),

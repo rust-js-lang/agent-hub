@@ -133,7 +133,7 @@ pub fn App() -> JSX::Element {
     jsx! {
         <div className="page" onInput={move |_| activity.set_current(date::now())} onKeyDown={move |_| activity.set_current(date::now())} onPointerDown={move |_| activity.set_current(date::now())} onPointerMove={move |_| activity.set_current(date::now())}>
             <header>
-                <h1>{"Cross-agent messages"}</h1>
+                <h1>{"Agent Hub"}</h1>
                 <span className={if *live { "live on" } else { "live off" }}>
                     {if *live { "Live" } else { "Connecting…" }}
                 </span>

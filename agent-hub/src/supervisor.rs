@@ -18,12 +18,12 @@ pub struct HubApplication {
 }
 impl Application for HubApplication {
     fn name(&self) -> &'static str {
-        "cross-agent-message"
+        "agent-hub"
     }
     fn runtime() -> process_supervisor::runtime::Runtime {
         process_supervisor::runtime::Runtime {
-            home_directory: ".cross-agent-message",
-            temporary_prefix: "cam",
+            home_directory: ".agent-hub",
+            temporary_prefix: "agent-hub",
         }
     }
     fn inspect(&self, binary: &Path) -> Result<BuildInfo> {
@@ -49,9 +49,9 @@ impl Application for HubApplication {
             .arg("worker")
             .arg("--config")
             .arg(config.config_path())
-            .env("CROSS_AGENT_LISTEN_COUNT", listener_count.to_string())
-            .env("CROSS_AGENT_READY_FD", (3 + listener_count).to_string())
-            .env("CROSS_AGENT_CONTROL_SOCK", config.control());
+            .env("AGENT_HUB_LISTEN_COUNT", listener_count.to_string())
+            .env("AGENT_HUB_READY_FD", (3 + listener_count).to_string())
+            .env("AGENT_HUB_CONTROL_SOCK", config.control());
         command
     }
     fn announce(&self, config: &Config, event: &SupervisorEvent) -> Result<()> {
@@ -79,11 +79,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn application_uses_agent_hub_runtime_namespace() {
+        let application = HubApplication {
+            away_after: 0,
+            forget_after: 0,
+            reconnect_grace: 0,
+        };
+        assert_eq!(application.name(), "agent-hub");
+        assert_eq!(HubApplication::runtime().home_directory, ".agent-hub");
+        assert_eq!(HubApplication::runtime().temporary_prefix, "agent-hub");
+    }
+
+    #[test]
     fn flattened_hub_settings_preserve_existing_configuration_and_ignore_future_fields() {
         let legacy = serde_json::json!({
             "addresses": ["127.0.0.1:7878"], "db": "/tmp/hub.db",
             "away_after": 60000, "forget_after": 120000, "reconnect_grace": 30000,
-            "activate_current": false, "worker_path": "/tmp/cross-agent-message",
+            "activate_current": false, "worker_path": "/tmp/agent-hub",
             "requested_addresses": [], "required_ready": [],
             "handoff_protocol": 1, "handoff_startup": true
         });

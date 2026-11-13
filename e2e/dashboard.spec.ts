@@ -26,7 +26,7 @@ test("listen addresses distinguish local readiness, pending interfaces, and bloc
 /** The dashboard, connected to the hub's live events. */
 async function open(page: import("@playwright/test").Page) {
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Cross-agent messages" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Agent Hub" })).toBeVisible();
   await expect(page.getByText("Live", { exact: true })).toBeVisible();
 }
 
@@ -335,7 +335,7 @@ test("a committed send with a lost response replays one nonce and delivers once"
   const attempts: { nonce?: string; body: string | null }[] = [];
   await page.route("**/api/messages", async route => {
     if (route.request().method() !== "POST") return route.continue();
-    attempts.push({ nonce: route.request().headers()["cross-agent-nonce"], body: route.request().postData() });
+    attempts.push({ nonce: route.request().headers()["agent-hub-nonce"], body: route.request().postData() });
     const response = await route.fetch();
     if (attempts.length === 1) await route.abort("connectionreset");
     else await route.fulfill({ response });
@@ -368,7 +368,7 @@ test("a hub without write-nonce gets one ambiguous send attempt and keeps the dr
   await page.route("**/api/messages", async route => {
     if (route.request().method() !== "POST") return route.continue();
     attempts += 1;
-    expect(route.request().headers()["cross-agent-nonce"]).toBeUndefined();
+    expect(route.request().headers()["agent-hub-nonce"]).toBeUndefined();
     await route.fetch(); // Commit, then lose the acknowledgement.
     await route.abort("connectionreset");
   });

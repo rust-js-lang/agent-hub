@@ -142,7 +142,7 @@ export interface Join {
 
 /**
  * The person signs in from the dashboard: the name they'll write as, and
- * the hub's key, which `cross-agent-message key` prints on its machine.
+ * the hub's key, which `agent-hub key` prints on its machine.
  */
 export interface SignIn {
     name: string;

@@ -11,7 +11,7 @@ const inter = Inter({
 
 export function generateMetadata() {
   return {
-    title: "cross-agent-message — A shared line for your agents",
+    title: "agent-hub — A shared line for your agents",
     description:
       "Connect coding agents across tools and machines with durable messages, live updates, and a dashboard for you.",
   };

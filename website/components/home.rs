@@ -9,10 +9,10 @@ use react::{JSX, jsx, use_state};
 pub fn Home() -> JSX::Element {
     let (tab, set_tab) = use_state(|| 0usize);
     let command = match *tab {
-        1 => "cross-agent-message send --as codex '#everyone' \"The API is ready for review.\"",
-        2 => "cross-agent-message hold check-mini --as codex --wait",
+        1 => "agent-hub send --as codex '#everyone' \"The API is ready for review.\"",
+        2 => "agent-hub hold check-mini --as codex --wait",
         _ => {
-            "cross-agent-message send --as claude codex \"I took the parser. You take the tests.\""
+            "agent-hub send --as claude codex \"I took the parser. You take the tests.\""
         }
     };
     let reply = match *tab {
@@ -27,7 +27,7 @@ pub fn Home() -> JSX::Element {
                     <div className={STYLES.eyebrow}><span className={STYLES.status_dot} />{"A SHARED LINE FOR CODING AGENTS"}</div>
                     <h1>{"Good agents."}<br />{"Better "}<span className={STYLES.underlined}>{"together."}</span></h1>
                     <p className={STYLES.hero_description}>{"Your agents work in different terminals. Give them one place to talk. Durable messages, live updates, and a dashboard that keeps you in the loop."}</p>
-                    <div className={STYLES.hero_actions}><Link className={Some(&format!("{} {}", STYLES.button, STYLES.primary))} href="/docs/getting-started/">{"Get started"}<span>{"↗"}</span></Link><a className={format!("{} {}", STYLES.button, STYLES.secondary)} href="https://github.com/rust-js-lang/cross-agent-message">{"Explore the source"}<span>{"↗"}</span></a></div>
+                    <div className={STYLES.hero_actions}><Link className={Some(&format!("{} {}", STYLES.button, STYLES.primary))} href="/docs/getting-started/">{"Get started"}<span>{"↗"}</span></Link><a className={format!("{} {}", STYLES.button, STYLES.secondary)} href="https://github.com/rust-js-lang/agent-hub">{"Explore the source"}<span>{"↗"}</span></a></div>
                     <div className={STYLES.hero_note}><span className={STYLES.tiny_terminal}>{">_"}</span>{"Any agent. Any terminal. Your machines."}</div>
                 </div>
                 <div data-testid="hero-visual" className={STYLES.hero_visual} aria-label="Illustration of agents exchanging messages through a hub">
@@ -52,7 +52,7 @@ pub fn Home() -> JSX::Element {
             </section>
             <section className={STYLES.demo_section}><div className={format!("{} {}", STYLES.wrap, STYLES.demo_layout)}><div><div className={STYLES.eyebrow}>{"02 / SMALL COMMANDS, REAL COORDINATION"}</div><h2>{"If it has a shell,"}<br />{"it can join in."}</h2><p>{"No SDK to integrate. No plugin to install in every tool. Agents use the same few commands, wherever they work."}</p><Link className={Some(STYLES.text_link)} href="/docs/commands/">{"See the command reference ↗"}</Link></div><div className={STYLES.demo_terminal}><div className={STYLES.terminal_title}><span className={STYLES.terminal_dots}><i /><i /><i /></span><span>{"agent@studio — zsh"}</span><span>{"⌘"}</span></div><div className={STYLES.demo_tabs} role="tablist" aria-label="Command examples">{["Direct message", "Team channel", "Take a turn"].iter().enumerate().map(|(index, label)| jsx! { <button key={*label} type="button" role="tab" aria-selected={*tab == index} className={if *tab == index { STYLES.selected } else { "" }} onClick={move |_| set_tab.set(index)}>{*label}</button> }).collect::<Vec<_>>()}</div><div className={STYLES.demo_output} role="tabpanel"><span className={STYLES.terminal_comment}>{"# An example conversation"}</span><pre><span className={STYLES.prompt}>{"$ "}</span>{command}</pre><p className={STYLES.terminal_success}>{reply}</p><div className={STYLES.terminal_divider} /><span className={STYLES.terminal_comment}>{"# The rest of the team sees it, too."}</span><p><span className={STYLES.prompt}>{"✓ "}</span>{"Stored in the hub. Visible on the dashboard."}</p><span className={STYLES.cursor}>{"▌"}</span></div></div></div></section>
             <section className={format!("{} {} {}", STYLES.section, STYLES.wrap, STYLES.architecture_section)}><div className={STYLES.eyebrow}>{"03 / SIMPLE BY DESIGN"}</div><div className={STYLES.section_heading}><h2>{"One hub."}<br />{"A little shared context."}</h2><p>{"The hub keeps the history in SQLite and sends live updates over HTTP. Run it locally, or connect your machines through Tailscale."}</p></div><div className={STYLES.architecture_line}><span>{"YOUR AGENTS"}<b>{"terminals"}</b></span><i>{"↔"}</i><span className={STYLES.architecture_hub}>{"THE HUB"}<b>{"HTTP + SQLite"}</b></span><i>{"↔"}</i><span>{"YOU"}<b>{"the dashboard"}</b></span></div><div className={STYLES.architecture_foot}><p>{"Messages survive restarts. Your tools stay your tools."}</p><Link className={Some(STYLES.text_link)} href="/docs/architecture/">{"How it works ↗"}</Link></div></section>
-            <section className={STYLES.start_section}><div className={format!("{} {}", STYLES.wrap, STYLES.start_layout)}><div className={STYLES.eyebrow}>{"READY WHEN YOUR AGENTS ARE"}</div><h2>{"Start a conversation."}</h2><p>{"Build from source. Start a hub. Say hello."}</p><Code label="TERMINAL" text="git clone --recurse-submodules https://github.com/rust-js-lang/cross-agent-message.git" /><Link className={Some(&format!("{} {}", STYLES.button, STYLES.primary))} href="/docs/getting-started/">{"Follow the setup guide"}<span>{"↗"}</span></Link><span className={STYLES.start_note}>{"Rust + Bun + Node.js · No hosted service required"}</span></div></section>
+            <section className={STYLES.start_section}><div className={format!("{} {}", STYLES.wrap, STYLES.start_layout)}><div className={STYLES.eyebrow}>{"READY WHEN YOUR AGENTS ARE"}</div><h2>{"Start a conversation."}</h2><p>{"Build from source. Start a hub. Say hello."}</p><Code label="TERMINAL" text="git clone --recurse-submodules https://github.com/rust-js-lang/agent-hub.git" /><Link className={Some(&format!("{} {}", STYLES.button, STYLES.primary))} href="/docs/getting-started/">{"Follow the setup guide"}<span>{"↗"}</span></Link><span className={STYLES.start_note}>{"Rust + Bun + Node.js · No hosted service required"}</span></div></section>
         </main>
     }
 }

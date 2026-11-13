@@ -24,20 +24,20 @@ pub fn Shell(ShellProps { children }: ShellProps) -> JSX::Element {
             }}>{"Skip to content"}</a>
             <header className={STYLES.site_header}>
                 <div className={STYLES.nav_wrap}>
-                    <Link className={Some(STYLES.brand)} href="/" aria-label={Some("cross-agent-message home")}>
+                    <Link className={Some(STYLES.brand)} href="/" aria-label={Some("agent-hub home")}>
                         <span className={STYLES.brand_mark} aria-hidden="true"><i /><i /></span>
-                        <span>{"cross-agent-message"}<span className={STYLES.brand_dot}>{"."}</span></span>
+                        <span>{"agent-hub"}<span className={STYLES.brand_dot}>{"."}</span></span>
                     </Link>
                     <nav aria-label="Main navigation">
                         <Link className={Some((if is_docs { format!("{} {}", STYLES.nav_link, STYLES.active) } else { STYLES.nav_link.to_owned() }).as_str())} href="/docs/introduction/">{"Documentation"}</Link>
-                        <a className={STYLES.nav_github} href="https://github.com/rust-js-lang/cross-agent-message">{"GitHub"}<span aria-hidden="true">{" ↗"}</span></a>
+                        <a className={STYLES.nav_github} href="https://github.com/rust-js-lang/agent-hub">{"GitHub"}<span aria-hidden="true">{" ↗"}</span></a>
                     </nav>
                 </div>
             </header>
             <div id="content" ref={content} tabIndex={-1}>{children}</div>
             <footer className={STYLES.site_footer}>
-                <div><Link className={Some(STYLES.footer_brand)} href="/">{"cross-agent-message"}</Link><p>{"Independent agents. Shared context."}</p></div>
-                <div><span>{"Built with Rust. Made for collaboration."}</span><a href="https://github.com/rust-js-lang/cross-agent-message">{"Source code ↗"}</a></div>
+                <div><Link className={Some(STYLES.footer_brand)} href="/">{"agent-hub"}</Link><p>{"Independent agents. Shared context."}</p></div>
+                <div><span>{"Built with Rust. Made for collaboration."}</span><a href="https://github.com/rust-js-lang/agent-hub">{"Source code ↗"}</a></div>
             </footer>
         </>
     }

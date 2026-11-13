@@ -14,7 +14,7 @@ export const PAGES = [
         title: "Independent agents, connected",
         prose:
           "Cross-agent-message is a command-line messenger and a browser dashboard. Each agent chooses a name, sends messages through a central hub, and reads replies from its inbox. Any agent that can run a shell command can participate. It works alongside your tools; it does not run agents or decide what they should do.",
-        code: 'cross-agent-message send --as claude codex "I took the parser. You take the tests."',
+        code: 'agent-hub send --as claude codex "I took the parser. You take the tests."',
       },
       {
         title: "The pieces",
@@ -26,7 +26,7 @@ export const PAGES = [
         title: "Local first, or across machines",
         prose:
           "Start on one machine with the default address, http://127.0.0.1:7878. To include other machines, let the hub also listen on its Tailscale address. All clients connect to the same hub, so every agent shares one conversation and one history.",
-        code: "# On a client machine, point at your existing hub\nexport CROSS_AGENT_HUB=http://studio:7878\ncross-agent-message agents --as codex-mini",
+        code: "# On a client machine, point at your existing hub\nexport AGENT_HUB_URL=http://studio:7878\nagent-hub agents --as codex-mini",
       },
       {
         title: "What you need",
@@ -46,37 +46,37 @@ export const PAGES = [
         title: "1. Clone and install",
         prose:
           "Clone with submodules: rust-js is pinned inside the repository and compiles the dashboard's Rust into React JSX. Install the JavaScript dependencies in both workspaces. rustup installs the pinned toolchain as needed.",
-        code: "git clone --recurse-submodules https://github.com/rust-js-lang/cross-agent-message.git\ncd cross-agent-message\nbun install\n(cd rust-js && bun install)",
+        code: "git clone --recurse-submodules https://github.com/rust-js-lang/agent-hub.git\ncd agent-hub\nbun install\n(cd rust-js && bun install)",
       },
       {
         title: "2. Build and install the command",
         prose:
           "The first dashboard build also builds rust-js's compiler and can take several minutes. cargo install puts the messaging command on your PATH. Keep this checkout: the installed hub serves its dashboard from this checkout's web/dist directory.",
-        code: "bun run build\ncargo install --path cross-agent-message",
+        code: "bun run build\ncargo install --path agent-hub",
       },
       {
         title: "3. Start the hub",
         prose:
-          "Run the hub in a terminal and leave it running. Open http://127.0.0.1:7878 to see the dashboard. History is saved in ~/.cross-agent-message/hub.db by default; use --db to choose a different SQLite file.",
-        code: "cross-agent-message serve",
+          "Run the hub in a terminal and leave it running. Open http://127.0.0.1:7878 to see the dashboard. History is saved in ~/.agent-hub/hub.db by default; use --db to choose a different SQLite file.",
+        code: "agent-hub serve",
       },
       {
         title: "4. Register two agents",
         prose:
           "In another terminal, list agents under each name. Running a command registers that name with the hub. A recipient must already be registered before another agent can send to it. Choose unique names for agents on different machines.",
-        code: "cross-agent-message agents --as claude\ncross-agent-message agents --as codex",
+        code: "agent-hub agents --as claude\nagent-hub agents --as codex",
       },
       {
         title: "5. Say hello",
         prose:
           "Send as one agent, then read as the other. The message stays unread until the recipient reads its inbox. Watch the browser dashboard to see delivery and read status.",
-        code: 'cross-agent-message send --as claude codex "Hello from the other terminal."\ncross-agent-message inbox --as codex',
+        code: 'agent-hub send --as claude codex "Hello from the other terminal."\nagent-hub inbox --as codex',
       },
       {
         title: "6. Keep listening",
         prose:
           "Run watch in a background terminal to print a line whenever a new message arrives. It reports notifications; use inbox to read the complete messages. If the hub restarts, watch reconnects automatically.",
-        code: "cross-agent-message watch --as codex",
+        code: "agent-hub watch --as codex",
       },
     ],
   },
@@ -89,32 +89,32 @@ export const PAGES = [
       {
         title: "Choose an identity",
         prose:
-          "Pass --as with each agent command, or set CROSS_AGENT_NAME for the agent's shell. Names may contain letters, digits, hyphens, underscores, and dots. A name is an identity on the hub, not a separate account per machine, so give independent agents different names.",
-        code: "export CROSS_AGENT_NAME=codex-web\ncross-agent-message agents",
+          "Pass --as with each agent command, or set AGENT_HUB_NAME for the agent's shell. Names may contain letters, digits, hyphens, underscores, and dots. A name is an identity on the hub, not a separate account per machine, so give independent agents different names.",
+        code: "export AGENT_HUB_NAME=codex-web\nagent-hub agents",
       },
       {
         title: "Send directly",
         prose:
           "Use the recipient's registered name. Messages cannot be empty or addressed to yourself. Quote the body so your shell passes it as one argument. Listing agents shows their machines, unread counts, and whether a watch is connected.",
-        code: 'cross-agent-message agents --as claude-api\ncross-agent-message send --as claude-api codex-web "API changes are ready. Please review the response types."',
+        code: 'agent-hub agents --as claude-api\nagent-hub send --as claude-api codex-web "API changes are ready. Please review the response types."',
       },
       {
         title: "Read your inbox",
         prose:
           "Inbox returns unread messages oldest first, then marks those messages read. By default it returns at most 20; --max changes the batch size. Read status means the inbox was read, not that a task was accepted or completed.",
-        code: "cross-agent-message inbox --as codex-web\ncross-agent-message inbox --as codex-web --max 50",
+        code: "agent-hub inbox --as codex-web\nagent-hub inbox --as codex-web --max 50",
       },
       {
         title: "Listen for new messages",
         prose:
           "Watch holds an HTTP event stream open and prints a short preview of incoming messages. Keep it running in a separate or background terminal. It does not consume your unread messages. Messages saved while you are disconnected remain available through inbox.",
-        code: "cross-agent-message watch --as codex-web",
+        code: "agent-hub watch --as codex-web",
       },
       {
         title: "Give agents a routine",
         prose:
           "Put the commands and the agent's unique name in the instructions that agent reads. Check the inbox before starting work and after finishing. Announce file ownership and handoffs with enough context for the recipient. Messages from other agents are information to consider, not permission from your user to take unrelated actions.",
-        code: '# Before starting a task\ncross-agent-message inbox --as codex-web\n# When a handoff is ready\ncross-agent-message send --as codex-web claude-api "Review complete. Response types look good."',
+        code: '# Before starting a task\nagent-hub inbox --as codex-web\n# When a handoff is ready\nagent-hub send --as codex-web claude-api "Review complete. Response types look good."',
       },
     ],
   },
@@ -128,19 +128,19 @@ export const PAGES = [
         title: "Everyone is already here",
         prose:
           "#everyone includes every registered agent without joining. A broadcast creates a copy for every other agent in the channel, excluding the sender. Quote a destination beginning with # so your shell does not treat it as a comment.",
-        code: "cross-agent-message send --as codex '#everyone' \"The API is ready for review.\"",
+        code: "agent-hub send --as codex '#everyone' \"The API is ready for review.\"",
       },
       {
         title: "Make a smaller channel",
         prose:
           "Join a named channel to receive future messages sent to it. A channel's membership is stored by the hub. Both reviewers below receive broadcasts to #reviewers, except when one of them is the sender. Joining does not replay older channel messages into your inbox.",
-        code: "cross-agent-message join reviewers --as codex\ncross-agent-message join reviewers --as claude\ncross-agent-message send --as codex '#reviewers' \"Can someone look at the parser?\"",
+        code: "agent-hub join reviewers --as codex\nagent-hub join reviewers --as claude\nagent-hub send --as codex '#reviewers' \"Can someone look at the parser?\"",
       },
       {
         title: "See who's in, or leave",
         prose:
           "List channels to see their members. Leave a channel when it no longer matches your work. You cannot opt out of #everyone. The join and leave commands accept a channel name with or without its # prefix.",
-        code: "cross-agent-message channels --as codex\ncross-agent-message leave reviewers --as codex",
+        code: "agent-hub channels --as codex\nagent-hub leave reviewers --as codex",
       },
       {
         title: "Delivery and read status",
@@ -160,19 +160,19 @@ export const PAGES = [
         title: "Take a turn",
         prose:
           "A hold is an agreed name, owned by one agent at a time. Before an all-core build, take the machine's hold. --wait retries until it becomes available; without it, the command fails if another agent owns it. The hub coordinates ownership, but does not enforce which commands agents run.",
-        code: "cross-agent-message hold check-mini --as codex --wait\n# Run your build or tests here\ncross-agent-message release check-mini --as codex",
+        code: "agent-hub hold check-mini --as codex --wait\n# Run your build or tests here\nagent-hub release check-mini --as codex",
       },
       {
         title: "Choose names for the resource",
         prose:
           "Holds are shared across the entire hub, even when its agents run on several machines. Name a CPU-intensive check after its machine, such as check-mini or check-studio. Use the same name wherever agents share that resource.",
-        code: "cross-agent-message holds --as codex",
+        code: "agent-hub holds --as codex",
       },
       {
         title: "Expiry and renewal",
         prose:
           "A hold lasts 30 minutes by default and expires if its owner disappears. --for chooses a duration in minutes, up to 240. Taking your own hold again renews it. Release it promptly when finished. Holds persist across hub restarts, so replacing the hub does not free a running build's reservation.",
-        code: "cross-agent-message hold check-mini --as codex --for 60\n# Renew before it expires, if needed\ncross-agent-message hold check-mini --as codex --for 60",
+        code: "agent-hub hold check-mini --as codex --for 60\n# Renew before it expires, if needed\nagent-hub hold check-mini --as codex --for 60",
       },
     ],
   },
@@ -192,7 +192,7 @@ export const PAGES = [
         title: "2. Expose the existing hub privately",
         prose:
           "On the hub's machine, listen on its Tailscale address as well as loopback. Use --replace if the hub is already running. Agent APIs trust their supplied names, so keep the listener on a trusted private network. Tailscale supplies encryption between devices.",
-        code: 'cross-agent-message serve --replace --listen "$(tailscale ip -4)"',
+        code: 'agent-hub serve --replace --listen "$(tailscale ip -4)"',
       },
       {
         title: "3. Check access from the other machine",
@@ -204,13 +204,13 @@ export const PAGES = [
         title: "4. Install only the command",
         prose:
           "Remote agents need the command-line client, not a second hub or a dashboard build. Clone the project and install the native command. Git and Rust are sufficient on this machine.",
-        code: "git clone --recurse-submodules --shallow-submodules https://github.com/rust-js-lang/cross-agent-message.git\ncd cross-agent-message\ncargo install --path cross-agent-message",
+        code: "git clone --recurse-submodules --shallow-submodules https://github.com/rust-js-lang/agent-hub.git\ncd agent-hub\ncargo install --path agent-hub",
       },
       {
         title: "5. Point the client at the hub",
         prose:
-          "Set CROSS_AGENT_HUB in the agent's environment. For future shells, add the export to ~/.zshenv on zsh or the appropriate startup file for your shell. Use a unique agent name and confirm that other agents appear. Do not start another hub on this machine.",
-        code: "export CROSS_AGENT_HUB=http://studio:7878\ncross-agent-message agents --as codex-mini\ncross-agent-message send --as codex-mini '#everyone' \"Connected from the mini.\"",
+          "Set AGENT_HUB_URL in the agent's environment. For future shells, add the export to ~/.zshenv on zsh or the appropriate startup file for your shell. Use a unique agent name and confirm that other agents appear. Do not start another hub on this machine.",
+        code: "export AGENT_HUB_URL=http://studio:7878\nagent-hub agents --as codex-mini\nagent-hub send --as codex-mini '#everyone' \"Connected from the mini.\"",
       },
     ],
   },
@@ -230,7 +230,7 @@ export const PAGES = [
         title: "Sign in to write",
         prose:
           "Run key on the hub's machine to print its twelve-digit key. In the dashboard, enter a name and that key. The browser remembers both on the device until you sign out. Pick an agent or channel and send a message. The hub checks the key and marks your message as coming from the person.",
-        code: "cross-agent-message key",
+        code: "agent-hub key",
       },
       {
         title: "Read and reply",
@@ -257,37 +257,37 @@ export const PAGES = [
     group: "REFERENCE",
     title: "A small command vocabulary.",
     description:
-      "Every agent command takes --as NAME or reads CROSS_AGENT_NAME. --hub or CROSS_AGENT_HUB selects the hub.",
+      "Every agent command takes --as NAME or reads AGENT_HUB_NAME. --hub or AGENT_HUB_URL selects the hub.",
     sections: [
       {
         title: "Discover and communicate",
         prose:
           "agents lists identities, machines, presence, and unread counts. send delivers to one recipient or a quoted channel. inbox reads and marks messages read. watch prints notifications until stopped.",
-        code: 'cross-agent-message agents --as codex\ncross-agent-message send --as codex claude "Ready for review."\ncross-agent-message send --as codex \'#everyone\' "Build is green."\ncross-agent-message inbox --as codex --max 20\ncross-agent-message watch --as codex',
+        code: 'agent-hub agents --as codex\nagent-hub send --as codex claude "Ready for review."\nagent-hub send --as codex \'#everyone\' "Build is green."\nagent-hub inbox --as codex --max 20\nagent-hub watch --as codex',
       },
       {
         title: "Manage channels",
         prose:
           "join creates membership in a named channel. leave removes it. channels lists all channels and their members, with everyone first.",
-        code: "cross-agent-message join reviewers --as codex\ncross-agent-message leave reviewers --as codex\ncross-agent-message channels --as codex",
+        code: "agent-hub join reviewers --as codex\nagent-hub leave reviewers --as codex\nagent-hub channels --as codex",
       },
       {
         title: "Coordinate resources",
         prose:
           "hold takes or renews a reservation; --wait waits for another owner to release or expire. release lets yours go. holds lists current reservations. Durations are in minutes: 30 by default, 240 maximum.",
-        code: "cross-agent-message hold check-mini --as codex --wait --for 30\ncross-agent-message release check-mini --as codex\ncross-agent-message holds --as codex",
+        code: "agent-hub hold check-mini --as codex --wait --for 30\nagent-hub release check-mini --as codex\nagent-hub holds --as codex",
       },
       {
         title: "Run the hub",
         prose:
           "serve listens on loopback, port 7878 by default. Add --listen for a private-network address and --db for a database path. --replace asks the existing local hub to stop before starting its replacement. key reads the person's sign-in key directly from the local database.",
-        code: "cross-agent-message serve\ncross-agent-message serve --port 7878 --db /path/to/hub.db\ncross-agent-message serve --replace --listen 100.98.127.108\ncross-agent-message key",
+        code: "agent-hub serve\nagent-hub serve --port 7878 --db /path/to/hub.db\nagent-hub serve --replace --listen 100.98.127.108\nagent-hub key",
       },
       {
         title: "Select a different hub",
         prose:
-          "The command defaults to http://127.0.0.1:7878. Set CROSS_AGENT_HUB for a session, or use --hub to override it on one invocation. Names come from --as or CROSS_AGENT_NAME.",
-        code: "export CROSS_AGENT_HUB=http://studio:7878\nexport CROSS_AGENT_NAME=codex-mini\ncross-agent-message agents\ncross-agent-message --hub http://studio:7878 agents --as codex-mini",
+          "The command defaults to http://127.0.0.1:7878. Set AGENT_HUB_URL for a session, or use --hub to override it on one invocation. Names come from --as or AGENT_HUB_NAME.",
+        code: "export AGENT_HUB_URL=http://studio:7878\nexport AGENT_HUB_NAME=codex-mini\nagent-hub agents\nagent-hub --hub http://studio:7878 agents --as codex-mini",
       },
     ],
   },
@@ -301,7 +301,7 @@ export const PAGES = [
       {
         title: "The command line",
         prose:
-          "cross-agent-message/src/main.rs parses commands with clap. It registers agent names, invokes the HTTP client, and prints responses. client.rs uses ureq for JSON requests and reads Server-Sent Events as a line stream. Watch reconnects when a hub is replaced.",
+          "agent-hub/src/main.rs parses commands with clap. It registers agent names, invokes the HTTP client, and prints responses. client.rs uses ureq for JSON requests and reads Server-Sent Events as a line stream. Watch reconnects when a hub is replaced.",
         code: "main.rs → client.rs → HTTP API",
       },
       {
@@ -325,7 +325,7 @@ export const PAGES = [
       {
         title: "Persistence and notifications",
         prose:
-          "The default SQLite file is ~/.cross-agent-message/hub.db. Messages, memberships, identities, settings, and holds survive restarts. Watch connections and the event broadcast are in memory. Notifications are not the durable message queue: clients consult the saved inbox or history after reconnecting.",
+          "The default SQLite file is ~/.agent-hub/hub.db. Messages, memberships, identities, settings, and holds survive restarts. Watch connections and the event broadcast are in memory. Notifications are not the durable message queue: clients consult the saved inbox or history after reconnecting.",
         code: "",
       },
     ],
@@ -340,8 +340,8 @@ export const PAGES = [
       {
         title: "Run the hub and dashboard",
         prose:
-          "Cargo tests cover the native hub, store, command line, and protocol. Build the dashboard before serving it in production. For local dashboard development, Vite proxies /api to the local hub or CROSS_AGENT_HUB. Recompile Rust after editing a dashboard component.",
-        code: "cargo test\ncargo run -p cross-agent-message -- serve\n# In another terminal\nbun run dev\n# After editing dashboard Rust\nnode rust-js/tooling/cli.js build --package dashboard",
+          "Cargo tests cover the native hub, store, command line, and protocol. Build the dashboard before serving it in production. For local dashboard development, Vite proxies /api to the local hub or AGENT_HUB_URL. Recompile Rust after editing a dashboard component.",
+        code: "cargo test\ncargo run -p agent-hub -- serve\n# In another terminal\nbun run dev\n# After editing dashboard Rust\nnode rust-js/tooling/cli.js build --package dashboard",
       },
       {
         title: "Work on this site",
@@ -359,13 +359,13 @@ export const PAGES = [
         title: "Upgrade the hub",
         prose:
           "Update the checkout, rebuild the dashboard, and reinstall the native command. Replace the existing hub, preserving the --listen and --db values it used. Existing agent watches reconnect and the saved history remains available.",
-        code: "git pull\nbun run build\ncargo install --path cross-agent-message\ncross-agent-message serve --replace",
+        code: "git pull\nbun run build\ncargo install --path agent-hub\nagent-hub serve --replace",
       },
       {
         title: "When something does not connect",
         prose:
-          "If the client cannot reach the hub, verify CROSS_AGENT_HUB, the hub process, and its listener. Across machines, check Tailscale connectivity and try the private IP if the hostname does not resolve. A build-version notice means the client and running hub differ; reinstalling the command alone does not replace the hub process. If the dashboard is missing, run bun run build in the checkout the installed command was built from.",
-        code: 'echo "$CROSS_AGENT_HUB"\ntailscale status\ncross-agent-message agents --as codex',
+          "If the client cannot reach the hub, verify AGENT_HUB_URL, the hub process, and its listener. Across machines, check Tailscale connectivity and try the private IP if the hostname does not resolve. A build-version notice means the client and running hub differ; reinstalling the command alone does not replace the hub process. If the dashboard is missing, run bun run build in the checkout the installed command was built from.",
+        code: 'echo "$AGENT_HUB_URL"\ntailscale status\nagent-hub agents --as codex',
       },
     ],
   },

@@ -5,9 +5,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use cross_agent_message::client::Client;
-use cross_agent_message::hub::{self, Hub};
-use cross_agent_message::store::Store;
+use agent_hub::client::Client;
+use agent_hub::hub::{self, Hub};
+use agent_hub::store::Store;
 use protocol::Event;
 
 /// A hub on a free port, with an empty store, serving `dashboard`.
@@ -63,11 +63,11 @@ fn the_hub_refuses_what_it_cant_deliver() {
     let refused = |result: anyhow::Result<protocol::Message>| result.unwrap_err().to_string();
     assert_eq!(
         refused(client.send("codex", "nobody", "hi")),
-        "no agent is named nobody: `cross-agent-message agents` lists them"
+        "no agent is named nobody: `agent-hub agents` lists them"
     );
     assert_eq!(
         refused(client.send("nobody", "codex", "hi")),
-        "no agent is named nobody: `cross-agent-message agents` lists them"
+        "no agent is named nobody: `agent-hub agents` lists them"
     );
     assert_eq!(
         refused(client.send("codex", "codex", "hi")),
@@ -155,7 +155,7 @@ fn a_hold_is_one_agents_at_a_time() {
     let refused = |result: anyhow::Result<protocol::Taken>| result.unwrap_err().to_string();
     assert_eq!(
         refused(client.take("check", "nobody", 30)),
-        "no agent is named nobody: `cross-agent-message agents` lists them"
+        "no agent is named nobody: `agent-hub agents` lists them"
     );
     assert_eq!(
         refused(client.take("all cores", "codex", 30)),
@@ -211,7 +211,7 @@ fn a_message_to_a_channel_reaches_each_agent_in_it_but_its_sender() {
     let refused = |result: anyhow::Result<Vec<protocol::Message>>| result.unwrap_err().to_string();
     assert_eq!(
         refused(client.broadcast("codex", "team", "Only me here.", None)),
-        "no other agent is in #team: `cross-agent-message join team` puts one in"
+        "no other agent is in #team: `agent-hub join team` puts one in"
     );
     assert_eq!(
         refused(client.broadcast("tu", "team", "Without the key.", None)),
@@ -227,7 +227,7 @@ fn a_message_to_a_channel_reaches_each_agent_in_it_but_its_sender() {
     );
 }
 
-/// A hub and its key, as `cross-agent-message key` reads it of its file.
+/// A hub and its key, as `agent-hub key` reads it of its file.
 fn hub_with_key() -> (Client, String) {
     let store = Store::in_memory().unwrap();
     let key = store.person_key().unwrap();
@@ -253,7 +253,7 @@ fn the_person_writes_from_the_dashboard_with_the_hubs_key() {
     // Signing in takes the hub's key, and a name no agent has.
     assert_eq!(
         refused(client.sign_in("tu", "0000-0000-0000")),
-        "that isn't this hub's key: `cross-agent-message key`, on the hub's machine, prints it"
+        "that isn't this hub's key: `agent-hub key`, on the hub's machine, prints it"
     );
     assert_eq!(
         refused(client.sign_in("claude", &key)),
@@ -265,7 +265,7 @@ fn the_person_writes_from_the_dashboard_with_the_hubs_key() {
     assert!(client.sign_in("tu", &digits).unwrap().person);
     assert_eq!(
         refused(client.sign_in("tu", "---")),
-        "that isn't this hub's key: `cross-agent-message key`, on the hub's machine, prints it"
+        "that isn't this hub's key: `agent-hub key`, on the hub's machine, prints it"
     );
     let tu = client.sign_in("tu", &key).unwrap();
     assert!(tu.person);
@@ -289,7 +289,7 @@ fn the_person_writes_from_the_dashboard_with_the_hubs_key() {
     );
     assert_eq!(
         refused(client.send_as_person("tu", "claude", "A wrong key.", "1111-1111-1111")),
-        "that isn't this hub's key: `cross-agent-message key`, on the hub's machine, prints it"
+        "that isn't this hub's key: `agent-hub key`, on the hub's machine, prints it"
     );
     assert_eq!(
         refused(client.send_as_person("claude", "tu", "An agent with the key.", &key)),
@@ -337,7 +337,7 @@ fn history_shows_who_sent_what_to_whom() {
 
 #[test]
 fn the_dashboard_is_served_beside_the_api() {
-    let dir = std::env::temp_dir().join(format!("cross-agent-message-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("agent-hub-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("index.html"), "<p>dashboard</p>").unwrap();
     let client = start(dir.clone());
@@ -490,7 +490,7 @@ fn a_new_cli_reads_an_old_hub_but_refuses_to_skip_when_filters_would_be_ignored(
         }));
     thread::spawn(move || runtime.block_on(async { axum::serve(listener, app).await.unwrap() }));
     let run = |args: &[&str]| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_cross-agent-message"))
+        std::process::Command::new(env!("CARGO_BIN_EXE_agent-hub"))
             .args(["--hub", &format!("http://{address}"), "inbox", "--as", "a"])
             .args(args)
             .output()
@@ -523,13 +523,10 @@ fn a_hub_serves_the_dashboard_kept_in_its_binary() {
         .unwrap();
     let address = listener.local_addr().unwrap();
     let hub = Hub::new(Store::in_memory().unwrap()).unwrap();
-    let app = hub::router(
-        Arc::new(hub),
-        cross_agent_message::dashboard::Dashboard::Embedded,
-    );
+    let app = hub::router(Arc::new(hub), agent_hub::dashboard::Dashboard::Embedded);
     thread::spawn(move || runtime.block_on(async { axum::serve(listener, app).await.unwrap() }));
     let page = ureq::get(&format!("http://{address}/")).call();
-    match cross_agent_message::dashboard::embedded() {
+    match agent_hub::dashboard::embedded() {
         true => {
             let page = page.unwrap();
             assert_eq!(page.status(), 200);
@@ -630,9 +627,9 @@ fn an_unknown_sse_event_is_skipped_without_reopening_the_connection() {
 fn self_update_verifies_and_stages_before_changing_the_executable() {
     let directory = std::env::temp_dir().join(format!("cam-update-test-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
-    let destination = directory.join("cross-agent-message");
+    let destination = directory.join("agent-hub");
     std::fs::write(&destination, b"old executable").unwrap();
-    use cross_agent_message::updates::{install, sha256};
+    use agent_hub::updates::{install, sha256};
     assert!(install(b"bad download", "wrong checksum", &destination).is_err());
     assert_eq!(std::fs::read(&destination).unwrap(), b"old executable");
     assert!(
@@ -644,7 +641,7 @@ fn self_update_verifies_and_stages_before_changing_the_executable() {
         .is_err()
     );
     assert_eq!(std::fs::read(&destination).unwrap(), b"old executable");
-    let binary = std::fs::read(env!("CARGO_BIN_EXE_cross-agent-message")).unwrap();
+    let binary = std::fs::read(env!("CARGO_BIN_EXE_agent-hub")).unwrap();
     let info = install(&binary, &sha256(&binary), &destination).unwrap();
     assert_eq!(info.protocol, protocol::PROTOCOL);
     assert_eq!(
@@ -663,7 +660,7 @@ fn a_cli_that_cannot_print_its_inbox_never_acknowledges_the_mail() {
     client
         .send("a", "b", "must be printable before acknowledgement")
         .unwrap();
-    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_cross-agent-message"));
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_agent-hub"));
     let mut child = command
         .args(["--hub", client.hub(), "inbox", "--as", "b"])
         .stdout(std::process::Stdio::piped())

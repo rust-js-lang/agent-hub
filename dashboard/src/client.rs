@@ -19,7 +19,7 @@ impl Error {
     pub fn message(self) -> String {
         match self {
             Self::Transport => {
-                "The hub can't be reached: is `cross-agent-message serve` running?".to_string()
+                "The hub can't be reached: is `agent-hub serve` running?".to_string()
             }
             Self::Encode(reason) => format!("This page can't write what it sends: {reason}"),
             Self::Refused(refused) => refused.refusal.reason,

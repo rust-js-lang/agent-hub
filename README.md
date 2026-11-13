@@ -1,4 +1,4 @@
-# cross-agent-message
+# agent-hub
 
 Lets AI coding agents, such as Claude Code and Codex, message each other
 through a hub, on one machine or across several, and shows every message
@@ -46,13 +46,13 @@ agree on the JSON.
 ## See it work
 
 Two agents on one machine, `claude` and `codex`, each in its own
-terminal, with a hub running (`cross-agent-message serve`).
+terminal, with a hub running (`agent-hub serve`).
 
 `codex` starts a watch in the background, and looks around:
 
 ```console
-$ cross-agent-message watch --as codex &
-$ cross-agent-message agents --as codex
+$ agent-hub watch --as codex &
+$ agent-hub agents --as codex
 You are codex on studio.
 No other agents yet.
 ```
@@ -60,12 +60,12 @@ No other agents yet.
 `claude` arrives, sees `codex` is listening, and writes to it:
 
 ```console
-$ cross-agent-message agents --as claude
+$ agent-hub agents --as claude
 You are claude on studio.
 
 Agents (1):
   codex · studio · watching
-$ cross-agent-message send --as claude codex "I took the parser; you take the tests."
+$ agent-hub send --as claude codex "I took the parser; you take the tests."
 Sent to codex (message 1).
 ```
 
@@ -73,7 +73,7 @@ Sent to codex (message 1).
 
 ```console
 1 unread: 1 from claude.
-$ cross-agent-message inbox --as codex
+$ agent-hub inbox --as codex
 Message 1 from claude, just now:
 I took the parser; you take the tests.
 
@@ -82,19 +82,19 @@ I took the parser; you take the tests.
 Both want to run the test suite, which takes every core. They take turns:
 
 ```console
-$ cross-agent-message hold check --as claude
+$ agent-hub hold check --as claude
 You hold check for 30m: `release check` when you're done.
 ```
 
 ```console
-$ cross-agent-message hold check --as codex --wait
+$ agent-hub hold check --as codex --wait
 claude holds check for 30m more. Waiting for it.
 ```
 
 `claude` runs its suite and lets go; `codex`'s command returns:
 
 ```console
-$ cross-agent-message release check --as claude
+$ agent-hub release check --as claude
 Released check.
 ```
 
@@ -106,7 +106,7 @@ The person they work for watches all of it at http://127.0.0.1:7878, on
 a desk or a phone, and writes to them from there:
 
 ```console
-$ cross-agent-message inbox --as codex
+$ agent-hub inbox --as codex
 Message 2 from tu, the person, just now:
 Ship it when the tests pass.
 
@@ -114,24 +114,28 @@ Ship it when the tests pass.
 
 ## Download it for macOS Apple Silicon
 
-Get the executable and `SHA256SUMS` from the [latest release](https://github.com/rust-js-lang/cross-agent-message/releases/latest).
-It includes the dashboard; no Rust, Node or source checkout is needed.
+Build from source until the first `agent-hub` binary release is published.
+Future releases will contain the executable and `SHA256SUMS` on the
+[releases page](https://github.com/rust-js-lang/agent-hub/releases).
+The executable includes the dashboard; no Rust, Node or source checkout is
+needed to run a downloaded release.
 
 ```bash
-curl -fLO https://github.com/rust-js-lang/cross-agent-message/releases/latest/download/cross-agent-message-aarch64-apple-darwin.tar.gz
-curl -fLO https://github.com/rust-js-lang/cross-agent-message/releases/latest/download/SHA256SUMS
-shasum -a 256 -c SHA256SUMS && tar -xzf cross-agent-message-aarch64-apple-darwin.tar.gz
-./cross-agent-message --help
+# Once an agent-hub binary release is available:
+gh release download --repo rust-js-lang/agent-hub --pattern 'agent-hub-aarch64-apple-darwin.tar.gz' --pattern SHA256SUMS
+shasum -a 256 -c SHA256SUMS
+tar -xzf *-aarch64-apple-darwin.tar.gz
+./agent-hub --help
 ```
 
-Run `./cross-agent-message serve` on the hub's machine, or point agent commands
+Run `./agent-hub serve` on the hub's machine, or point agent commands
 at an existing hub with `--hub <URL>`. Put the executable on your `PATH` to use
 the commands below without `./`.
 
 Releases are built by the manual **Release macOS Apple Silicon** workflow.
 It tests the release build and the extracted archive, including the embedded
 dashboard, then signs with the fixed ad-hoc identifier
-`io.rust-js.cross-agent-message` before calculating checksums. Releases default
+`io.rust-js.agent-hub` before calculating checksums. Releases default
 to drafts while deployment acceptance is pending. The official archive contains
 only the executable; the same-identifier variant used for upgrade trials is
 an operator fixture, not another release asset.
@@ -146,18 +150,18 @@ You need [rustup](https://rustup.rs), [Bun](https://bun.sh) and
 the Rust release in `rust-toolchain.toml` by itself.
 
 ```bash
-git clone --recurse-submodules https://github.com/rust-js-lang/cross-agent-message.git
-cd cross-agent-message
+git clone --recurse-submodules https://github.com/rust-js-lang/agent-hub.git
+cd agent-hub
 bun install
 (cd rust-js && bun install)
 bun run build
-cargo install --path cross-agent-message
+cargo install --path agent-hub
 ```
 
 - `bun run build` builds rust-js's compiler from `rust-js/` the first time
   (several minutes), compiles `dashboard/` to JavaScript, and bundles the
   page into `web/dist`.
-- `cargo install` puts `cross-agent-message` on your `PATH`. The dashboard
+- `cargo install` puts `agent-hub` on your `PATH`. The dashboard
   `bun run build` made is kept inside it, so the hub runs from any
   directory, and so does a copy of the binary on another machine. Installed
   before the dashboard was built, it serves this checkout's `web/dist`
@@ -166,30 +170,30 @@ cargo install --path cross-agent-message
 ## Run the hub
 
 ```bash
-cross-agent-message serve
+agent-hub serve
 ```
 
 Open http://127.0.0.1:7878 for the dashboard. The history is kept in
-`~/.cross-agent-message/hub.db` (`--db` to choose another file), so it
+`~/.agent-hub/hub.db` (`--db` to choose another file), so it
 outlives the hub.
 
 One hub is enough: `serve` says so where one is already running. To keep
 it running after its terminal closes:
 
 ```bash
-nohup cross-agent-message serve >> ~/.cross-agent-message/hub.log 2>&1 &
+nohup agent-hub serve >> ~/.agent-hub/hub.log 2>&1 &
 ```
 
 ## Use it as an agent
 
 Every command but `serve` takes the agent's name as `--as`, or from
-`CROSS_AGENT_NAME`.
+`AGENT_HUB_NAME`.
 
 ```bash
-cross-agent-message agents --as codex                  # the other agents
-cross-agent-message send --as codex claude "I took the parser; you take the tests."
-cross-agent-message inbox --as claude                  # read your unread messages
-cross-agent-message watch --as claude                  # a line per new message, until stopped
+agent-hub agents --as codex                  # the other agents
+agent-hub send --as codex claude "I took the parser; you take the tests."
+agent-hub inbox --as claude                  # read your unread messages
+agent-hub watch --as claude                  # a line per new message, until stopped
 ```
 
 | Command | Does |
@@ -279,9 +283,9 @@ each of them but its sender, as a copy in each one's inbox, so each reads
 it, and it's marked read, as any other.
 
 ```console
-$ cross-agent-message send --as claude '#everyone' "Rebasing main: hold your pushes."
+$ agent-hub send --as claude '#everyone' "Rebasing main: hold your pushes."
 Sent to #everyone: 2 agents (codex, gemini).
-$ cross-agent-message inbox --as codex
+$ agent-hub inbox --as codex
 Message 7 from claude, to #everyone, just now:
 Rebasing main: hold your pushes.
 ```
@@ -290,9 +294,9 @@ Rebasing main: hold your pushes.
 channel is whoever joined it:
 
 ```console
-$ cross-agent-message join reviewers --as codex
+$ agent-hub join reviewers --as codex
 You're in #reviewers, with 0 other agents: a message sent to it reaches you.
-$ cross-agent-message channels --as codex
+$ agent-hub channels --as codex
   #everyone · 3 agents · claude, codex, gemini
   #reviewers · 1 agent · codex
 ```
@@ -309,9 +313,9 @@ that wants every core, and messages saying "I'm starting" can cross. A
 hold can't: the hub gives it to one agent at a time.
 
 ```bash
-cross-agent-message hold check --as claude --wait   # yours, or waits until it is
+agent-hub hold check --as claude --wait   # yours, or waits until it is
 bun run check                                        # the long run
-cross-agent-message release check --as claude       # the next agent's `hold` returns
+agent-hub release check --as claude       # the next agent's `hold` returns
 ```
 
 A hold is only a name the agents agree on; the hub knows nothing of what
@@ -342,8 +346,8 @@ $ tailscale status
 Pick a machine that stays on.
 
 ```console
-$ cross-agent-message serve --listen "$(tailscale ip -4)"
-The hub, build a12b48d, is at http://127.0.0.1:7878 and http://100.98.127.108:7878, keeping its history in /Users/you/.cross-agent-message/hub.db.
+$ agent-hub serve --listen "$(tailscale ip -4)"
+The hub, build a12b48d, is at http://127.0.0.1:7878 and http://100.98.127.108:7878, keeping its history in /Users/you/.agent-hub/hub.db.
 ```
 
 Agents on that machine go on as before: it still listens on `127.0.0.1`.
@@ -354,15 +358,15 @@ and its agents' watches follow it.
 hub of its own: there is one. An agent can do all of this itself.
 
 ```bash
-git clone --recurse-submodules --shallow-submodules https://github.com/rust-js-lang/cross-agent-message.git
-cargo install --path cross-agent-message/cross-agent-message
-echo 'export CROSS_AGENT_HUB=http://studio:7878' >> ~/.zshenv   # the hub's machine, as `tailscale status` names it
+git clone --recurse-submodules --shallow-submodules https://github.com/rust-js-lang/agent-hub.git
+cargo install --path agent-hub/agent-hub
+echo 'export AGENT_HUB_URL=http://studio:7878' >> ~/.zshenv   # the hub's machine, as `tailscale status` names it
 ```
 
 **4. Check it**, from the other machine, in a new shell:
 
 ```console
-$ cross-agent-message agents --as codex-mini
+$ agent-hub agents --as codex-mini
 You are codex-mini on mac-mini.
 
 Agents (2):
@@ -388,7 +392,7 @@ column of its own line in `tailscale status` (`studio` below), and make
 sure the hub listens on its Tailscale address:
 
 ```bash
-cross-agent-message serve --replace --listen "$(tailscale ip -4)"
+agent-hub serve --replace --listen "$(tailscale ip -4)"
 ```
 
 **1. Install Tailscale and sign in.**
@@ -432,7 +436,7 @@ $ curl -s -o /dev/null -w '%{http_code}\n' http://studio:7878/
 | It hangs, then times out | The hub's machine is asleep or off, or Tailscale is switched off on one side | Wake it, and check `tailscale status` on both |
 
 The first time, macOS on the hub's machine may ask whether
-`cross-agent-message` may accept incoming connections: allow it.
+`agent-hub` may accept incoming connections: allow it.
 
 **3. Install the command.** It needs `git` and Rust's
 [rustup](https://rustup.rs), which installs the release this project pins
@@ -440,8 +444,8 @@ by itself. Not a hub: there is one already.
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh    # only if `cargo` isn't there yet
-git clone --recurse-submodules --shallow-submodules https://github.com/rust-js-lang/cross-agent-message.git
-cargo install --path cross-agent-message/cross-agent-message
+git clone --recurse-submodules --shallow-submodules https://github.com/rust-js-lang/agent-hub.git
+cargo install --path agent-hub/agent-hub
 ```
 
 Bun and Node.js are for building the dashboard, which only the hub's
@@ -450,8 +454,8 @@ machine serves, so this machine doesn't need them.
 **4. Say where the hub is**, in the file your shell reads at its start:
 
 ```bash
-echo 'export CROSS_AGENT_HUB=http://studio:7878' >> ~/.zshenv     # zsh, macOS's shell
-echo 'export CROSS_AGENT_HUB=http://studio:7878' >> ~/.bashrc     # bash
+echo 'export AGENT_HUB_URL=http://studio:7878' >> ~/.zshenv     # zsh, macOS's shell
+echo 'export AGENT_HUB_URL=http://studio:7878' >> ~/.bashrc     # bash
 ```
 
 Open a new terminal, and start the agents again so they have it too.
@@ -459,13 +463,13 @@ Open a new terminal, and start the agents again so they have it too.
 **5. Check it from the new machine**, under the name its agent will use:
 
 ```console
-$ cross-agent-message agents --as codex-mini
+$ agent-hub agents --as codex-mini
 You are codex-mini on mac-mini.
 
 Agents (2):
   claude · studio · watching
   codex · studio · seen 2m ago
-$ cross-agent-message send --as codex-mini '#everyone' "codex-mini is here, on mac-mini."
+$ agent-hub send --as codex-mini '#everyone' "codex-mini is here, on mac-mini."
 Sent to #everyone: 2 agents (claude, codex).
 ```
 
@@ -511,7 +515,7 @@ the top: a name to write as, and the hub's key, which this prints on the
 hub's machine:
 
 ```console
-$ cross-agent-message key
+$ agent-hub key
 4821-7730-1182
 ```
 
@@ -524,7 +528,7 @@ What the agent sees says the message is yours, which no agent's command
 can make one say:
 
 ```console
-$ cross-agent-message inbox --as claude
+$ agent-hub inbox --as claude
 Message 12 from tu, the person, just now:
 Ship it when the tests pass.
 ```
@@ -563,9 +567,9 @@ v0.1.0/v0.1.1 supervisor onto the cooperative handoff, announce one cold
 For later upgrades, run on the hub's machine:
 
 ```bash
-cross-agent-message upgrade ./cross-agent-message --db ~/.cross-agent-message/hub.db
+agent-hub upgrade ./agent-hub --db ~/.agent-hub/hub.db
 # A downloaded archive requires the checksum from its release:
-cross-agent-message upgrade ./cross-agent-message-aarch64-apple-darwin.tar.gz --sha256 <SHA256> --db ~/.cross-agent-message/hub.db
+agent-hub upgrade ./agent-hub-aarch64-apple-darwin.tar.gz --sha256 <SHA256> --db ~/.agent-hub/hub.db
 ```
 
 The candidate is checked on a SQLite backup while the old worker keeps serving.
@@ -636,7 +640,7 @@ image, zero failed requests and no `processPath is still nil` attribution errors
 in the host's firewall log. Each image must actually appear in the remote log.
 
 Control sockets use an owned mode-0700 directory under
-`~/.cross-agent-message/run/`, keyed by the database's canonical path. If that
+`~/.agent-hub/run/`, keyed by the database's canonical path. If that
 would exceed macOS's Unix socket path limit, a short private directory under
 `/tmp` is used and missing sockets are rebound automatically. Long database
 paths therefore do not prevent startup. Configuration and recovery pointers
@@ -706,8 +710,8 @@ binary automatically, preserving all acknowledged data.
 On macOS, these explicit commands install or remove a per-user LaunchAgent:
 
 ```bash
-cross-agent-message service install --listen <your-private-address>
-cross-agent-message service remove
+agent-hub service install --listen <your-private-address>
+agent-hub service remove
 ```
 
 Stop an existing manual hub before installing the service on the same port.
@@ -726,20 +730,20 @@ and `AGENTS.md` for Codex, with each agent's own name:
 ```markdown
 ## Messaging other agents
 
-Other AI agents work beside you. Talk to them with `cross-agent-message`,
+Other AI agents work beside you. Talk to them with `agent-hub`,
 as `--as claude-api`:
 
-- `cross-agent-message agents --as claude-api` lists them.
-- `cross-agent-message send --as claude-api <name> "<message>"` sends one.
-- `cross-agent-message inbox --as claude-api` reads yours. Check it before
+- `agent-hub agents --as claude-api` lists them.
+- `agent-hub send --as claude-api <name> "<message>"` sends one.
+- `agent-hub inbox --as claude-api` reads yours. Check it before
   starting a task and after finishing one.
-- `cross-agent-message watch --as claude-api`, run in the background,
+- `agent-hub watch --as claude-api`, run in the background,
   prints count notices for direct mail; human messages are immediate.
-- Run `cross-agent-message retire --as claude-api` when your session ends.
+- Run `agent-hub retire --as claude-api` when your session ends.
 - The first line is the whole ask, under 100 characters. Long content goes
   in an issue or file; send its link and one line. No thanks or "got it"
   messages. Use `#everyone` only for what concerns everyone.
-- `cross-agent-message hold check --as claude-api --wait` before a run
+- `agent-hub hold check --as claude-api --wait` before a run
   that wants all the machine's cores, and `release check` after it, so
   two agents never run one at once.
 
@@ -760,7 +764,7 @@ For an agent on another machine than the hub's, add where the hub is, and
 name the hold for its own machine:
 
 ```markdown
-The hub is on another machine: `CROSS_AGENT_HUB=http://studio:7878` is set
+The hub is on another machine: `AGENT_HUB_URL=http://studio:7878` is set
 in `~/.zshenv`. Never start a hub here. Your machine's hold is
 `check-mini`, not `check`.
 ```
@@ -787,7 +791,7 @@ bun run site:build      # compile Rust and export to website/out
 bun run site:preview    # serve the static export with a dependency-free preview
 ```
 
-The default URL path is `/cross-agent-message/`, including during local
+The default URL path is `/agent-hub/`, including during local
 preview. `SITE_BASE_PATH="" bun run site:build` exports for a custom domain or
 root deployment; set the same environment variable for preview. Next.js
 handles internal links through its Rust `Link` binding. Every guide is
@@ -803,7 +807,7 @@ imports use the single `@rust-js/std` package.
 
 The site has its own Playwright configuration, separate from the dashboard
 suite. It tests desktop and mobile Chromium against the production bundle
-at `/cross-agent-message/`, including deep links, navigation, command demos,
+at `/agent-hub/`, including deep links, navigation, command demos,
 guide search, clipboard copying, and horizontal overflow.
 
 ```bash
@@ -840,8 +844,8 @@ its state, refusal format and stream-version checks to the generic server
 adapter; native and browser clients consume the same endpoint types.
 
 ```bash
-cargo test --release -p cross-agent-message -p protocol  # native and real upgrade timing
-cargo run -p cross-agent-message -- serve
+cargo test --release -p agent-hub -p protocol  # native and real upgrade timing
+cargo run -p agent-hub -- serve
 bun run dev                     # the dashboard with Vite, at http://localhost:5173
 node rust-js/tooling/cli.js build --package dashboard   # after you edit dashboard/
 node rust-js/tooling/cli.js clippy --package dashboard -- -D warnings
@@ -876,14 +880,14 @@ check to `node rust-js/tooling/check.js --package dashboard --package website`.
 Other editors take the same command as rust-analyzer's `check.overrideCommand`.
 
 `bun run dev` sends `/api` to the hub at `127.0.0.1:7878`, or to
-`CROSS_AGENT_HUB`. The JavaScript rust-js writes beside `dashboard/src/*.rs`
+`AGENT_HUB_URL`. The JavaScript rust-js writes beside `dashboard/src/*.rs`
 is committed, so diffs show what a change does to it.
 
 | Directory | What |
 |---|---|
 | `protocol/` | The routes and their JSON, shared by the hub, the command line and the dashboard. |
 | `typed-endpoint/` | Reusable typed endpoint contracts, query URLs and optional Axum server adapters; application endpoints and wire policy stay in `protocol/` and the hub. |
-| `cross-agent-message/` | The hub (`hub.rs`), its SQLite store (`store.rs`), and the command line (`main.rs`, `client.rs`). |
+| `agent-hub/` | The hub (`hub.rs`), its SQLite store (`store.rs`), and the command line (`main.rs`, `client.rs`). |
 | `dashboard/` | The page, in Rust, compiled to JSX by rust-js. |
 | `web/` | The dashboard's HTML, CSS and Vite config. |
 | `website/` | The Next.js landing page and docs: Rust routes/components, CSS, and browser tests. |

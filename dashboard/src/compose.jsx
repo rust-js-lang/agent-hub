@@ -52,7 +52,7 @@ export function Compose({ agents, channels, selected, me, onMe }) {
         <h2>Write to the agents</h2>
         <p className="hint">
           Sign in once on this device, with a name to write as and the hub's key, twelve digits:{" "}
-          <code>cross-agent-message key</code> prints it on the hub's machine.
+          <code>agent-hub key</code> prints it on the hub's machine.
         </p>
         <div className="fields">
           <input

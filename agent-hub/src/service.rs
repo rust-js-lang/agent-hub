@@ -31,7 +31,7 @@ pub fn plist(binary: &Path, config: &crate::supervisor::Config) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict><key>Label</key><string>org.rust-js.cross-agent-message</string>
+<plist version="1.0"><dict><key>Label</key><string>org.rust-js.agent-hub</string>
 <key>ProgramArguments</key><array>{args}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
 <key>StandardOutPath</key><string>{log}</string><key>StandardErrorPath</key><string>{log}</string></dict></plist>
 "#
@@ -59,7 +59,7 @@ pub fn install(config: &crate::supervisor::Config) -> Result<()> {
     std::fs::create_dir_all(&directory)?;
     std::fs::create_dir_all(config.db.parent().context("database directory")?)?;
     let executable = std::fs::canonicalize(std::env::current_exe()?)?;
-    let file = directory.join("org.rust-js.cross-agent-message.plist");
+    let file = directory.join("org.rust-js.agent-hub.plist");
     std::fs::write(&file, plist(&executable, &config))?;
     // SAFETY: getuid has no preconditions and reads the calling user's ID.
     let domain = format!("gui/{}", unsafe { libc::getuid() });
@@ -81,7 +81,7 @@ pub fn remove() -> Result<()> {
         bail!("service remove requires macOS");
     }
     let home = std::env::home_dir().context("home directory unavailable")?;
-    let file = home.join("Library/LaunchAgents/org.rust-js.cross-agent-message.plist");
+    let file = home.join("Library/LaunchAgents/org.rust-js.agent-hub.plist");
     let domain = format!("gui/{}", unsafe { libc::getuid() });
     let status = std::process::Command::new("launchctl")
         .args(["bootout", &domain])
@@ -117,10 +117,7 @@ mod tests {
             handoff_protocol: 0,
             handoff_startup: false,
         };
-        let text = super::plist(
-            std::path::Path::new("/tmp/bin & stuff/cross-agent-message"),
-            &config,
-        );
+        let text = super::plist(std::path::Path::new("/tmp/bin & stuff/agent-hub"), &config);
         assert!(
             text.contains("<key>RunAtLoad</key><true/>")
                 && text.contains("<key>KeepAlive</key><true/>")

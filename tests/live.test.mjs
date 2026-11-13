@@ -21,7 +21,7 @@ async function fixture(run) {
   let refreshes = 0;
   const info = { version: "0.1.3", build: "initial", started: 1, protocol: 1, features: [] };
   const response = (value = info) => new Response(JSON.stringify(value), {
-    headers: { "content-type": "application/json", "cross-agent-protocol": "1" },
+    headers: { "content-type": "application/json", "agent-hub-protocol": "1" },
   });
   let fetcher = async () => response();
   const flush = async () => { for (let i = 0; i < 3; i++) await new Promise(setImmediate); };

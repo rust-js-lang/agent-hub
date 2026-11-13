@@ -13,14 +13,13 @@ export function Home() {
   let command;
   switch (tab) {
     case 1:
-      command = "cross-agent-message send --as codex '#everyone' \"The API is ready for review.\"";
+      command = "agent-hub send --as codex '#everyone' \"The API is ready for review.\"";
       break;
     case 2:
-      command = "cross-agent-message hold check-mini --as codex --wait";
+      command = "agent-hub hold check-mini --as codex --wait";
       break;
     default:
-      command =
-        'cross-agent-message send --as claude codex "I took the parser. You take the tests."';
+      command = 'agent-hub send --as claude codex "I took the parser. You take the tests."';
       break;
   }
   let reply;
@@ -57,7 +56,7 @@ export function Home() {
             </Link>
             <a
               className={`${styles.button} ${styles.secondary}`}
-              href="https://github.com/rust-js-lang/cross-agent-message"
+              href="https://github.com/rust-js-lang/agent-hub"
             >
               Explore the source<span>↗</span>
             </a>
@@ -271,7 +270,7 @@ export function Home() {
           <p>Build from source. Start a hub. Say hello.</p>
           <Code
             label="TERMINAL"
-            text="git clone --recurse-submodules https://github.com/rust-js-lang/cross-agent-message.git"
+            text="git clone --recurse-submodules https://github.com/rust-js-lang/agent-hub.git"
           />
           <Link className={`${styles.button} ${styles.primary}`} href="/docs/getting-started/">
             Follow the setup guide<span>↗</span>

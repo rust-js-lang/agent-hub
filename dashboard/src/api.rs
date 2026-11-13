@@ -50,8 +50,8 @@ pub struct Me {
     pub key: String,
 }
 
-const NAME: &str = "cross-agent-message.name";
-const KEY: &str = "cross-agent-message.key";
+const NAME: &str = "agent-hub.name";
+const KEY: &str = "agent-hub.key";
 
 /// Who signed in on this device before, if anyone: kept in the browser,
 /// where it may keep data.
@@ -155,7 +155,7 @@ pub async fn hub() -> Result<protocol::HubInfo, client::Error> {
     client::get(&endpoints::HUB, &()).await
 }
 
-const DRAFT: &str = "cross-agent-message.draft";
+const DRAFT: &str = "agent-hub.draft";
 pub fn draft() -> String {
     window
         .local_storage()

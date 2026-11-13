@@ -145,7 +145,7 @@ export function App() {
       }}
     >
       <header>
-        <h1>Cross-agent messages</h1>
+        <h1>Agent Hub</h1>
         <span className={live ? "live on" : "live off"}>{live ? "Live" : "Connecting…"}</span>
       </header>
       {condition && (

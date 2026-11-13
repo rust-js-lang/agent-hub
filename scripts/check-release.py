@@ -21,7 +21,7 @@ expected = next(line.split()[0] for line in sums if line.split()[-1] == archive.
 assert hashlib.sha256(archive.read_bytes()).hexdigest() == expected
 with tempfile.TemporaryDirectory(prefix="cam-release-") as directory:
     root = Path(directory)
-    binary = root / "cross-agent-message"
+    binary = root / "agent-hub"
     with tarfile.open(archive) as package:
         members = package.getmembers()
         assert len(members) == 1 and members[0].name == binary.name and members[0].isfile()
@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory(prefix="cam-release-") as directory:
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    env = {**os.environ, "CROSS_AGENT_STATE_DIR": directory}
+    env = {**os.environ, "AGENT_HUB_STATE_DIR": directory}
     with (root / "log").open("w+") as log:
         process = subprocess.Popen(
             [binary, "serve", "--port", str(port), "--db", root / "hub.db"],

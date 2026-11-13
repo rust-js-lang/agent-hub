@@ -5,10 +5,10 @@ import { randomBytes } from "node:crypto";
 import { db, hub } from "../playwright.config";
 
 // The binary `cargo run` built for the test hub.
-const binary = "target/debug/cross-agent-message";
-const env = { ...process.env, CROSS_AGENT_HUB: hub };
+const binary = "target/debug/agent-hub";
+const env = { ...process.env, AGENT_HUB_URL: hub };
 
-/** Runs `cross-agent-message <args>` and gives what it printed. */
+/** Runs `agent-hub <args>` and gives what it printed. */
 export function cli(...args: string[]): string {
   return execFileSync(binary, args, { env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 }

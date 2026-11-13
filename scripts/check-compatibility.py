@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise each client against the other release's real hub, on private temp ports."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import signal
 import shutil
 import socket
 import subprocess
+import tarfile
 import tempfile
 import time
 import urllib.request
@@ -50,7 +52,7 @@ def check_migrated_data(current, previous):
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         url = f"http://127.0.0.1:{port}"
-        env = {**os.environ, "CROSS_AGENT_HUB": url, "CROSS_AGENT_STATE_DIR": directory}
+        env = {**os.environ, "AGENT_HUB_URL": url, "AGENT_HUB_STATE_DIR": directory}
         process = start_process(current, directory, port)
         def ready():
             with urllib.request.urlopen(url + "/api/hub", timeout=2) as response:
@@ -70,7 +72,7 @@ def check_migrated_data(current, previous):
                 probe.bind(("127.0.0.1", 0))
                 port = probe.getsockname()[1]
             url = f"http://127.0.0.1:{port}"
-            env["CROSS_AGENT_HUB"] = url
+            env["AGENT_HUB_URL"] = url
             process = start_process(previous, directory, port)
             wait_for(ready)
             assert "written by the new release" in run(previous, "inbox", "--as", "schema-b")
@@ -88,7 +90,7 @@ def check(server, client, label):
         url = f"http://127.0.0.1:{port}"
         process = start_process(server, directory, port)
         watcher = None
-        env = {**os.environ, "CROSS_AGENT_HUB": url, "CROSS_AGENT_STATE_DIR": directory}
+        env = {**os.environ, "AGENT_HUB_URL": url, "AGENT_HUB_STATE_DIR": directory}
         def run(*command):
             return subprocess.check_output([client, *command], env=env, text=True, timeout=15)
         def agents():
@@ -122,14 +124,14 @@ def check_supervised_upgrades(current, previous):
         return
     with tempfile.TemporaryDirectory(prefix="cam-mix-", dir="/tmp") as directory:
         root = Path(directory)
-        installed = root / "cross-agent-message"
+        installed = root / "agent-hub"
         shutil.copy2(current, installed)
         database = root / "hub.db"
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         url = f"http://127.0.0.1:{port}"
-        env = {**os.environ, "CROSS_AGENT_HUB": url, "CROSS_AGENT_STATE_DIR": directory}
+        env = {**os.environ, "AGENT_HUB_URL": url, "AGENT_HUB_STATE_DIR": directory}
         process = subprocess.Popen([installed, "serve", "--db", database, "--port", str(port)],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env, start_new_session=True)
         def info():
@@ -167,14 +169,14 @@ def check_supervised_upgrades(current, previous):
     # new worker, but cannot gain a newer handoff guarantee just by doing so.
     with tempfile.TemporaryDirectory(prefix="cam-old-sup-", dir="/tmp") as directory:
         root = Path(directory)
-        installed = root / "cross-agent-message"
+        installed = root / "agent-hub"
         shutil.copy2(previous, installed)
         database = root / "hub.db"
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         url = f"http://127.0.0.1:{port}"
-        env = {**os.environ, "CROSS_AGENT_HUB": url, "CROSS_AGENT_STATE_DIR": directory}
+        env = {**os.environ, "AGENT_HUB_URL": url, "AGENT_HUB_STATE_DIR": directory}
         process = subprocess.Popen([installed, "serve", "--db", database, "--port", str(port)],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env, start_new_session=True)
         def info():
@@ -212,14 +214,14 @@ def check_previous_client_deferral(current, previous):
         return
     with tempfile.TemporaryDirectory(prefix="cam-defer-", dir="/tmp") as directory:
         root = Path(directory)
-        installed = root / "cross-agent-message"
+        installed = root / "agent-hub"
         shutil.copy2(current, installed)
         database = root / "hub.db"
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
         url = f"http://127.0.0.1:{port}"
-        env = {**os.environ, "CROSS_AGENT_HUB": url, "CROSS_AGENT_STATE_DIR": directory}
+        env = {**os.environ, "AGENT_HUB_URL": url, "AGENT_HUB_STATE_DIR": directory}
         process = subprocess.Popen([installed, "serve", "--db", database, "--port", str(port)],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env, start_new_session=True)
         events, stalled, upgrade = None, None, None

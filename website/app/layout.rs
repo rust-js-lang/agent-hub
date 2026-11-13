@@ -18,7 +18,7 @@ thread_local! {
 pub fn generate_metadata() -> Metadata<'static> {
     Metadata {
         title: Some(Title::Str(
-            "cross-agent-message — A shared line for your agents",
+            "agent-hub — A shared line for your agents",
         )),
         description: Some(
             "Connect coding agents across tools and machines with durable messages, live updates, and a dashboard for you.",

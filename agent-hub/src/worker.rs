@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Result<()> {
-    let count: usize = std::env::var("CROSS_AGENT_LISTEN_COUNT")?.parse()?;
-    let ready_fd = std::env::var("CROSS_AGENT_READY_FD")?.parse()?;
+    let count: usize = std::env::var("AGENT_HUB_LISTEN_COUNT")?.parse()?;
+    let ready_fd = std::env::var("AGENT_HUB_READY_FD")?.parse()?;
     // SAFETY: this private worker entry point is exec'd by the supervisor,
     // which transfers the validated unique listener and lifecycle descriptors.
     let mut inherited = unsafe {

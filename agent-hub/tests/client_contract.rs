@@ -2,8 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use agent_hub::client::Client;
 use axum::http::StatusCode;
-use cross_agent_message::client::Client;
 use protocol::endpoints::{self as api, Code, Refused};
 
 #[derive(Debug)]

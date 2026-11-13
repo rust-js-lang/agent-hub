@@ -1,5 +1,5 @@
 [package]
-name = "cross-agent-message"
+name = "agent-hub"
 version = "0.1.3"
 edition = "2024"
 publish = false

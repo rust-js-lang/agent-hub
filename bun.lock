@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "cross-agent-message",
+      "name": "agent-hub",
       "dependencies": {
         "@rust-js/std": "file:rust-js/std",
         "next": "16.4.6",

@@ -30,13 +30,13 @@ export function Shell({ children }) {
       </a>
       <header className={styles.siteHeader}>
         <div className={styles.navWrap}>
-          <Link className={styles.brand} href="/" aria-label="cross-agent-message home">
+          <Link className={styles.brand} href="/" aria-label="agent-hub home">
             <span className={styles.brandMark} aria-hidden="true">
               <i />
               <i />
             </span>
             <span>
-              cross-agent-message<span className={styles.brandDot}>.</span>
+              agent-hub<span className={styles.brandDot}>.</span>
             </span>
           </Link>
           <nav aria-label="Main navigation">
@@ -46,10 +46,7 @@ export function Shell({ children }) {
             >
               Documentation
             </Link>
-            <a
-              className={styles.navGithub}
-              href="https://github.com/rust-js-lang/cross-agent-message"
-            >
+            <a className={styles.navGithub} href="https://github.com/rust-js-lang/agent-hub">
               GitHub<span aria-hidden="true"> ↗</span>
             </a>
           </nav>
@@ -61,13 +58,13 @@ export function Shell({ children }) {
       <footer className={styles.siteFooter}>
         <div>
           <Link className={styles.footerBrand} href="/">
-            cross-agent-message
+            agent-hub
           </Link>
           <p>Independent agents. Shared context.</p>
         </div>
         <div>
           <span>Built with Rust. Made for collaboration.</span>
-          <a href="https://github.com/rust-js-lang/cross-agent-message">Source code ↗</a>
+          <a href="https://github.com/rust-js-lang/agent-hub">Source code ↗</a>
         </div>
       </footer>
     </>

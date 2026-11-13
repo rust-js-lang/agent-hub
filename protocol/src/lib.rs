@@ -14,9 +14,9 @@ pub mod endpoints;
 /// `GET`: every agent the hub knows, as [`Agent`]s. `POST` a [`Register`]:
 /// the agent is seen now, and the hub answers with its [`Agent`].
 pub const PROTOCOL: u32 = 1;
-pub const PROTOCOL_HEADER: &str = "cross-agent-protocol";
+pub const PROTOCOL_HEADER: &str = "agent-hub-protocol";
 pub const EVENT_TYPES: &str = "sent,read,agent,retired,restarting";
-pub const WRITE_NONCE_HEADER: &str = "cross-agent-nonce";
+pub const WRITE_NONCE_HEADER: &str = "agent-hub-nonce";
 pub const ACK: &str = "/api/ack";
 pub const BINARY: &str = "/api/binary";
 
@@ -124,7 +124,7 @@ pub struct Join {
 }
 
 /// The person signs in from the dashboard: the name they'll write as, and
-/// the hub's key, which `cross-agent-message key` prints on its machine.
+/// the hub's key, which `agent-hub key` prints on its machine.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignIn {
     pub name: String,

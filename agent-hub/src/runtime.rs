@@ -1,8 +1,8 @@
 //! Preserve the hub IPC namespace while sharing filesystem safety primitives.
 use std::path::{Path, PathBuf};
 const RUNTIME: process_supervisor::runtime::Runtime = process_supervisor::runtime::Runtime {
-    home_directory: ".cross-agent-message",
-    temporary_prefix: "cam",
+    home_directory: ".agent-hub",
+    temporary_prefix: "agent-hub",
 };
 pub fn socket(db: &Path, name: &str) -> PathBuf {
     RUNTIME.socket(db, name)

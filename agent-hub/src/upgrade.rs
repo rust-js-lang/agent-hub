@@ -111,7 +111,7 @@ fn candidate(path: &Path, checksum: Option<&str>, config: &Config) -> Result<Pat
             .find(|name| {
                 Path::new(name)
                     .file_name()
-                    .is_some_and(|n| n == "cross-agent-message")
+                    .is_some_and(|n| n == "agent-hub")
             })
             .context("archive has no executable")?;
         let result = std::process::Command::new("tar")

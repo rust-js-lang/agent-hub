@@ -1,5 +1,5 @@
 //! Exercise the inherited lifecycle channel against real worker processes.
-use cross_agent_message::{client::Client, supervisor::Config};
+use agent_hub::{client::Client, supervisor::Config};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
@@ -38,11 +38,11 @@ impl Fixture {
             requested_addresses: vec![address],
             required_ready: vec![address.to_string()],
             db: root.join("hub.db"),
-            worker_path: Some(PathBuf::from(env!("CARGO_BIN_EXE_cross-agent-message"))),
+            worker_path: Some(PathBuf::from(env!("CARGO_BIN_EXE_agent-hub"))),
             handoff_protocol: 1,
             handoff_startup: true,
             activate_current: false,
-            application: cross_agent_message::supervisor::HubApplication {
+            application: agent_hub::supervisor::HubApplication {
                 away_after: 60_000,
                 forget_after: 120_000,
                 reconnect_grace: 30_000,
@@ -68,13 +68,13 @@ impl Fixture {
             .append(true)
             .open(self.root.join("workers.log"))
             .unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_cross-agent-message"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agent-hub"));
         command
             .arg("worker")
             .arg("--config")
             .arg(self.config.config_path())
-            .env("CROSS_AGENT_LISTEN_COUNT", "1")
-            .env("CROSS_AGENT_READY_FD", "4")
+            .env("AGENT_HUB_LISTEN_COUNT", "1")
+            .env("AGENT_HUB_READY_FD", "4")
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
             .stderr(log)
@@ -156,7 +156,7 @@ impl Worker {
         );
         line
     }
-    fn ready(&mut self, id: u64, address: &str) -> cross_agent_message::addresses::Ready {
+    fn ready(&mut self, id: u64, address: &str) -> agent_hub::addresses::Ready {
         let mut line = self.line();
         while line.starts_with("accepting ") || line.starts_with("accepted ") {
             if line.starts_with("accepting ") {
@@ -164,7 +164,7 @@ impl Worker {
             }
             line = self.line();
         }
-        let ready: cross_agent_message::addresses::Ready =
+        let ready: agent_hub::addresses::Ready =
             serde_json::from_str(line.strip_prefix("ready ").expect(&line)).unwrap();
         assert_eq!(ready.request, id);
         assert_eq!(ready.handoff_protocol, 1);
@@ -311,7 +311,7 @@ fn a_new_worker_under_a_legacy_parent_does_not_claim_cooperative_handoff() {
     .unwrap();
     let mut worker = fixture.spawn();
     let line = worker.line();
-    let ready: cross_agent_message::addresses::Ready =
+    let ready: agent_hub::addresses::Ready =
         serde_json::from_str(line.strip_prefix("ready ").unwrap()).unwrap();
     assert_eq!(ready.handoff_protocol, 0);
     let client = fixture.client();
@@ -324,9 +324,9 @@ fn a_new_worker_under_a_legacy_parent_does_not_claim_cooperative_handoff() {
             .any(|feature| feature == "cooperative-handoff")
     );
     client.register("works-with-old-parent").unwrap();
-    let upgrade = Command::new(env!("CARGO_BIN_EXE_cross-agent-message"))
+    let upgrade = Command::new(env!("CARGO_BIN_EXE_agent-hub"))
         .arg("upgrade")
-        .arg(env!("CARGO_BIN_EXE_cross-agent-message"))
+        .arg(env!("CARGO_BIN_EXE_agent-hub"))
         .arg("--db")
         .arg(&fixture.config.db)
         .output()

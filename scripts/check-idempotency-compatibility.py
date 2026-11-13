@@ -44,11 +44,11 @@ def main():
         url = None
 
         def request(path, body=None, nonce=None):
-            headers = {"cross-agent-protocol": "1"}
+            headers = {"agent-hub-protocol": "1"}
             if body is not None:
                 headers["content-type"] = "application/json"
             if nonce is not None:
-                headers["cross-agent-nonce"] = nonce
+                headers["agent-hub-nonce"] = nonce
             query = urllib.request.Request(url + path, data=body, headers=headers)
             with urllib.request.urlopen(query, timeout=5) as response:
                 return response.read()

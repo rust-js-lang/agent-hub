@@ -1,18 +1,18 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
-//! `cross-agent-message`: run the hub, or use it as an agent.
+//! `agent-hub`: run the hub, or use it as an agent.
 
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use agent_hub::client::Client;
+use agent_hub::dashboard::{self, Dashboard};
+use agent_hub::hub::{self, Hub};
+use agent_hub::store::Store;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
-use cross_agent_message::client::Client;
-use cross_agent_message::dashboard::{self, Dashboard};
-use cross_agent_message::hub::{self, Hub};
-use cross_agent_message::store::Store;
 use protocol::{Agent, Event, HOLD_MINUTES, Hold, check_channel, check_hold, check_name};
 
 /// Lets AI coding agents, on any tool or machine, message each other through
@@ -24,7 +24,7 @@ struct Cli {
     /// The hub's address.
     #[arg(
         long,
-        env = "CROSS_AGENT_HUB",
+        env = "AGENT_HUB_URL",
         default_value = "http://127.0.0.1:7878",
         global = true
     )]
@@ -37,7 +37,7 @@ struct Cli {
 #[derive(Args)]
 struct Me {
     /// Your agent's name: letters, digits, `-`, `_` and `.`, unique on the hub.
-    #[arg(long = "as", env = "CROSS_AGENT_NAME", value_name = "NAME")]
+    #[arg(long = "as", env = "AGENT_HUB_NAME", value_name = "NAME")]
     name: String,
 }
 
@@ -234,7 +234,7 @@ enum ServiceCommand {
 fn default_db() -> PathBuf {
     std::env::home_dir()
         .unwrap_or_default()
-        .join(".cross-agent-message/hub.db")
+        .join(".agent-hub/hub.db")
 }
 
 /// Where the dashboard is: the files this binary was built with, a hub
@@ -257,7 +257,7 @@ fn dashboard() -> Dashboard {
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(error) if error.is::<cross_agent_message::supervisor::Deferred>() => {
+        Err(error) if error.is::<agent_hub::supervisor::Deferred>() => {
             // EX_TEMPFAIL: the hub is healthy and the caller should retry later.
             std::process::ExitCode::from(75)
         }
@@ -282,32 +282,32 @@ fn run() -> Result<()> {
             | Command::Service { .. }
     ) {
         let info = client.check_protocol()?;
-        let _ = cross_agent_message::updates::warn_if_behind(
+        let _ = agent_hub::updates::warn_if_behind(
             &info,
             client.hub(),
-            &cross_agent_message::updates::client_state_dir(),
+            &agent_hub::updates::client_state_dir(),
             hub::now() / 86_400_000,
         );
     }
     match cli.command {
-        Command::SelfCheck { db } => cross_agent_message::upgrade::self_check(&db),
+        Command::SelfCheck { db } => agent_hub::upgrade::self_check(&db),
         Command::Worker { config } => {
             let config = serde_json::from_slice(&std::fs::read(config)?)?;
-            cross_agent_message::worker::run(config, dashboard())
+            agent_hub::worker::run(config, dashboard())
         }
         Command::Upgrade { binary, db, sha256 } => {
-            cross_agent_message::upgrade::run(&binary, &db, sha256.as_deref())
+            agent_hub::upgrade::run(&binary, &db, sha256.as_deref())
         }
         Command::Service { command } => match command {
-            ServiceCommand::Remove => cross_agent_message::service::remove(),
+            ServiceCommand::Remove => agent_hub::service::remove(),
             ServiceCommand::Install { db, port, listen } => {
                 let addresses = std::iter::once(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
                     .chain(listen.into_iter().map(|ip| SocketAddr::from((ip, port))))
                     .collect();
-                cross_agent_message::service::install(&cross_agent_message::supervisor::Config {
+                agent_hub::service::install(&agent_hub::supervisor::Config {
                     addresses,
                     db,
-                    application: cross_agent_message::supervisor::HubApplication {
+                    application: agent_hub::supervisor::HubApplication {
                         away_after: protocol::default_away_after(),
                         forget_after: protocol::default_forget_after(),
                         reconnect_grace: 30_000,
@@ -324,13 +324,11 @@ fn run() -> Result<()> {
         Command::BuildInfo => {
             println!(
                 "{}",
-                serde_json::to_string(&cross_agent_message::updates::build_info())?
+                serde_json::to_string(&agent_hub::updates::build_info())?
             );
             Ok(())
         }
-        Command::UpgradeSelf { from_hub } => {
-            cross_agent_message::updates::upgrade_self(&client, from_hub)
-        }
+        Command::UpgradeSelf { from_hub } => agent_hub::updates::upgrade_self(&client, from_hub),
         Command::Serve {
             port,
             db,
@@ -434,24 +432,24 @@ fn serve(
         }
         println!("Asking the hub of build {} to stop.", info.build);
         if info.supervised {
-            cross_agent_message::supervisor::stop(&db)?;
+            agent_hub::supervisor::stop(&db)?;
         } else {
             let _ = client.stop();
         }
         // Until it has let go of the address.
         let gone = (0..50).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            cross_agent_message::supervisor::bind_listener(address).is_ok()
+            agent_hub::supervisor::bind_listener(address).is_ok()
         });
         if !gone {
             bail!("the hub at http://{address} didn't stop");
         }
     }
     if !no_supervisor {
-        cross_agent_message::supervisor::run(cross_agent_message::supervisor::Config {
+        agent_hub::supervisor::run(agent_hub::supervisor::Config {
             addresses: addresses.to_vec(),
             db,
-            application: cross_agent_message::supervisor::HubApplication {
+            application: agent_hub::supervisor::HubApplication {
                 away_after,
                 forget_after,
                 reconnect_grace,
@@ -505,7 +503,7 @@ async fn serve_at(
     let stopped = hub.stopped();
     let app = hub::router(hub.clone(), dashboard);
     let mut served = tokio::task::JoinSet::new();
-    let local_ips = Arc::new(cross_agent_message::addresses::local_ips());
+    let local_ips = Arc::new(agent_hub::addresses::local_ips());
     for listener in listeners {
         let app = app.clone();
         let peer_hub = hub.clone();
@@ -519,7 +517,7 @@ async fn serve_at(
                 let local_ips = local_ips.clone();
                 let address = address.clone();
                 async move {
-                    if cross_agent_message::addresses::is_remote(peer.ip(), &local_ips) {
+                    if agent_hub::addresses::is_remote(peer.ip(), &local_ips) {
                         peer_hub.note_remote(&address);
                     }
                     next.run(request).await
@@ -537,7 +535,7 @@ async fn serve_at(
             .await
         });
     }
-    let config = cross_agent_message::supervisor::Config {
+    let config = agent_hub::supervisor::Config {
         addresses: addresses.to_vec(),
         requested_addresses: addresses.to_vec(),
         required_ready: Vec::new(),
@@ -545,14 +543,14 @@ async fn serve_at(
         handoff_startup: false,
         worker_path: Some(std::fs::canonicalize(std::env::current_exe()?)?),
         db,
-        application: cross_agent_message::supervisor::HubApplication {
+        application: agent_hub::supervisor::HubApplication {
             away_after,
             forget_after,
             reconnect_grace,
         },
         activate_current: false,
     };
-    let observed = cross_agent_message::addresses::initial(&config, &hub).await?;
+    let observed = agent_hub::addresses::initial(&config, &hub).await?;
     let local = addresses[0].to_string();
     if !observed
         .iter()
@@ -562,7 +560,7 @@ async fn serve_at(
     }
     let (address_shutdown, address_stopped) = tokio::sync::watch::channel(false);
     served.spawn(async move {
-        cross_agent_message::addresses::monitor(config, hub, address_stopped)
+        agent_hub::addresses::monitor(config, hub, address_stopped)
             .await
             .map_err(std::io::Error::other)
     });
@@ -1204,7 +1202,14 @@ fn ago(now: u64, then: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ago, until};
+    use super::{Cli, ago, default_db, until};
+    use clap::CommandFactory;
+
+    #[test]
+    fn command_uses_agent_hub_database() {
+        assert_eq!(Cli::command().get_name(), "agent-hub");
+        assert!(default_db().ends_with(".agent-hub/hub.db"));
+    }
 
     #[test]
     fn until_rounds_up_to_minutes() {

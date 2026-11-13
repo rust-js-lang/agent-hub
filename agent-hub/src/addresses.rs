@@ -120,7 +120,7 @@ pub fn probe_for(config: &Config, build: &str, timeout: Duration) -> Vec<ListenA
                         let executable = config
                             .worker_path
                             .as_deref()
-                            .unwrap_or_else(|| std::path::Path::new("cross-agent-message"));
+                            .unwrap_or_else(|| std::path::Path::new("agent-hub"));
                         probe_one(address, build, executable, timeout)
                     }),
                 )

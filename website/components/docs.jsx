@@ -103,7 +103,7 @@ export function Docs({ slug }) {
         {value$2}
         <div className={styles.docFeedback}>
           <span>Something unclear?</span>
-          <a href="https://github.com/rust-js-lang/cross-agent-message/issues">
+          <a href="https://github.com/rust-js-lang/agent-hub/issues">
             Start a conversation on GitHub ↗
           </a>
         </div>
@@ -160,10 +160,7 @@ export function Docs({ slug }) {
             {value}
             {children}
           </nav>
-          <a
-            className={styles.sidebarSource}
-            href="https://github.com/rust-js-lang/cross-agent-message"
-          >
+          <a className={styles.sidebarSource} href="https://github.com/rust-js-lang/agent-hub">
             View source on GitHub ↗
           </a>
         </div>

@@ -4,7 +4,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-pub const TARGET: &str = env!("CROSS_AGENT_TARGET");
+pub const TARGET: &str = env!("AGENT_HUB_TARGET");
 
 pub struct Binary {
     pub bytes: Vec<u8>,
@@ -81,10 +81,7 @@ pub fn install(bytes: &[u8], expected_sha256: &str, destination: &Path) -> Resul
     let parent = destination
         .parent()
         .context("executable has no parent directory")?;
-    let temp = parent.join(format!(
-        ".cross-agent-message-{}.download",
-        std::process::id()
-    ));
+    let temp = parent.join(format!(".agent-hub-{}.download", std::process::id()));
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -133,7 +130,7 @@ pub fn upgrade_self(client: &crate::client::Client, from_hub: bool) -> Result<()
 fn github_binary() -> Result<(Vec<u8>, String)> {
     if TARGET != "aarch64-apple-darwin" {
         bail!(
-            "no binary release for {TARGET}; build from source: git clone --recurse-submodules https://github.com/rust-js-lang/cross-agent-message.git; cargo install --path cross-agent-message/cross-agent-message"
+            "no binary release for {TARGET}; build from source: git clone --recurse-submodules https://github.com/rust-js-lang/agent-hub.git; cargo install --path agent-hub/agent-hub"
         );
     }
     #[derive(Deserialize)]
@@ -147,8 +144,8 @@ fn github_binary() -> Result<(Vec<u8>, String)> {
     }
     let http = ureq::Agent::new_with_defaults();
     let release: Release = http
-        .get("https://api.github.com/repos/rust-js-lang/cross-agent-message/releases/latest")
-        .header("user-agent", "cross-agent-message")
+        .get("https://api.github.com/repos/rust-js-lang/agent-hub/releases/latest")
+        .header("user-agent", "agent-hub")
         .call()?
         .body_mut()
         .read_json()?;
@@ -205,7 +202,7 @@ fn github_binary() -> Result<(Vec<u8>, String)> {
             .find(|name| {
                 Path::new(name)
                     .file_name()
-                    .is_some_and(|n| n == "cross-agent-message")
+                    .is_some_and(|n| n == "agent-hub")
             })
             .context("release has no executable")?;
         let extracted = std::process::Command::new("tar")
@@ -255,7 +252,7 @@ pub fn warn_if_behind(
     }
     std::fs::write(stamp, value)?;
     eprintln!(
-        "The hub is {}, this command line {}: cross-agent-message upgrade-self.",
+        "The hub is {}, this command line {}: agent-hub upgrade-self.",
         info.version,
         env!("CARGO_PKG_VERSION")
     );
@@ -263,13 +260,9 @@ pub fn warn_if_behind(
 }
 
 pub fn client_state_dir() -> PathBuf {
-    std::env::var_os("CROSS_AGENT_STATE_DIR")
+    std::env::var_os("AGENT_HUB_STATE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::home_dir()
-                .unwrap_or_default()
-                .join(".cross-agent-message")
-        })
+        .unwrap_or_else(|| std::env::home_dir().unwrap_or_default().join(".agent-hub"))
 }
 
 #[cfg(test)]

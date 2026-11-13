@@ -91,8 +91,8 @@ export async function load() {
   return { TAG: "Ok", _0: [agents, channels, messages] };
 }
 
-const NAME = "cross-agent-message.name";
-const KEY = "cross-agent-message.key";
+const NAME = "agent-hub.name";
+const KEY = "agent-hub.key";
 
 /**
  * Who signed in on this device before, if anyone: kept in the browser,
@@ -256,7 +256,7 @@ export async function hub() {
   );
 }
 
-const DRAFT = "cross-agent-message.draft";
+const DRAFT = "agent-hub.draft";
 export function draft() {
   const result = $try(() => window.localStorage);
   const option = result.TAG === "Ok" ? result._0 : undefined;

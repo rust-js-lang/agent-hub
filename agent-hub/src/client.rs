@@ -48,7 +48,7 @@ impl Client {
 
     fn unreachable(&self) -> String {
         format!(
-            "can't reach the hub at {}: start it with `cross-agent-message serve`",
+            "can't reach the hub at {}: start it with `agent-hub serve`",
             self.hub
         )
     }
@@ -95,7 +95,7 @@ impl Client {
     }
 
     /// ```compile_fail
-    /// use cross_agent_message::client::Client;
+    /// use agent_hub::client::Client;
     /// use protocol::endpoints::SEND;
     /// Client::new("http://localhost").get(&SEND, &());
     /// ```
@@ -115,14 +115,14 @@ impl Client {
     }
 
     /// ```compile_fail
-    /// use cross_agent_message::client::Client;
+    /// use agent_hub::client::Client;
     /// use protocol::{Register, endpoints::SEND};
     /// Client::new("http://localhost").post(&SEND, &Register {
     ///     name: "a".into(), machine: "m".into(), reconnect: false,
     /// });
     /// ```
     /// ```compile_fail
-    /// use cross_agent_message::client::Client;
+    /// use agent_hub::client::Client;
     /// use protocol::{Agent, Send, endpoints::SEND};
     /// let _: anyhow::Result<Agent> = Client::new("http://localhost").post(&SEND, &Send {
     ///     from: "a".into(), to: "b".into(), body: "hi".into(), key: None,
@@ -380,7 +380,7 @@ impl Client {
         let info = self.info()?;
         if info.protocol != protocol::PROTOCOL {
             bail!(
-                "The hub at {} is {} (protocol {}); this command line needs protocol {}. Upgrade the hub on its machine: cross-agent-message upgrade <release>.",
+                "The hub at {} is {} (protocol {}); this command line needs protocol {}. Upgrade the hub on its machine: agent-hub upgrade <release>.",
                 self.hub,
                 info.version,
                 info.protocol,

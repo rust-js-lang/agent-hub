@@ -48,7 +48,7 @@ test("landing page loads its assets under the configured deployment path", async
       failed.push(response.url());
   });
   await page.goto("./");
-  await expect(page).toHaveTitle(/cross-agent-message/);
+  await expect(page).toHaveTitle(/agent-hub/);
   await expect(page.getByRole("heading", { level: 1 })).toHaveText(
     "Good agents.Better together.",
   );
@@ -116,7 +116,7 @@ test("get started, guide navigation, back and home work", async ({ page }) => {
     "From clone to conversation.",
   );
   await page
-    .getByRole("link", { name: "cross-agent-message home", exact: true })
+    .getByRole("link", { name: "agent-hub home", exact: true })
     .click();
   await expect(page.getByRole("heading", { level: 1 })).toContainText(
     "Good agents.",
@@ -207,7 +207,7 @@ test("adjacent guide links and source link point to real destinations", async ({
       .getByRole("link", { name: "GitHub" }),
   ).toHaveAttribute(
     "href",
-    "https://github.com/rust-js-lang/cross-agent-message",
+    "https://github.com/rust-js-lang/agent-hub",
   );
 });
 
@@ -260,7 +260,7 @@ test("responsive layouts keep diagram cards separate and docs content near the t
             r.top >= frame.top &&
             r.bottom <= frame.bottom,
         ),
-        brandHeight: rect('[aria-label="cross-agent-message home"] > span:last-child').height,
+        brandHeight: rect('[aria-label="agent-hub home"] > span:last-child').height,
         overflow: document.documentElement.scrollWidth > innerWidth,
       };
     });

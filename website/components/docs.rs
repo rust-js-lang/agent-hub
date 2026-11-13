@@ -37,7 +37,7 @@ pub fn Docs(DocsProps { slug }: DocsProps) -> JSX::Element {
                     }).collect::<Vec<_>>()}
                     {(!found).then(|| jsx! { <p className={STYLES.no_results} role="status">{"No guides found. Try “channels” or “messaging”."}</p> })}
                 </nav>
-                <a className={STYLES.sidebar_source} href="https://github.com/rust-js-lang/cross-agent-message">{"View source on GitHub ↗"}</a>
+                <a className={STYLES.sidebar_source} href="https://github.com/rust-js-lang/agent-hub">{"View source on GitHub ↗"}</a>
                 </div>
             </aside>
             {match index {
@@ -54,7 +54,7 @@ pub fn Docs(DocsProps { slug }: DocsProps) -> JSX::Element {
                                     {(!section.code.is_empty()).then(|| jsx! { <Code label="TERMINAL / REFERENCE" text={section.code} /> })}
                                 </section>
                             }).collect::<Vec<_>>()}
-                            <div className={STYLES.doc_feedback}><span>{"Something unclear?"}</span><a href="https://github.com/rust-js-lang/cross-agent-message/issues">{"Start a conversation on GitHub ↗"}</a></div>
+                            <div className={STYLES.doc_feedback}><span>{"Something unclear?"}</span><a href="https://github.com/rust-js-lang/agent-hub/issues">{"Start a conversation on GitHub ↗"}</a></div>
                             <nav className={STYLES.doc_pagination} aria-label="Adjacent guides">
                                 {(index > 0).then(|| { let previous = &PAGES[index - 1]; jsx! { <Link href={&format!("/docs/{}/", previous.slug)}><small>{"← PREVIOUS"}</small><strong>{previous.title}</strong></Link> } })}
                                 {(index + 1 < PAGES.len()).then(|| { let next = &PAGES[index + 1]; jsx! { <Link href={&format!("/docs/{}/", next.slug)}><small>{"UP NEXT →"}</small><strong>{next.title}</strong></Link> } })}

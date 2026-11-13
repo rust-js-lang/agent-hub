@@ -13,7 +13,7 @@ import subprocess
 import sys
 import uuid
 
-IDENTIFIER = "io.rust-js.cross-agent-message"
+IDENTIFIER = "io.rust-js.agent-hub"
 
 
 def signature(path):

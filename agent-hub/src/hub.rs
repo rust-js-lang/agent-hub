@@ -47,7 +47,7 @@ pub struct Hub {
 }
 
 /// The commit this build is of, as `build.rs` found it.
-pub const BUILD: &str = env!("CROSS_AGENT_BUILD");
+pub const BUILD: &str = env!("AGENT_HUB_BUILD");
 
 pub use crate::holds::{held, release_hold, take_hold};
 
@@ -242,7 +242,7 @@ impl Hub {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone(),
             protocol: protocol::PROTOCOL,
-            target: env!("CROSS_AGENT_TARGET").to_string(),
+            target: env!("AGENT_HUB_TARGET").to_string(),
             binary_sha256: crate::updates::binary()
                 .ok()
                 .map(|binary| binary.sha256.clone()),
@@ -354,7 +354,7 @@ impl Hub {
             }
             None => Err(Refused(
                 StatusCode::NOT_FOUND,
-                format!("no agent is named {name}: `cross-agent-message agents` lists them"),
+                format!("no agent is named {name}: `agent-hub agents` lists them"),
             )),
         }
     }
@@ -486,7 +486,7 @@ async fn protocol_header(
         fingerprint.extend_from_slice(&bytes);
         let hash = crate::updates::sha256(&fingerprint);
         if let Ok(value) = axum::http::HeaderValue::from_str(&hash) {
-            parts.headers.insert("cross-agent-fingerprint", value);
+            parts.headers.insert("agent-hub-fingerprint", value);
         }
         request = axum::extract::Request::from_parts(parts, axum::body::Body::from(bytes));
     }
@@ -518,7 +518,7 @@ fn receipt(
         .to_str()
         .map_err(|_| bad_request("invalid nonce header".into()))?;
     let fingerprint = headers
-        .get("cross-agent-fingerprint")
+        .get("agent-hub-fingerprint")
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| {
             bad_request("keyed writes require a server-computed wire fingerprint".into())
@@ -614,8 +614,7 @@ fn check_key(hub: &Hub, key: &str) -> Result<(), Refused> {
     }
     Err(Refused(
         StatusCode::FORBIDDEN,
-        "that isn't this hub's key: `cross-agent-message key`, on the hub's machine, prints it"
-            .to_string(),
+        "that isn't this hub's key: `agent-hub key`, on the hub's machine, prints it".to_string(),
     ))
 }
 
@@ -806,7 +805,7 @@ async fn broadcast(
             .collect();
         if recipients.is_empty() {
             return Err(bad_request(format!(
-                "no other agent is in #{channel}: `cross-agent-message join {channel}` puts one in"
+                "no other agent is in #{channel}: `agent-hub join {channel}` puts one in"
             )));
         }
         let at = now();
@@ -978,7 +977,7 @@ async fn stop(State(hub): State<Arc<Hub>>) -> Result<Json<HubInfo>, Refused> {
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(200));
         if supervised {
-            if let Some(path) = std::env::var_os("CROSS_AGENT_CONTROL_SOCK") {
+            if let Some(path) = std::env::var_os("AGENT_HUB_CONTROL_SOCK") {
                 use std::io::Write;
                 if let Ok(mut control) = std::os::unix::net::UnixStream::connect(path) {
                     let _ = control.write_all(b"{\"stop\":true}\n");
@@ -1206,7 +1205,7 @@ mod tests {
             .uri(api::SEND.route.path)
             .header("content-type", "application/json")
             .header(protocol::WRITE_NONCE_HEADER, nonce)
-            .header("cross-agent-fingerprint", "untrusted-client-value")
+            .header("agent-hub-fingerprint", "untrusted-client-value")
             .body(axum::body::Body::from(body.to_string()))
             .unwrap();
         let response = app.oneshot(request).await.unwrap();

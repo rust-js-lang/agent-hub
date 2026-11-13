@@ -24,7 +24,7 @@ import { Post, Stream, __Query } from "../../typed-endpoint/src/lib.js";
 export const Error$ = {
   message(error) {
     if (error === "Transport") {
-      return "The hub can't be reached: is `cross-agent-message serve` running?";
+      return "The hub can't be reached: is `agent-hub serve` running?";
     }
     if (error.TAG === "Encode") {
       return `This page can't write what it sends: ${error._0}`;

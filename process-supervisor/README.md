@@ -1,6 +1,6 @@
 # process-supervisor
 
-A reusable Unix process supervisor, extracted from cross-agent-message. Link it
+A reusable Unix process supervisor, extracted from agent-hub. Link it
 into a service's own executable. It does not require a separate daemon, SQLite,
 Axum, the hub protocol, or the dashboard. The supported deployment target is
 currently macOS Apple Silicon; this extraction does not establish support for
@@ -107,5 +107,5 @@ target/release/examples/echo stop /tmp/supervisor-echo-demo/state
 The example demonstrates wiring and handoff, not a remote firewall acceptance
 claim. An application adopting this library needs its own state-ownership,
 compatibility, rollback and deployment acceptance tests. The hub retains its
-real-process tests in `cross-agent-message/tests`; protocol, timing, filesystem
+real-process tests in `agent-hub/tests`; protocol, timing, filesystem
 safety and late-drain tests live with this library.

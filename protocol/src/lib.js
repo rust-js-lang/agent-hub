@@ -16,9 +16,9 @@ import { $byteLen, $debugStr, $json } from "@rust-js/std";
  * the agent is seen now, and the hub answers with its [`Agent`].
  */
 export const PROTOCOL = 1;
-export const PROTOCOL_HEADER = "cross-agent-protocol";
+export const PROTOCOL_HEADER = "agent-hub-protocol";
 export const EVENT_TYPES = "sent,read,agent,retired,restarting";
-export const WRITE_NONCE_HEADER = "cross-agent-nonce";
+export const WRITE_NONCE_HEADER = "agent-hub-nonce";
 export const ACK = "/api/ack";
 export const BINARY = "/api/binary";
 
@@ -211,7 +211,7 @@ export function joinDeserialize_deserialize(json) {
 
 /**
  * The person signs in from the dashboard: the name they'll write as, and
- * the hub's key, which `cross-agent-message key` prints on its machine.
+ * the hub's key, which `agent-hub key` prints on its machine.
  */
 export function signInSerialize_serialize(signIn, json) {
   json.beginObject();

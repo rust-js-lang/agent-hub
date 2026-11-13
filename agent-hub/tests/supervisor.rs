@@ -1,5 +1,5 @@
 //! Real-process upgrade invariants. Each test owns its listeners and database.
-use cross_agent_message::client::Client;
+use agent_hub::client::Client;
 use std::io::{BufRead, Write};
 use std::net::TcpListener;
 use std::os::unix::{fs::PermissionsExt, process::CommandExt};
@@ -60,8 +60,8 @@ impl Running {
         let probe = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
-        let source = PathBuf::from(env!("CARGO_BIN_EXE_cross-agent-message"));
-        let binary = root.join("cross-agent-message");
+        let source = PathBuf::from(env!("CARGO_BIN_EXE_agent-hub"));
+        let binary = root.join("agent-hub");
         std::fs::copy(&source, &binary).unwrap();
         let log = std::fs::File::create(root.join("log")).unwrap();
         let process = Command::new(&binary)
@@ -69,7 +69,7 @@ impl Running {
             .arg(&db)
             .args(["--port", &port.to_string()])
             .args(extra.iter().flat_map(|address| ["--listen", *address]))
-            .env("CROSS_AGENT_STATE_DIR", &root)
+            .env("AGENT_HUB_STATE_DIR", &root)
             .stdout(log.try_clone().unwrap())
             .stderr(log)
             .process_group(0)
@@ -102,14 +102,14 @@ impl Running {
             .arg(binary)
             .arg("--db")
             .arg(&self.db)
-            .env("CROSS_AGENT_STATE_DIR", &self.root)
+            .env("AGENT_HUB_STATE_DIR", &self.root)
             .output()
             .unwrap()
     }
     fn candidate(&self, action: &str) -> PathBuf {
         let path = self.root.join(format!(
             "candidate-{}",
-            &cross_agent_message::updates::sha256(action.as_bytes())[..12]
+            &agent_hub::updates::sha256(action.as_bytes())[..12]
         ));
         // Only fixed fixture actions enter this trusted test script.
         let text = format!(
@@ -144,7 +144,7 @@ impl Running {
             .args(["serve", "--db"])
             .arg(&self.db)
             .args(["--port", port])
-            .env("CROSS_AGENT_STATE_DIR", &self.root)
+            .env("AGENT_HUB_STATE_DIR", &self.root)
             .stdout(log.try_clone().unwrap())
             .stderr(log)
             .process_group(0)
@@ -486,14 +486,14 @@ fn watch_reconnects_and_already_away_agents_stay_away_across_the_swap() {
     let db = rusqlite::Connection::open(running.root.join("hub.db")).unwrap();
     db.execute(
         "UPDATE agents SET last_seen=?1 WHERE name='away'",
-        [cross_agent_message::hub::now() - 7_200_000],
+        [agent_hub::hub::now() - 7_200_000],
     )
     .unwrap();
     drop(db);
     let mut watcher = Watcher(
         Command::new(&running.binary)
             .args(["--hub", &running.url, "watch", "--as", "reader"])
-            .env("CROSS_AGENT_STATE_DIR", &running.root)
+            .env("AGENT_HUB_STATE_DIR", &running.root)
             .stdout(Stdio::piped())
             .spawn()
             .unwrap(),
@@ -743,10 +743,10 @@ fn stop_during_retirement_releases_all_listeners_before_reply_and_refuses_queued
     use std::os::unix::net::UnixStream;
     let running = Running::new();
     assert!(running.upgrade(&running.binary).status.success());
-    let config = cross_agent_message::supervisor::load_config(&running.db).unwrap();
-    let swap = cross_agent_message::supervisor::Swap {
+    let config = agent_hub::supervisor::load_config(&running.db).unwrap();
+    let swap = agent_hub::supervisor::Swap {
         binary: running.binary.clone(),
-        sha256: cross_agent_message::updates::sha256(&std::fs::read(&running.binary).unwrap()),
+        sha256: agent_hub::updates::sha256(&std::fs::read(&running.binary).unwrap()),
     };
     let request = format!("{}\n", serde_json::to_string(&swap).unwrap());
     let mut queued = UnixStream::connect(config.control()).unwrap();
@@ -762,15 +762,15 @@ fn stop_during_retirement_releases_all_listeners_before_reply_and_refuses_queued
         },
         2,
     );
-    cross_agent_message::supervisor::stop(&running.db).unwrap();
+    agent_hub::supervisor::stop(&running.db).unwrap();
     // Do not wait for the supervisor to exit: the acknowledgement is the barrier.
     let address = running.url.trim_start_matches("http://").parse().unwrap();
-    let _listener = cross_agent_message::supervisor::bind_listener(address).unwrap();
+    let _listener = agent_hub::supervisor::bind_listener(address).unwrap();
     let mut reply = String::new();
     std::io::BufReader::new(queued)
         .read_line(&mut reply)
         .unwrap();
-    let reply: cross_agent_message::supervisor::Swapped = serde_json::from_str(&reply).unwrap();
+    let reply: agent_hub::supervisor::Swapped = serde_json::from_str(&reply).unwrap();
     assert!(reply.rolled_back);
     assert!(
         reply
@@ -786,8 +786,7 @@ fn legacy_stop_shuts_down_the_supervisor_and_releases_the_listener() {
     running.client().stop().unwrap();
     wait(|| running.process.try_wait().unwrap().is_some(), 6);
     let address = running.url.trim_start_matches("http://");
-    let listener =
-        cross_agent_message::supervisor::bind_listener(address.parse().unwrap()).unwrap();
+    let listener = agent_hub::supervisor::bind_listener(address.parse().unwrap()).unwrap();
     drop(listener);
 }
 
@@ -832,7 +831,7 @@ def stop(signum, frame):
     global stopping
     stopping = True
 signal.signal(signal.SIGTERM, stop)
-ready_fd = int(os.environ['CROSS_AGENT_READY_FD'])
+ready_fd = int(os.environ['AGENT_HUB_READY_FD'])
 child = subprocess.Popen([source] + args, pass_fds=tuple(range(3, ready_fd + 1)))
 while child.poll() is None:
     if stopping:
@@ -1027,7 +1026,7 @@ fn successful_and_failed_swaps_keep_the_accepting_executable_at_the_installed_pa
             .success()
     );
     running.assert_worker_path();
-    let config = cross_agent_message::supervisor::load_config(&running.db).unwrap();
+    let config = agent_hub::supervisor::load_config(&running.db).unwrap();
     assert_eq!(config.worker_path.as_ref(), Some(&running.binary));
 }
 
@@ -1060,7 +1059,7 @@ fn long_database_paths_and_removed_socket_directories_remain_upgradeable() {
     client.register("a").unwrap();
     client.register("b").unwrap();
     let message = client.send("a", "b", "survives runtime cleanup").unwrap();
-    let config = cross_agent_message::supervisor::load_config(&running.db).unwrap();
+    let config = agent_hub::supervisor::load_config(&running.db).unwrap();
     assert!(running.db.as_os_str().len() > 104);
     std::fs::remove_dir_all(config.control().parent().unwrap()).unwrap();
     wait(
@@ -1095,7 +1094,7 @@ fn an_external_installation_change_requires_preflight_before_worker_recovery() {
     .unwrap();
     std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755)).unwrap();
     let pid = running.worker_pid();
-    cross_agent_message::installation::activate(&candidate, &running.binary).unwrap();
+    agent_hub::installation::activate(&candidate, &running.binary).unwrap();
     unsafe {
         assert_eq!(libc::kill(pid, libc::SIGKILL), 0);
     }
@@ -1112,8 +1111,7 @@ fn an_external_replacement_that_fails_readiness_restores_the_previous_image() {
     let running = Running::new();
     let old_image = std::fs::read(&running.binary).unwrap();
     let pid = running.worker_pid();
-    cross_agent_message::installation::activate(&running.candidate("exit 17"), &running.binary)
-        .unwrap();
+    agent_hub::installation::activate(&running.candidate("exit 17"), &running.binary).unwrap();
     unsafe {
         assert_eq!(libc::kill(pid, libc::SIGKILL), 0);
     }
@@ -1391,7 +1389,7 @@ fn a_read_only_installation_fails_preflight_without_draining_the_worker() {
 fn a_control_ping_answers_without_restarting_the_worker() {
     use std::os::unix::net::UnixStream;
     let mut running = Running::new();
-    let config = cross_agent_message::supervisor::load_config(&running.db).unwrap();
+    let config = agent_hub::supervisor::load_config(&running.db).unwrap();
     let original = running.worker_pid();
     let mut socket = UnixStream::connect(config.control()).unwrap();
     socket
@@ -1424,7 +1422,7 @@ fn a_control_client_that_drops_half_a_frame_cannot_stop_the_supervisor() {
 fn abandoned_control_client(partial: bool) {
     use std::os::unix::net::UnixStream;
     let mut running = Running::new();
-    let config = cross_agent_message::supervisor::load_config(&running.db).unwrap();
+    let config = agent_hub::supervisor::load_config(&running.db).unwrap();
     let original = running.worker_pid();
     for _ in 0..8 {
         let mut socket = UnixStream::connect(config.control()).unwrap();
@@ -1443,9 +1441,9 @@ fn abandoned_control_client(partial: bool) {
     }
     // A complete subsequent frame must get its normal refusal, without
     // changing workers or ever attempting a handoff.
-    let reply = cross_agent_message::supervisor::request(
+    let reply = agent_hub::supervisor::request(
         &config,
-        &cross_agent_message::supervisor::Swap {
+        &agent_hub::supervisor::Swap {
             binary: running.binary.clone(),
             sha256: "0".repeat(64),
         },
@@ -1461,10 +1459,10 @@ fn abandoned_control_client(partial: bool) {
 fn a_fragmented_control_request_waits_for_its_terminating_newline() {
     use std::os::unix::net::UnixStream;
     let running = Running::new();
-    let config = cross_agent_message::supervisor::load_config(&running.db).unwrap();
-    let swap = cross_agent_message::supervisor::Swap {
+    let config = agent_hub::supervisor::load_config(&running.db).unwrap();
+    let swap = agent_hub::supervisor::Swap {
         binary: running.binary.clone(),
-        sha256: cross_agent_message::updates::sha256(&std::fs::read(&running.binary).unwrap()),
+        sha256: agent_hub::updates::sha256(&std::fs::read(&running.binary).unwrap()),
     };
     let request = serde_json::to_vec(&swap).unwrap();
     let mut socket = UnixStream::connect(config.control()).unwrap();
@@ -1483,7 +1481,7 @@ fn a_fragmented_control_request_waits_for_its_terminating_newline() {
         newline.is_ok(),
         "control peer closed before frame completion: {newline:?}; {reply}"
     );
-    let reply: cross_agent_message::supervisor::Swapped = serde_json::from_str(&reply).unwrap();
+    let reply: agent_hub::supervisor::Swapped = serde_json::from_str(&reply).unwrap();
     assert!(!reply.rolled_back && !reply.deferred, "{:?}", reply.reason);
     running.client().info().unwrap();
 }
