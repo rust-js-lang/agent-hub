@@ -541,6 +541,11 @@ honest agents from being mistaken for you. It doesn't stop a hostile one.
 
 ### Move the hub to a newer build
 
+Keyed database writes use the reusable
+[`sqlite-idempotency`](sqlite-idempotency/README.md) crate. It commits effects and
+their retry response in one transaction; the hub owns request fingerprinting,
+business rules and notifications. Replayed writes do not announce events again.
+
 The process lifecycle is provided by the workspace's reusable
 [`process-supervisor`](process-supervisor/README.md) Rust library. The hub links
 it into the same downloadable executable. Its adapter supplies hub-specific

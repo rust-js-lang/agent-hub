@@ -20,11 +20,11 @@ jobs:
           persist-credentials: false
       - name: Build and test current protocol
         # Handoff deadlines apply to the optimized executable we distribute.
-        run: cargo test --release --locked -p process-supervisor -p cross-agent-message -p protocol
+        run: cargo test --release --locked -p sqlite-idempotency -p process-supervisor -p cross-agent-message -p protocol
       - name: Check supervisor and application boundary
         run: |
           rustup component add clippy
-          cargo clippy --release --locked -p process-supervisor -p cross-agent-message --all-targets -- -D warnings
+          cargo clippy --release --locked -p sqlite-idempotency -p process-supervisor -p cross-agent-message --all-targets -- -D warnings
       - name: Exercise supervisor with an independent TCP application
         run: |
           cargo build --release --locked -p process-supervisor --example echo
@@ -66,4 +66,6 @@ jobs:
           ln -s "$PWD/rust-js" target/compat-source/rust-js
           cargo build --release --locked --manifest-path target/compat-source/Cargo.toml -p cross-agent-message --target-dir target/compat-build
       - name: Test both directions against real processes
-        run: python3 scripts/check-compatibility.py --current target/release/cross-agent-message --previous target/compat-build/release/cross-agent-message
+        run: |
+          python3 scripts/check-compatibility.py --current target/release/cross-agent-message --previous target/compat-build/release/cross-agent-message
+          python3 scripts/check-idempotency-compatibility.py --current target/release/cross-agent-message --previous target/compat-build/release/cross-agent-message

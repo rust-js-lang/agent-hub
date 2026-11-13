@@ -10,6 +10,7 @@ use protocol::{
     Register, Retired, Send,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
+pub use sqlite_idempotency::{Outcome, Receipt};
 
 pub struct Store {
     db: Connection,
@@ -38,10 +39,6 @@ const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS settings (
         name TEXT PRIMARY KEY,
         value TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS receipts (
-        actor TEXT NOT NULL, nonce TEXT NOT NULL, fingerprint TEXT NOT NULL, response TEXT NOT NULL,
-        PRIMARY KEY (actor, nonce)
     );
     CREATE TABLE IF NOT EXISTS holds (
         name TEXT PRIMARY KEY,
@@ -98,7 +95,11 @@ impl Store {
         &self,
         receipt: Option<&Receipt>,
     ) -> rusqlite::Result<Option<T>> {
-        replay(&self.db, receipt)
+        receipt
+            .map(|receipt| sqlite_idempotency::lookup(&self.db, receipt))
+            .transpose()
+            .map(Option::flatten)
+            .map_err(receipt_error)
     }
     /// The store in the file at `path`, made with its tables if it's new.
     pub fn open(path: &Path) -> rusqlite::Result<Store> {
@@ -113,6 +114,7 @@ impl Store {
     fn with(mut db: Connection) -> rusqlite::Result<Store> {
         let tx = db.transaction()?;
         tx.execute_batch(SCHEMA)?;
+        sqlite_idempotency::initialize(&tx).map_err(receipt_error)?;
         for (table, column, kind) in ADDED {
             let has: bool = tx.query_row(
                 "SELECT count(*) > 0 FROM pragma_table_info(?1) WHERE name = ?2",
@@ -198,15 +200,13 @@ impl Store {
         now: u64,
         person: bool,
         receipt: Option<&Receipt>,
-    ) -> rusqlite::Result<Message> {
-        let tx = self.db.transaction()?;
-        if let Some(answer) = replay(&tx, receipt)? {
-            return Ok(answer);
-        }
-        let message = insert_message(&tx, send, &send.to, None, now, person, false, person)?;
-        remember(&tx, receipt, &message)?;
-        tx.commit()?;
-        Ok(message)
+    ) -> rusqlite::Result<Outcome<Message>> {
+        sqlite_idempotency::execute(&mut self.db, receipt, |tx| {
+            Ok(insert_message(
+                tx, send, &send.to, None, now, person, false, person,
+            )?)
+        })
+        .map_err(receipt_error)
     }
 
     /// The agents in `channel`, by name: every agent of `everyone`, those
@@ -288,6 +288,7 @@ impl Store {
         person: bool,
     ) -> rusqlite::Result<Vec<Message>> {
         self.broadcast_receipted(send, channel, recipients, now, person, None)
+            .map(Outcome::into_inner)
     }
 
     pub fn broadcast_receipted(
@@ -298,27 +299,24 @@ impl Store {
         now: u64,
         person: bool,
         receipt: Option<&Receipt>,
-    ) -> rusqlite::Result<Vec<Message>> {
-        let transaction = self.db.transaction()?;
-        if let Some(answer) = replay(&transaction, receipt)? {
-            return Ok(answer);
-        }
-        let mut messages = Vec::new();
-        for (recipient, away) in recipients {
-            messages.push(insert_message(
-                &transaction,
-                send,
-                recipient,
-                Some(channel),
-                now,
-                person,
-                *away && !person,
-                person,
-            )?);
-        }
-        remember(&transaction, receipt, &messages)?;
-        transaction.commit()?;
-        Ok(messages)
+    ) -> rusqlite::Result<Outcome<Vec<Message>>> {
+        sqlite_idempotency::execute(&mut self.db, receipt, |transaction| {
+            let mut messages = Vec::new();
+            for (recipient, away) in recipients {
+                messages.push(insert_message(
+                    transaction,
+                    send,
+                    recipient,
+                    Some(channel),
+                    now,
+                    person,
+                    *away && !person,
+                    person,
+                )?);
+            }
+            Ok(messages)
+        })
+        .map_err(receipt_error)
     }
 
     fn deliver(
@@ -562,28 +560,26 @@ impl Store {
         now: u64,
     ) -> rusqlite::Result<protocol::Taken> {
         self.take_hold_receipted(take, now, None)
+            .map(Outcome::into_inner)
     }
     pub fn take_hold_receipted(
         &mut self,
         take: &protocol::Take,
         now: u64,
         receipt: Option<&Receipt>,
-    ) -> rusqlite::Result<protocol::Taken> {
-        let tx = self.db.transaction()?;
-        if let Some(answer) = replay(&tx, receipt)? {
-            return Ok(answer);
-        }
-        let mut holds = read_holds(&tx)?
-            .into_iter()
-            .map(|hold| (hold.name.clone(), hold))
-            .collect();
-        let taken = crate::holds::take_hold(&mut holds, take, now);
-        if taken.yours {
-            write_holds(&tx, holds.values())?;
-        }
-        remember(&tx, receipt, &taken)?;
-        tx.commit()?;
-        Ok(taken)
+    ) -> rusqlite::Result<Outcome<protocol::Taken>> {
+        sqlite_idempotency::execute(&mut self.db, receipt, |tx| {
+            let mut holds = read_holds(tx)?
+                .into_iter()
+                .map(|hold| (hold.name.clone(), hold))
+                .collect();
+            let taken = crate::holds::take_hold(&mut holds, take, now);
+            if taken.yours {
+                write_holds(tx, holds.values())?;
+            }
+            Ok(taken)
+        })
+        .map_err(receipt_error)
     }
 
     pub fn release_hold(
@@ -592,29 +588,31 @@ impl Store {
         now: u64,
     ) -> rusqlite::Result<Result<Vec<Hold>, String>> {
         self.release_hold_receipted(release, now, None)
+            .map(|result| result.map(Outcome::into_inner))
     }
     pub fn release_hold_receipted(
         &mut self,
         release: &protocol::Release,
         now: u64,
         receipt: Option<&Receipt>,
-    ) -> rusqlite::Result<Result<Vec<Hold>, String>> {
-        let tx = self.db.transaction()?;
-        if let Some(answer) = replay(&tx, receipt)? {
-            return Ok(Ok(answer));
+    ) -> rusqlite::Result<Result<Outcome<Vec<Hold>>, String>> {
+        let result =
+            sqlite_idempotency::execute(&mut self.db, receipt, |tx| -> Result<_, ReleaseError> {
+                let mut holds = read_holds(tx)?
+                    .into_iter()
+                    .map(|hold| (hold.name.clone(), hold))
+                    .collect();
+                crate::holds::release_hold(&mut holds, release, now)
+                    .map_err(ReleaseError::Refused)?;
+                let held = crate::holds::held(&mut holds, now);
+                write_holds(tx, holds.values())?;
+                Ok(held)
+            });
+        match result {
+            Ok(held) => Ok(Ok(held)),
+            Err(ReleaseError::Refused(reason)) => Ok(Err(reason)),
+            Err(ReleaseError::Store(error)) => Err(error),
         }
-        let mut holds = read_holds(&tx)?
-            .into_iter()
-            .map(|hold| (hold.name.clone(), hold))
-            .collect();
-        if let Err(reason) = crate::holds::release_hold(&mut holds, release, now) {
-            return Ok(Err(reason));
-        }
-        let held = crate::holds::held(&mut holds, now);
-        write_holds(&tx, holds.values())?;
-        remember(&tx, receipt, &held)?;
-        tx.commit()?;
-        Ok(Ok(held))
     }
 
     pub fn keep_holds<'a>(
@@ -723,75 +721,30 @@ impl Store {
     }
 }
 
-pub struct Receipt {
-    pub actor: String,
-    pub nonce: String,
-    pub fingerprint: String,
-}
-impl Receipt {
-    pub fn new(
-        actor: &str,
-        nonce: &str,
-        operation: &str,
-        body: &impl serde::Serialize,
-    ) -> rusqlite::Result<Self> {
-        if nonce.is_empty() || nonce.len() > 128 {
-            return Err(rusqlite::Error::InvalidParameterName(
-                "nonce must have 1 to 128 characters".to_string(),
-            ));
-        }
-        let bytes = serde_json::to_vec(&(operation, body)).map_err(json_error)?;
-        Ok(Self {
-            actor: actor.to_string(),
-            nonce: nonce.to_string(),
-            fingerprint: crate::updates::sha256(&bytes),
-        })
-    }
-}
 fn json_error(error: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
-fn replay<T: serde::de::DeserializeOwned>(
-    db: &Connection,
-    receipt: Option<&Receipt>,
-) -> rusqlite::Result<Option<T>> {
-    let Some(receipt) = receipt else {
-        return Ok(None);
-    };
-    let row: Option<(String, String)> = db
-        .query_row(
-            "SELECT fingerprint,response FROM receipts WHERE actor=?1 AND nonce=?2",
-            params![receipt.actor, receipt.nonce],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()?;
-    match row {
-        Some((fingerprint, response)) if fingerprint == receipt.fingerprint => {
-            Ok(Some(serde_json::from_str(&response).map_err(json_error)?))
-        }
-        Some(_) => Err(rusqlite::Error::InvalidParameterName(
-            "nonce was already used for another request".to_string(),
-        )),
-        None => Ok(None),
+
+/// Preserve the hub's existing HTTP/error contract at the storage adapter.
+pub(crate) fn receipt_error(error: sqlite_idempotency::Error) -> rusqlite::Error {
+    match error {
+        sqlite_idempotency::Error::Database(error) => error,
+        error => rusqlite::Error::ToSqlConversionFailure(Box::new(error)),
     }
 }
-fn remember(
-    db: &Connection,
-    receipt: Option<&Receipt>,
-    response: &impl serde::Serialize,
-) -> rusqlite::Result<()> {
-    if let Some(receipt) = receipt {
-        db.execute(
-            "INSERT INTO receipts (actor,nonce,fingerprint,response) VALUES (?1,?2,?3,?4)",
-            params![
-                receipt.actor,
-                receipt.nonce,
-                receipt.fingerprint,
-                serde_json::to_string(response).map_err(json_error)?
-            ],
-        )?;
+enum ReleaseError {
+    Store(rusqlite::Error),
+    Refused(String),
+}
+impl From<rusqlite::Error> for ReleaseError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Store(error)
     }
-    Ok(())
+}
+impl From<sqlite_idempotency::Error> for ReleaseError {
+    fn from(error: sqlite_idempotency::Error) -> Self {
+        Self::Store(receipt_error(error))
+    }
 }
 #[allow(clippy::too_many_arguments)]
 fn insert_message(
@@ -894,6 +847,16 @@ mod tests {
         store.send(&send, now, false).unwrap()
     }
 
+    fn test_receipt(
+        actor: &str,
+        nonce: &str,
+        operation: &str,
+        body: &impl serde::Serialize,
+    ) -> Result<Receipt, sqlite_idempotency::Error> {
+        let bytes =
+            serde_json::to_vec(&(operation, body)).map_err(sqlite_idempotency::Error::Encode)?;
+        Receipt::new(actor, nonce, &crate::updates::sha256(&bytes))
+    }
     #[test]
     fn the_persons_key_is_made_once_and_kept() {
         let store = Store::in_memory().unwrap();
@@ -1419,18 +1382,20 @@ mod tests {
             body: "once".to_string(),
             key: None,
         };
-        let receipt = Receipt::new("a", "unique", "send", &send).unwrap();
+        let receipt = test_receipt("a", "unique", "send", &send).unwrap();
         let first = store
             .send_receipted(&send, 2, false, Some(&receipt))
-            .unwrap();
+            .unwrap()
+            .into_inner();
         assert_eq!(
             store
                 .send_receipted(&send, 3, false, Some(&receipt))
-                .unwrap(),
+                .unwrap()
+                .into_inner(),
             first
         );
         assert_eq!(store.history(None, 10).unwrap().len(), 1);
-        let other = Receipt::new(
+        let other = test_receipt(
             "a",
             "unique",
             "send",
@@ -1442,7 +1407,7 @@ mod tests {
         .unwrap();
         assert!(store.send_receipted(&send, 4, false, Some(&other)).is_err());
         store.db.execute_batch("CREATE TRIGGER fail_receipt BEFORE INSERT ON receipts BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
-        let failure = Receipt::new("a", "different-nonce", "send", &send).unwrap();
+        let failure = test_receipt("a", "different-nonce", "send", &send).unwrap();
         assert!(
             store
                 .send_receipted(&send, 5, false, Some(&failure))
@@ -1459,13 +1424,75 @@ mod tests {
             holder: "a".to_string(),
             minutes: 30,
         };
-        let key = Receipt::new("a", "hold-nonce", "take", &take).unwrap();
-        let first = store.take_hold_receipted(&take, 10, Some(&key)).unwrap();
+        let key = test_receipt("a", "hold-nonce", "take", &take).unwrap();
+        let first = store
+            .take_hold_receipted(&take, 10, Some(&key))
+            .unwrap()
+            .into_inner();
         assert_eq!(
-            store.take_hold_receipted(&take, 20, Some(&key)).unwrap(),
+            store
+                .take_hold_receipted(&take, 20, Some(&key))
+                .unwrap()
+                .into_inner(),
             first,
             "a retried hold must not extend twice"
         );
+    }
+
+    #[test]
+    fn refused_release_does_not_consume_the_key_and_can_succeed_later() {
+        let mut store = Store::in_memory().unwrap();
+        store
+            .take_hold(
+                &protocol::Take {
+                    name: "check".into(),
+                    holder: "b".into(),
+                    minutes: 30,
+                },
+                1,
+            )
+            .unwrap();
+        let release = protocol::Release {
+            name: "check".into(),
+            holder: "a".into(),
+        };
+        let receipt = test_receipt("a", "release-once", "release", &release).unwrap();
+        assert!(
+            store
+                .release_hold_receipted(&release, 2, Some(&receipt))
+                .unwrap()
+                .is_err()
+        );
+        assert!(
+            store
+                .replay_receipt::<Vec<Hold>>(Some(&receipt))
+                .unwrap()
+                .is_none()
+        );
+        store
+            .release_hold(
+                &protocol::Release {
+                    name: "check".into(),
+                    holder: "b".into(),
+                },
+                3,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            store
+                .release_hold_receipted(&release, 4, Some(&receipt))
+                .unwrap()
+                .unwrap(),
+            Outcome::Fresh(_)
+        ));
+        assert!(matches!(
+            store
+                .release_hold_receipted(&release, 5, Some(&receipt))
+                .unwrap()
+                .unwrap(),
+            Outcome::Replayed(_)
+        ));
     }
 
     #[test]

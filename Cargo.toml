@@ -1,10 +1,11 @@
 # cross-agent-message: one workspace. `protocol` is what the hub, the command
 # line and the dashboard agree on. `cross-agent-message` is the hub and the
 # command line, native Rust. `process-supervisor` is the reusable upgrade engine.
+# `sqlite-idempotency` commits business effects and retry receipts atomically.
 # `dashboard` is the page, compiled to JavaScript
 # by rust-js. `website` is the independent documentation and landing site.
 [workspace]
-members = ["process-supervisor", "protocol", "cross-agent-message", "dashboard", "website"]
+members = ["sqlite-idempotency", "process-supervisor", "protocol", "cross-agent-message", "dashboard", "website"]
 # The pinned rust-js checkout, a submodule: its crates are path
 # dependencies of `dashboard`, not members of this workspace.
 exclude = ["rust-js"]

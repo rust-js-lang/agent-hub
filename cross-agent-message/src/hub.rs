@@ -84,12 +84,29 @@ impl IntoResponse for Refused {
     }
 }
 
+fn idempotency_refused(error: &sqlite_idempotency::Error) -> Refused {
+    let status = match error {
+        sqlite_idempotency::Error::InvalidNonce => StatusCode::BAD_REQUEST,
+        sqlite_idempotency::Error::Conflict => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    if status == StatusCode::INTERNAL_SERVER_ERROR {
+        eprintln!("hub idempotency operation failed: {error}");
+    }
+    Refused(status, error.to_string())
+}
+impl From<sqlite_idempotency::Error> for Refused {
+    fn from(error: sqlite_idempotency::Error) -> Self {
+        idempotency_refused(&error)
+    }
+}
+
 impl From<rusqlite::Error> for Refused {
     fn from(error: rusqlite::Error) -> Refused {
-        if let rusqlite::Error::InvalidParameterName(reason) = &error
-            && reason.starts_with("nonce")
+        if let rusqlite::Error::ToSqlConversionFailure(inner) = &error
+            && let Some(error) = inner.downcast_ref::<sqlite_idempotency::Error>()
         {
-            return Refused(StatusCode::CONFLICT, reason.clone());
+            return idempotency_refused(error);
         }
         eprintln!("hub SQLite operation failed: {error}");
         Refused(
@@ -496,13 +513,19 @@ fn receipt(
     let nonce = nonce
         .to_str()
         .map_err(|_| bad_request("invalid nonce header".to_string()))?;
-    let mut receipt = crate::store::Receipt::new(actor, nonce, operation, body)?;
-    if let Some(hash) = headers
+    let fingerprint = match headers
         .get("cross-agent-fingerprint")
         .and_then(|v| v.to_str().ok())
     {
-        receipt.fingerprint = hash.to_string();
-    }
+        Some(hash) => hash.to_string(),
+        None => {
+            // Preserve the pre-middleware/direct-call identity for old stored rows.
+            let bytes = serde_json::to_vec(&(operation, body))
+                .map_err(sqlite_idempotency::Error::Encode)?;
+            crate::updates::sha256(&bytes)
+        }
+    };
+    let receipt = crate::store::Receipt::new(actor, nonce, &fingerprint)?;
     Ok(Some(receipt))
 }
 
@@ -688,6 +711,10 @@ async fn send(
     let message = hub
         .store()
         .send_receipted(&send, now(), person, receipt.as_ref())?;
+    let message = match message {
+        crate::store::Outcome::Fresh(message) => message,
+        crate::store::Outcome::Replayed(message) => return Ok(Json(message)),
+    };
     hub.tell(Event::Sent {
         message: message.clone(),
     });
@@ -798,6 +825,10 @@ async fn broadcast(
             })
             .collect::<rusqlite::Result<Vec<_>>>()?;
         store.broadcast_receipted(&send, channel, &recipients, at, person, receipt.as_ref())?
+    };
+    let messages = match messages {
+        crate::store::Outcome::Fresh(messages) => messages,
+        crate::store::Outcome::Replayed(messages) => return Ok(Json(messages)),
     };
     for message in &messages {
         hub.tell(Event::Sent {
@@ -991,11 +1022,11 @@ async fn take(
             take.minutes
         )));
     }
-    Ok(Json(hub.store().take_hold_receipted(
-        &take,
-        hub.hold_clock(),
-        receipt.as_ref(),
-    )?))
+    Ok(Json(
+        hub.store()
+            .take_hold_receipted(&take, hub.hold_clock(), receipt.as_ref())?
+            .into_inner(),
+    ))
 }
 
 async fn release(
@@ -1014,7 +1045,7 @@ async fn release(
         .store()
         .release_hold_receipted(&release, hub.hold_clock(), receipt.as_ref())?
         .map_err(|reason| Refused(StatusCode::CONFLICT, reason))?;
-    Ok(Json(holds))
+    Ok(Json(holds.into_inner()))
 }
 
 /// While it's held, its agent is watching.
@@ -1160,6 +1191,88 @@ impl Stream for AgentEvents {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn keyed_send(app: Router, nonce: &str, body: &str) -> (StatusCode, Vec<u8>) {
+        use tower::ServiceExt;
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .uri(api::SEND.route.path)
+            .header("content-type", "application/json")
+            .header(protocol::WRITE_NONCE_HEADER, nonce)
+            .header("cross-agent-fingerprint", "untrusted-client-value")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        (status, bytes.to_vec())
+    }
+
+    fn keyed_hub() -> Arc<Hub> {
+        let store = Store::in_memory().unwrap();
+        for name in ["a", "b"] {
+            store
+                .see(
+                    &Register {
+                        name: name.into(),
+                        machine: "fixture".into(),
+                        reconnect: false,
+                    },
+                    now(),
+                )
+                .unwrap();
+        }
+        Arc::new(Hub::new(store).unwrap())
+    }
+
+    #[tokio::test]
+    async fn replay_precedes_changed_validation_and_does_not_emit_duplicate_events() {
+        let hub = keyed_hub();
+        let mut events = hub.events.subscribe();
+        let app = router(hub.clone(), Dashboard::Embedded);
+        let body = r#"{"from":"a","to":"b","body":"once","key":null}"#;
+        let (status, first) = keyed_send(app.clone(), "one", body).await;
+        assert_eq!(status, StatusCode::OK);
+        let mut sent = 0;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, Event::Sent { .. }) {
+                sent += 1;
+            }
+        }
+        assert_eq!(sent, 1);
+        hub.store().retire("b", now()).unwrap();
+        let (status, replay) = keyed_send(app.clone(), "one", body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            replay, first,
+            "same response after the original request invalidated later checks"
+        );
+        assert!(
+            events.try_recv().is_err(),
+            "replay must not repeat best-effort notifications"
+        );
+        assert_ne!(keyed_send(app, "new-key", body).await.0, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn nonce_errors_are_typed_and_wire_fingerprints_cannot_be_spoofed() {
+        let app = router(keyed_hub(), Dashboard::Embedded);
+        let body = r#"{"from":"a","to":"b","body":"once","key":null}"#;
+        for invalid in [String::new(), "x".repeat(129)] {
+            assert_eq!(
+                keyed_send(app.clone(), &invalid, body).await.0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(keyed_send(app.clone(), "one", body).await.0, StatusCode::OK);
+        let changed = r#"{"from":"a","to":"b","body":"different","key":null}"#;
+        assert_eq!(
+            keyed_send(app, "one", changed).await.0,
+            StatusCode::CONFLICT
+        );
+    }
 
     #[test]
     fn remote_observation_survives_later_local_readiness_probes() {
