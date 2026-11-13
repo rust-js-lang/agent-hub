@@ -374,6 +374,7 @@ fn incompatible_receipt_tables_are_rejected_at_initialization() {
         "CREATE TABLE receipts(actor TEXT NOT NULL,nonce TEXT NOT NULL,fingerprint TEXT NOT NULL,response TEXT NOT NULL)",
         "CREATE TABLE receipts(actor TEXT NOT NULL,nonce TEXT NOT NULL,fingerprint TEXT NOT NULL,response TEXT NOT NULL,PRIMARY KEY(nonce,actor))",
         "CREATE TABLE receipts(actor TEXT NOT NULL,nonce TEXT NOT NULL,fingerprint TEXT,response TEXT NOT NULL,PRIMARY KEY(actor,nonce))",
+        "CREATE TABLE receipts(actor TEXT NOT NULL,nonce TEXT NOT NULL,fingerprint INTEGER NOT NULL,response TEXT NOT NULL,PRIMARY KEY(actor,nonce))",
         "CREATE TABLE receipts(actor TEXT NOT NULL,nonce TEXT NOT NULL,fingerprint TEXT NOT NULL,response TEXT NOT NULL,extra TEXT NOT NULL,PRIMARY KEY(actor,nonce))",
     ] {
         let db = Connection::open_in_memory().unwrap();
