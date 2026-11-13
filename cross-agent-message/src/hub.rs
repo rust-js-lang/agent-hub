@@ -86,7 +86,9 @@ impl IntoResponse for Refused {
 
 fn idempotency_refused(error: &sqlite_idempotency::Error) -> Refused {
     let status = match error {
-        sqlite_idempotency::Error::InvalidNonce => StatusCode::BAD_REQUEST,
+        sqlite_idempotency::Error::InvalidNonce | sqlite_idempotency::Error::InvalidFingerprint => {
+            StatusCode::BAD_REQUEST
+        }
         sqlite_idempotency::Error::Conflict => StatusCode::CONFLICT,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
@@ -101,13 +103,16 @@ impl From<sqlite_idempotency::Error> for Refused {
     }
 }
 
+impl From<crate::store::WriteError> for Refused {
+    fn from(error: crate::store::WriteError) -> Self {
+        match error {
+            crate::store::WriteError::Storage(error) => Self::from(error),
+            crate::store::WriteError::Idempotency(error) => Self::from(error),
+        }
+    }
+}
 impl From<rusqlite::Error> for Refused {
     fn from(error: rusqlite::Error) -> Refused {
-        if let rusqlite::Error::ToSqlConversionFailure(inner) = &error
-            && let Some(error) = inner.downcast_ref::<sqlite_idempotency::Error>()
-        {
-            return idempotency_refused(error);
-        }
         eprintln!("hub SQLite operation failed: {error}");
         Refused(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -504,29 +509,20 @@ async fn health(State(hub): State<Arc<Hub>>, _: Query<()>) -> Result<Json<String
 fn receipt(
     headers: &axum::http::HeaderMap,
     actor: &str,
-    operation: &str,
-    body: &impl serde::Serialize,
 ) -> Result<Option<crate::store::Receipt>, Refused> {
     let Some(nonce) = headers.get(protocol::WRITE_NONCE_HEADER) else {
         return Ok(None);
     };
     let nonce = nonce
         .to_str()
-        .map_err(|_| bad_request("invalid nonce header".to_string()))?;
-    let fingerprint = match headers
+        .map_err(|_| bad_request("invalid nonce header".into()))?;
+    let fingerprint = headers
         .get("cross-agent-fingerprint")
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(hash) => hash.to_string(),
-        None => {
-            // Preserve the pre-middleware/direct-call identity for old stored rows.
-            let bytes = serde_json::to_vec(&(operation, body))
-                .map_err(sqlite_idempotency::Error::Encode)?;
-            crate::updates::sha256(&bytes)
-        }
-    };
-    let receipt = crate::store::Receipt::new(actor, nonce, &fingerprint)?;
-    Ok(Some(receipt))
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            bad_request("keyed writes require a server-computed wire fingerprint".into())
+        })?;
+    Ok(Some(crate::store::Receipt::new(actor, nonce, fingerprint)?))
 }
 
 async fn binary(
@@ -693,7 +689,7 @@ async fn send(
     Json(send): Json<Send>,
 ) -> Result<Json<Message>, Refused> {
     let _lifecycle = hub.lifecycle();
-    let receipt = receipt(&headers, &send.from, "send", &send)?;
+    let receipt = receipt(&headers, &send.from)?;
     if let Some(answer) = hub.store().replay_receipt(receipt.as_ref())? {
         return Ok(Json(answer));
     }
@@ -792,7 +788,7 @@ async fn broadcast(
     Json(send): Json<Send>,
 ) -> Result<Json<Vec<Message>>, Refused> {
     let _lifecycle = hub.lifecycle();
-    let receipt = receipt(&headers, &send.from, "broadcast", &send)?;
+    let receipt = receipt(&headers, &send.from)?;
     if let Some(answer) = hub.store().replay_receipt(receipt.as_ref())? {
         return Ok(Json(answer));
     }
@@ -1010,7 +1006,7 @@ async fn take(
     Json(take): Json<Take>,
 ) -> Result<Json<Taken>, Refused> {
     let _lifecycle = hub.lifecycle();
-    let receipt = receipt(&headers, &take.holder, "take", &take)?;
+    let receipt = receipt(&headers, &take.holder)?;
     if let Some(answer) = hub.store().replay_receipt(receipt.as_ref())? {
         return Ok(Json(answer));
     }
@@ -1035,7 +1031,7 @@ async fn release(
     Json(release): Json<Release>,
 ) -> Result<Json<Vec<Hold>>, Refused> {
     let _lifecycle = hub.lifecycle();
-    let receipt = receipt(&headers, &release.holder, "release", &release)?;
+    let receipt = receipt(&headers, &release.holder)?;
     if let Some(answer) = hub.store().replay_receipt(receipt.as_ref())? {
         return Ok(Json(answer));
     }
@@ -1191,6 +1187,16 @@ impl Stream for AgentEvents {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_server_fingerprint_never_selects_an_alternative_identity_rule() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(protocol::WRITE_NONCE_HEADER, "one".parse().unwrap());
+        assert!(matches!(
+            receipt(&headers, "a"),
+            Err(Refused(StatusCode::BAD_REQUEST, _))
+        ));
+    }
 
     async fn keyed_send(app: Router, nonce: &str, body: &str) -> (StatusCode, Vec<u8>) {
         use tower::ServiceExt;

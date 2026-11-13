@@ -3,6 +3,8 @@
 A synchronous Rust library for committing SQLite effects and their replayable
 response together. It depends on `rusqlite` and Serde, with no hub, supervisor,
 HTTP or application-schema dependency.
+Its public connection/transaction types use `rusqlite` 0.37; applications must
+use that compatible version too.
 
 ```rust
 use sqlite_idempotency::{Error, Outcome, Receipt, execute, initialize};
@@ -28,15 +30,21 @@ SQL, changing connection policy, other connections and external effects are
 outside the contract. External notifications can still be lost after commit;
 use an application-owned transactional outbox when those need durable delivery.
 
-The library reserves the `receipts` table with columns `actor`, `nonce`,
+The default helpers reserve the `receipts` table with columns `actor`, `nonce`,
 `fingerprint`, `response` and primary key `(actor, nonce)`. Existing compatible
-tables and rows are adopted without rewriting them. Initialize it during your
-schema setup, including inside a larger migration transaction if needed.
+tables and rows are adopted without rewriting them. `initialize` checks the
+required column types, nullability and composite primary key and rejects
+incompatible tables immediately. Extra columns must be nullable or defaulted.
+Use `Ledger::new("request_receipts")` and its `initialize`/`lookup`/`execute`
+methods when another table name is needed; identifiers are safely quoted and
+each ledger has an independent key namespace. Initialize it during your
+schema setup in SQLite's `main` database; temporary tables cannot shadow it.
+Initialization may run inside a larger migration transaction if needed.
 The application owns its other tables, connection, SQLite durability settings
 and busy timeout. Nesting `execute` inside an existing transaction is unsupported.
 
 The actor is a namespace chosen by the application, not authentication. A nonce
-is 1–128 UTF-8 bytes. The fingerprint is opaque: the application must bind it to
+is 1–128 UTF-8 bytes. The fingerprint is nonempty and opaque: the application must bind it to
 the operation and original request using a stable rule. Do not recompute it
 from a newly decoded request when new defaulted fields can change its identity.
 The hub retains its SHA-256 of path, a NUL separator and the original wire bytes.

@@ -1,6 +1,6 @@
 use rusqlite::{Connection, Transaction};
 use serde::{Deserialize, Serialize};
-use sqlite_idempotency::{Error, Outcome, Receipt, execute, initialize, lookup};
+use sqlite_idempotency::{Error, Ledger, Outcome, Receipt, execute, initialize, lookup};
 use std::{
     path::PathBuf,
     sync::{
@@ -343,6 +343,10 @@ fn busy_writer_never_runs_the_contending_operation_and_retry_replays() {
 #[test]
 fn nonce_limits_are_bytes_and_explicit_fingerprints_support_legacy_adapters() {
     assert!(matches!(
+        Receipt::new("a", "valid", ""),
+        Err(Error::InvalidFingerprint)
+    ));
+    assert!(matches!(
         Receipt::new("a", "", "fingerprint"),
         Err(Error::InvalidNonce)
     ));
@@ -361,6 +365,150 @@ fn nonce_limits_are_bytes_and_explicit_fingerprints_support_legacy_adapters() {
         (receipt.actor(), receipt.nonce(), receipt.fingerprint()),
         ("a", "one", "legacy-identity")
     );
+}
+
+#[test]
+fn incompatible_receipt_tables_are_rejected_at_initialization() {
+    for schema in [
+        "CREATE TABLE receipts(id INTEGER,total INTEGER)",
+        "CREATE TABLE receipts(actor TEXT NOT NULL,nonce TEXT NOT NULL,fingerprint TEXT NOT NULL,response TEXT NOT NULL)",
+        "CREATE TABLE receipts(actor TEXT NOT NULL,nonce TEXT NOT NULL,fingerprint TEXT NOT NULL,response TEXT NOT NULL,PRIMARY KEY(nonce,actor))",
+        "CREATE TABLE receipts(actor TEXT NOT NULL,nonce TEXT NOT NULL,fingerprint TEXT,response TEXT NOT NULL,PRIMARY KEY(actor,nonce))",
+        "CREATE TABLE receipts(actor TEXT NOT NULL,nonce TEXT NOT NULL,fingerprint TEXT NOT NULL,response TEXT NOT NULL,extra TEXT NOT NULL,PRIMARY KEY(actor,nonce))",
+    ] {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(schema).unwrap();
+        assert!(
+            matches!(initialize(&db), Err(Error::IncompatibleSchema(_))),
+            "{schema}"
+        );
+        let stored: String = db
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='receipts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, schema, "rejecting a table must not rewrite it");
+    }
+}
+
+#[test]
+fn table_names_are_quoted_and_ledgers_have_independent_key_namespaces() {
+    let mut db = database(None);
+    let first = Ledger::new("requests").unwrap();
+    let second = Ledger::new("receipt\"; DROP TABLE effects; --").unwrap();
+    first.initialize(&db).unwrap();
+    second.initialize(&db).unwrap();
+    let receipt = key("a", "one", "write", 7);
+    assert_eq!(
+        first
+            .execute(&mut db, Some(&receipt), |tx| write(tx, 7))
+            .unwrap(),
+        Outcome::Fresh(7)
+    );
+    assert_eq!(
+        second
+            .execute(&mut db, Some(&receipt), |tx| write(tx, 8))
+            .unwrap(),
+        Outcome::Fresh(8)
+    );
+    assert_eq!(
+        first
+            .execute::<i64, Error>(&mut db, Some(&receipt), |_| panic!("first ledger replays"))
+            .unwrap(),
+        Outcome::Replayed(7)
+    );
+    assert_eq!(
+        second
+            .execute::<i64, Error>(&mut db, Some(&receipt), |_| panic!("second ledger replays"))
+            .unwrap(),
+        Outcome::Replayed(8)
+    );
+    assert_eq!((count(&db, "effects"), count(&db, "receipts")), (2, 0));
+    assert!(matches!(Ledger::new(""), Err(Error::InvalidTableName)));
+    assert!(matches!(
+        Ledger::new("invalid\0name"),
+        Err(Error::InvalidTableName)
+    ));
+}
+
+#[test]
+fn temporary_tables_cannot_shadow_the_durable_ledger() {
+    let directory = Directory::new();
+    let mut first = database(Some(&directory.db()));
+    first.execute_batch("CREATE TEMP TABLE receipts(actor TEXT NOT NULL,nonce TEXT NOT NULL,fingerprint TEXT NOT NULL,response TEXT NOT NULL,PRIMARY KEY(actor,nonce))").unwrap();
+    initialize(&first).unwrap();
+    let receipt = key("a", "one", "write", 7);
+    execute(&mut first, Some(&receipt), |tx| write(tx, 7)).unwrap();
+    assert_eq!(
+        first
+            .query_row("SELECT count(*) FROM temp.receipts", [], |row| row
+                .get::<_, u64>(0))
+            .unwrap(),
+        0
+    );
+    let mut second = database(Some(&directory.db()));
+    assert_eq!(
+        execute::<i64, Error>(&mut second, Some(&receipt), |_| panic!(
+            "receipt must be durable across connections"
+        ))
+        .unwrap(),
+        Outcome::Replayed(7)
+    );
+    assert_eq!(count(&second, "effects"), 1);
+}
+
+#[test]
+fn compatible_additive_columns_and_migration_rollback_preserve_the_contract() {
+    let mut db = database(None);
+    db.execute_batch("ALTER TABLE receipts ADD COLUMN recorded_at INTEGER; ALTER TABLE receipts ADD COLUMN producer TEXT NOT NULL DEFAULT 'unknown'").unwrap();
+    initialize(&db).unwrap();
+    let receipt = key("a", "one", "write", 7);
+    execute(&mut db, Some(&receipt), |tx| write(tx, 7)).unwrap();
+    assert_eq!(lookup::<i64>(&db, &receipt).unwrap(), Some(7));
+    let added: (Option<i64>, String) = db
+        .query_row("SELECT recorded_at,producer FROM receipts", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    assert_eq!(added, (None, "unknown".into()));
+
+    let mut fresh = Connection::open_in_memory().unwrap();
+    let tx = fresh.transaction().unwrap();
+    initialize(&tx).unwrap();
+    tx.rollback().unwrap();
+    let exists: u64 = fresh
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name='receipts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        exists, 0,
+        "the application owns the surrounding migration transaction"
+    );
+}
+
+#[test]
+fn a_saved_null_response_is_a_replay_not_a_miss() {
+    let mut db = database(None);
+    let receipt = key("a", "null", "write", 7);
+    let first = execute::<Option<i64>, Error>(&mut db, Some(&receipt), |tx| {
+        write(tx, 7)?;
+        Ok(None)
+    })
+    .unwrap();
+    assert_eq!(first, Outcome::Fresh(None));
+    assert_eq!(
+        execute::<Option<i64>, Error>(&mut db, Some(&receipt), |_| panic!(
+            "null is a stored result"
+        ))
+        .unwrap(),
+        Outcome::Replayed(None)
+    );
+    assert_eq!(count(&db, "effects"), 1);
 }
 
 #[test]

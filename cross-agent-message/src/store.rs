@@ -94,12 +94,12 @@ impl Store {
     pub fn replay_receipt<T: serde::de::DeserializeOwned>(
         &self,
         receipt: Option<&Receipt>,
-    ) -> rusqlite::Result<Option<T>> {
+    ) -> Result<Option<T>, WriteError> {
         receipt
             .map(|receipt| sqlite_idempotency::lookup(&self.db, receipt))
             .transpose()
             .map(Option::flatten)
-            .map_err(receipt_error)
+            .map_err(WriteError::from)
     }
     /// The store in the file at `path`, made with its tables if it's new.
     pub fn open(path: &Path) -> rusqlite::Result<Store> {
@@ -114,7 +114,7 @@ impl Store {
     fn with(mut db: Connection) -> rusqlite::Result<Store> {
         let tx = db.transaction()?;
         tx.execute_batch(SCHEMA)?;
-        sqlite_idempotency::initialize(&tx).map_err(receipt_error)?;
+        sqlite_idempotency::initialize(&tx).map_err(initialization_error)?;
         for (table, column, kind) in ADDED {
             let has: bool = tx.query_row(
                 "SELECT count(*) > 0 FROM pragma_table_info(?1) WHERE name = ?2",
@@ -200,13 +200,12 @@ impl Store {
         now: u64,
         person: bool,
         receipt: Option<&Receipt>,
-    ) -> rusqlite::Result<Outcome<Message>> {
-        sqlite_idempotency::execute(&mut self.db, receipt, |tx| {
+    ) -> Result<Outcome<Message>, WriteError> {
+        sqlite_idempotency::execute::<_, WriteError>(&mut self.db, receipt, |tx| {
             Ok(insert_message(
                 tx, send, &send.to, None, now, person, false, person,
             )?)
         })
-        .map_err(receipt_error)
     }
 
     /// The agents in `channel`, by name: every agent of `everyone`, those
@@ -271,7 +270,7 @@ impl Store {
         recipients: &[String],
         now: u64,
         person: bool,
-    ) -> rusqlite::Result<Vec<Message>> {
+    ) -> Result<Vec<Message>, WriteError> {
         let recipients: Vec<(String, bool)> = recipients
             .iter()
             .map(|name| (name.clone(), false))
@@ -286,7 +285,7 @@ impl Store {
         recipients: &[(String, bool)],
         now: u64,
         person: bool,
-    ) -> rusqlite::Result<Vec<Message>> {
+    ) -> Result<Vec<Message>, WriteError> {
         self.broadcast_receipted(send, channel, recipients, now, person, None)
             .map(Outcome::into_inner)
     }
@@ -299,8 +298,8 @@ impl Store {
         now: u64,
         person: bool,
         receipt: Option<&Receipt>,
-    ) -> rusqlite::Result<Outcome<Vec<Message>>> {
-        sqlite_idempotency::execute(&mut self.db, receipt, |transaction| {
+    ) -> Result<Outcome<Vec<Message>>, WriteError> {
+        sqlite_idempotency::execute::<_, WriteError>(&mut self.db, receipt, |transaction| {
             let mut messages = Vec::new();
             for (recipient, away) in recipients {
                 messages.push(insert_message(
@@ -316,7 +315,6 @@ impl Store {
             }
             Ok(messages)
         })
-        .map_err(receipt_error)
     }
 
     fn deliver(
@@ -558,7 +556,7 @@ impl Store {
         &mut self,
         take: &protocol::Take,
         now: u64,
-    ) -> rusqlite::Result<protocol::Taken> {
+    ) -> Result<protocol::Taken, WriteError> {
         self.take_hold_receipted(take, now, None)
             .map(Outcome::into_inner)
     }
@@ -567,8 +565,8 @@ impl Store {
         take: &protocol::Take,
         now: u64,
         receipt: Option<&Receipt>,
-    ) -> rusqlite::Result<Outcome<protocol::Taken>> {
-        sqlite_idempotency::execute(&mut self.db, receipt, |tx| {
+    ) -> Result<Outcome<protocol::Taken>, WriteError> {
+        sqlite_idempotency::execute::<_, WriteError>(&mut self.db, receipt, |tx| {
             let mut holds = read_holds(tx)?
                 .into_iter()
                 .map(|hold| (hold.name.clone(), hold))
@@ -579,14 +577,13 @@ impl Store {
             }
             Ok(taken)
         })
-        .map_err(receipt_error)
     }
 
     pub fn release_hold(
         &mut self,
         release: &protocol::Release,
         now: u64,
-    ) -> rusqlite::Result<Result<Vec<Hold>, String>> {
+    ) -> Result<Result<Vec<Hold>, String>, WriteError> {
         self.release_hold_receipted(release, now, None)
             .map(|result| result.map(Outcome::into_inner))
     }
@@ -595,7 +592,7 @@ impl Store {
         release: &protocol::Release,
         now: u64,
         receipt: Option<&Receipt>,
-    ) -> rusqlite::Result<Result<Outcome<Vec<Hold>>, String>> {
+    ) -> Result<Result<Outcome<Vec<Hold>>, String>, WriteError> {
         let result =
             sqlite_idempotency::execute(&mut self.db, receipt, |tx| -> Result<_, ReleaseError> {
                 let mut holds = read_holds(tx)?
@@ -725,25 +722,63 @@ fn json_error(error: serde_json::Error) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
 
-/// Preserve the hub's existing HTTP/error contract at the storage adapter.
-pub(crate) fn receipt_error(error: sqlite_idempotency::Error) -> rusqlite::Error {
+/// Structured errors for the keyed-write boundary; HTTP mapping never depends
+/// on a driver's wrapper or on human-readable text.
+#[derive(Debug)]
+pub enum WriteError {
+    Storage(rusqlite::Error),
+    Idempotency(sqlite_idempotency::Error),
+}
+impl std::fmt::Display for WriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage(error) => error.fmt(f),
+            Self::Idempotency(error) => error.fmt(f),
+        }
+    }
+}
+impl std::error::Error for WriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(match self {
+            Self::Storage(error) => error,
+            Self::Idempotency(error) => error,
+        })
+    }
+}
+impl From<rusqlite::Error> for WriteError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error)
+    }
+}
+impl From<sqlite_idempotency::Error> for WriteError {
+    fn from(error: sqlite_idempotency::Error) -> Self {
+        match error {
+            sqlite_idempotency::Error::Database(error) => Self::Storage(error),
+            error => Self::Idempotency(error),
+        }
+    }
+}
+
+/// Only store construction retains the historical rusqlite result type.
+/// Keyed request errors travel structurally through WriteError instead.
+fn initialization_error(error: sqlite_idempotency::Error) -> rusqlite::Error {
     match error {
         sqlite_idempotency::Error::Database(error) => error,
         error => rusqlite::Error::ToSqlConversionFailure(Box::new(error)),
     }
 }
 enum ReleaseError {
-    Store(rusqlite::Error),
+    Store(WriteError),
     Refused(String),
 }
 impl From<rusqlite::Error> for ReleaseError {
     fn from(error: rusqlite::Error) -> Self {
-        Self::Store(error)
+        Self::Store(error.into())
     }
 }
 impl From<sqlite_idempotency::Error> for ReleaseError {
     fn from(error: sqlite_idempotency::Error) -> Self {
-        Self::Store(receipt_error(error))
+        Self::Store(error.into())
     }
 }
 #[allow(clippy::too_many_arguments)]
@@ -1383,16 +1418,17 @@ mod tests {
             key: None,
         };
         let receipt = test_receipt("a", "unique", "send", &send).unwrap();
-        let first = store
+        let Outcome::Fresh(first) = store
             .send_receipted(&send, 2, false, Some(&receipt))
             .unwrap()
-            .into_inner();
+        else {
+            panic!("first send must be fresh");
+        };
         assert_eq!(
             store
                 .send_receipted(&send, 3, false, Some(&receipt))
-                .unwrap()
-                .into_inner(),
-            first
+                .unwrap(),
+            Outcome::Replayed(first)
         );
         assert_eq!(store.history(None, 10).unwrap().len(), 1);
         let other = test_receipt(
@@ -1425,16 +1461,13 @@ mod tests {
             minutes: 30,
         };
         let key = test_receipt("a", "hold-nonce", "take", &take).unwrap();
-        let first = store
-            .take_hold_receipted(&take, 10, Some(&key))
-            .unwrap()
-            .into_inner();
+        let Outcome::Fresh(first) = store.take_hold_receipted(&take, 10, Some(&key)).unwrap()
+        else {
+            panic!("first take must be fresh");
+        };
         assert_eq!(
-            store
-                .take_hold_receipted(&take, 20, Some(&key))
-                .unwrap()
-                .into_inner(),
-            first,
+            store.take_hold_receipted(&take, 20, Some(&key)).unwrap(),
+            Outcome::Replayed(first),
             "a retried hold must not extend twice"
         );
     }
@@ -1493,6 +1526,39 @@ mod tests {
                 .unwrap(),
             Outcome::Replayed(_)
         ));
+    }
+
+    #[test]
+    fn broadcast_receipts_report_origin_and_never_deliver_to_changed_recipients() {
+        let mut store = Store::in_memory().unwrap();
+        let send = Send {
+            from: "a".into(),
+            to: "#team".into(),
+            body: "once".into(),
+            key: None,
+        };
+        let receipt = test_receipt("a", "broadcast-once", "broadcast", &send).unwrap();
+        let recipients = [("b".into(), false), ("c".into(), false)];
+        let Outcome::Fresh(first) = store
+            .broadcast_receipted(&send, "team", &recipients, 1, false, Some(&receipt))
+            .unwrap()
+        else {
+            panic!("first broadcast must be fresh");
+        };
+        let replay = store
+            .broadcast_receipted(
+                &send,
+                "team",
+                &[("d".into(), false)],
+                2,
+                false,
+                Some(&receipt),
+            )
+            .unwrap();
+        assert_eq!(replay, Outcome::Replayed(first));
+        let history = store.history(None, 100).unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().all(|message| message.to != "d"));
     }
 
     #[test]
