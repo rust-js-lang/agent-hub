@@ -18,6 +18,17 @@ use std::process::Command;
 use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
+const RESERVED: &[&str] = &[
+    "addresses",
+    "db",
+    "activate_current",
+    "worker_path",
+    "requested_addresses",
+    "required_ready",
+    "handoff_protocol",
+    "handoff_startup",
+];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(serialize = "A: Application", deserialize = "A: Application"))]
 pub struct Config<A: Application> {
@@ -43,16 +54,6 @@ impl<A: Application> Config<A> {
     /// Reject application settings that would overwrite process policy in the
     /// flattened on-disk configuration.
     pub fn validate(&self) -> Result<()> {
-        const RESERVED: &[&str] = &[
-            "addresses",
-            "db",
-            "activate_current",
-            "worker_path",
-            "requested_addresses",
-            "required_ready",
-            "handoff_protocol",
-            "handoff_startup",
-        ];
         let settings = serde_json::to_value(&self.application)?;
         let settings = settings
             .as_object()
@@ -62,11 +63,14 @@ impl<A: Application> Config<A> {
         }
         Ok(())
     }
+    pub fn runtime(&self) -> crate::runtime::Runtime {
+        A::runtime()
+    }
     pub fn control(&self) -> PathBuf {
-        self.application.runtime().socket(&self.db, "hub.sock")
+        A::runtime().socket(&self.db, "hub.sock")
     }
     pub fn worker_control(&self) -> PathBuf {
-        self.application.runtime().socket(&self.db, "worker.sock")
+        A::runtime().socket(&self.db, "worker.sock")
     }
     pub fn config_path(&self) -> PathBuf {
         self.db.with_extension("worker.json")
@@ -515,7 +519,7 @@ fn start_candidate(
         .and_then(|name| name.to_str())
         .context("worker image is not a managed recovery snapshot")?;
     crate::installation::activate_verified(binary, &executable, checksum)?;
-    config.application.runtime().prepare_worker(&config.db)?;
+    config.runtime().prepare_worker(&config.db)?;
     // Discover capability before launch: readiness may time out with a startup
     // marker still buffered, or before the child has had a chance to send it.
     let capability = match capability {
@@ -535,12 +539,12 @@ fn start_candidate(
     };
     let mut worker = Worker {
         process,
-        build: capability.build,
+        build: capability.build.clone(),
         channel,
-        handoff: capability.handoff_protocol == crate::handoff::VERSION
+        handoff: capability.handoff_protocol() == crate::handoff::VERSION
             && config.handoff_protocol == crate::handoff::VERSION,
-        startup: capability.handoff_startup && config.handoff_startup,
-        observed_accepting: !(capability.handoff_startup && config.handoff_startup),
+        startup: capability.handoff_startup() && config.handoff_startup,
+        observed_accepting: !(capability.handoff_startup() && config.handoff_startup),
         stopped_accepting_ns: BTreeMap::new(),
         first_accepted_ns: BTreeMap::new(),
         resume_from_ns: BTreeMap::new(),
@@ -1187,6 +1191,21 @@ fn attach_pending(
     Ok(changed)
 }
 
+fn pending_capability(config: &Config<impl Application>) -> Option<BuildInfo> {
+    let result = config
+        .worker_path
+        .as_deref()
+        .context("stable worker path missing")
+        .and_then(|path| config.application.inspect(path));
+    match result {
+        Ok(capability) => Some(capability),
+        Err(error) => {
+            eprintln!("listener handoff cancelled; retaining worker: {error:#}");
+            None
+        }
+    }
+}
+
 pub fn run(mut config: Config<impl Application>) -> Result<()> {
     config.validate()?;
     if config.addresses.is_empty()
@@ -1211,7 +1230,7 @@ pub fn run(mut config: Config<impl Application>) -> Result<()> {
     config.worker_path = Some(installation.executable.clone());
     config.handoff_protocol = crate::handoff::VERSION;
     config.handoff_startup = true;
-    config.application.runtime().prepare(&config.db)?;
+    config.runtime().prepare(&config.db)?;
     let control = config.control();
     if supervisor_present(&config.db.with_extension("sock"))
         || supervisor_present(&original_db.with_extension("sock"))
@@ -1230,7 +1249,7 @@ pub fn run(mut config: Config<impl Application>) -> Result<()> {
         }
         std::fs::remove_file(&control)?;
     }
-    config.application.runtime().prepare_worker(&config.db)?;
+    config.runtime().prepare_worker(&config.db)?;
     let mut socket = UnixListener::bind(&control)?;
     crate::runtime::legacy_alias(&config.db.with_extension("sock"), &control)?;
     std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o600))?;
@@ -1372,12 +1391,10 @@ pub fn run(mut config: Config<impl Application>) -> Result<()> {
                     eprintln!("Worker {} is ready after restart.", child.id());
                     worker = child;
                     if rolled_back {
-                        let build = config.application.inspect(&active.current)?.build;
+                        let build = worker.build.clone();
                         if let Err(error) = config.application.announce(
                             &config,
-                            &format!(
-                                "The hub rolled back to build {build} after three worker crashes."
-                            ),
+                            &crate::SupervisorEvent::AutomaticRollback { build, crashes: 3 },
                         ) {
                             eprintln!("could not announce automatic rollback: {error:#}");
                         }
@@ -1420,7 +1437,7 @@ pub fn run(mut config: Config<impl Application>) -> Result<()> {
             // /tmp may be cleaned while the supervisor still owns its listener.
             // Recover the directory entry rather than leaving upgrade unreachable.
             if !control.exists() {
-                config.application.runtime().prepare(&config.db)?;
+                config.runtime().prepare(&config.db)?;
                 socket = UnixListener::bind(&control)?;
                 std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o600))?;
                 socket.set_nonblocking(true)?;
@@ -1432,7 +1449,12 @@ pub fn run(mut config: Config<impl Application>) -> Result<()> {
             if handoff_retry && retirement.is_none() {
                 handoff_retry = false;
                 let prior = active.clone();
-                let build = config.application.inspect(&prior.current)?.build;
+                let build = worker.build.clone();
+                // Inspect the final file while the current worker still serves.
+                let Some(capability) = pending_capability(&config) else {
+                    handoff_retry = true;
+                    continue;
+                };
                 let replaced = reconcile_installation(&mut active, &config)?;
                 worker.addresses =
                     config
@@ -1440,13 +1462,6 @@ pub fn run(mut config: Config<impl Application>) -> Result<()> {
                         .probe(&config, &build, Duration::from_secs(1));
                 config.required_ready = crate::addresses::ready(&worker.addresses);
                 let protected_before = config.required_ready.clone();
-                // Inspect the final file while the current worker still serves.
-                let capability = config.application.inspect(
-                    config
-                        .worker_path
-                        .as_deref()
-                        .context("stable worker path missing")?,
-                )?;
                 let exposure = match quiesce(&mut worker, &prior.current, &config) {
                     Ok(exposure) => exposure,
                     Err(error) => {
@@ -1804,12 +1819,50 @@ mod tests {
     use crate::test_support::TestApplication;
 
     #[test]
+    fn pending_inspection_hook_errors_and_missing_paths_cancel_without_mutating_serving_policy() {
+        let mut config: Config<TestApplication> = serde_json::from_value(serde_json::json!({
+            "db": "/tmp/fixture-state", "addresses": ["127.0.0.1:12345"],
+            "worker_path": std::env::current_exe().unwrap(), "inspect_error": true,
+            "required_ready": ["127.0.0.1:12345"], "handoff_protocol": 1
+        }))
+        .unwrap();
+        let before = serde_json::to_value(&config).unwrap();
+        assert!(pending_capability(&config).is_none());
+        assert_eq!(serde_json::to_value(&config).unwrap(), before);
+        config
+            .application
+            .settings
+            .insert("inspect_error".into(), serde_json::json!(false));
+        assert!(
+            pending_capability(&config).is_some(),
+            "the next retry can recover"
+        );
+        config.worker_path = None;
+        assert!(pending_capability(&config).is_none());
+    }
+
+    #[test]
     fn application_settings_cannot_override_flattened_engine_policy() {
         let config: Config<TestApplication> = serde_json::from_value(serde_json::json!({
             "db": "/tmp/fixture-state", "addresses": ["127.0.0.1:12345"], "greeting": "hello"
         }))
         .unwrap();
         config.validate().unwrap();
+        let mut engine_only = config.clone();
+        engine_only.application.settings.clear();
+        let engine = serde_json::to_value(&engine_only).unwrap();
+        let fields: std::collections::BTreeSet<_> = engine
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            fields,
+            RESERVED.iter().copied().collect(),
+            "engine config fields and collision guard must stay identical"
+        );
+
         let serialized = serde_json::to_value(&config).unwrap();
         assert_eq!(serialized["greeting"], "hello");
         assert!(serialized.get("application").is_none());

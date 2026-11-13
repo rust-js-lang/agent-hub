@@ -59,7 +59,7 @@ impl Listener {
     pub fn timing(&self) -> Arc<Timing> {
         self.timing.clone()
     }
-    pub async fn accept(&self) -> Result<(tokio::net::TcpStream, SocketAddr)> {
+    pub async fn accept(&mut self) -> Result<(tokio::net::TcpStream, SocketAddr)> {
         if self.timing.stopped_accepting_ns() != 0 {
             bail!("listener is quiesced");
         }
@@ -83,7 +83,7 @@ impl Listener {
     }
     /// Call after cancelling the accept future, before draining connections.
     /// Retains the descriptor while preventing any subsequent accept call.
-    pub fn stop_accepting(&self) -> Result<()> {
+    pub fn stop_accepting(&mut self) -> Result<()> {
         let at_ns = monotonic_ns()?;
         let _ = self
             .timing
@@ -101,7 +101,7 @@ mod tests {
         let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         socket.set_nonblocking(true).unwrap();
         let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
-        let listener = Listener::new(&socket, 17, sent).unwrap();
+        let mut listener = Listener::new(&socket, 17, sent).unwrap();
         let address = socket.local_addr().unwrap();
         let first_client = tokio::net::TcpStream::connect(address).await.unwrap();
         let first = listener.accept().await.unwrap();

@@ -22,7 +22,9 @@ jobs:
         # Handoff deadlines apply to the optimized executable we distribute.
         run: cargo test --release --locked -p process-supervisor -p cross-agent-message -p protocol
       - name: Check supervisor and application boundary
-        run: cargo clippy --release --locked -p process-supervisor -p cross-agent-message --all-targets -- -D warnings
+        run: |
+          rustup component add clippy
+          cargo clippy --release --locked -p process-supervisor -p cross-agent-message --all-targets -- -D warnings
       - name: Exercise supervisor with an independent TCP application
         run: |
           cargo build --release --locked -p process-supervisor --example echo

@@ -3,16 +3,14 @@
 use anyhow::{Context, Result, bail};
 use process_supervisor::{
     Application, BuildInfo, Config, Swap,
-    addresses::{AddressState, ListenAddress, Ready},
-    handoff::{self, Acceptance, Channel, Command as Lifecycle},
+    addresses::{AddressState, ListenAddress},
     runtime::Runtime,
     supervisor,
     worker::{self, Outcome},
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
-    io::{Read, Write},
+    io::Read,
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::Command,
@@ -30,7 +28,7 @@ impl Application for Echo {
     fn name(&self) -> &'static str {
         "echo"
     }
-    fn runtime(&self) -> Runtime {
+    fn runtime() -> Runtime {
         Runtime {
             home_directory: ".supervisor-echo",
             temporary_prefix: "ps-echo",
@@ -100,102 +98,54 @@ impl Application for Echo {
             .env("ECHO_LISTENERS", count.to_string());
         command
     }
-    fn announce(&self, _: &Config<Self>, message: &str) -> Result<()> {
-        eprintln!("{message}");
+    fn announce(
+        &self,
+        _: &Config<Self>,
+        event: &process_supervisor::SupervisorEvent,
+    ) -> Result<()> {
+        eprintln!("{event:?}");
         Ok(())
     }
 }
 
-fn serve_generation(
+#[tokio::main(flavor = "current_thread")]
+async fn serve_generation(
     config: &Config<Echo>,
-    listeners: &[std::net::TcpListener],
-    channel: &mut Channel,
-    request: u64,
+    generation: &mut worker::Generation<'_>,
 ) -> Result<Outcome> {
-    let deadline = Instant::now() + handoff::READY_LIMIT;
-    let mut first = BTreeMap::new();
-    channel.write(&format!("accepting {request}\n"), deadline)?;
-    // Exercise the actual service concurrently, like a database-backed HTTP
-    // application's readiness check, rather than trusting a successful bind.
+    use tokio::io::AsyncWriteExt;
+    let mut listeners = generation.listeners()?;
+    let listener = listeners
+        .first_mut()
+        .context("echo requires one listener")?;
+    generation.accepting()?;
     let probe_config = config.clone();
-    let (sent, received) = std::sync::mpsc::channel();
-    let probe = std::thread::spawn(move || {
-        let addresses =
-            probe_config
-                .application
-                .probe(&probe_config, BUILD, Duration::from_secs(1));
-        let _ = sent.send(addresses);
+    let initial = tokio::task::spawn_blocking(move || {
+        probe_config
+            .application
+            .probe(&probe_config, BUILD, Duration::from_secs(1))
     });
-    let mut ready_sent = false;
+    tokio::pin!(initial);
+    let mut ready = false;
     loop {
-        for listener in listeners {
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    let address = listener.local_addr()?.to_string();
-                    if !first.contains_key(&address) {
-                        let at_ns = handoff::monotonic_ns()?;
-                        first.insert(address.clone(), at_ns);
-                        channel.write(
-                            &format!(
-                                "accepted {}\n",
-                                serde_json::to_string(&Acceptance {
-                                    request,
-                                    address,
-                                    at_ns
-                                })?
-                            ),
-                            Instant::now() + Duration::from_secs(1),
-                        )?;
-                    }
-                    stream.set_write_timeout(Some(Duration::from_secs(1)))?;
-                    writeln!(stream, "{} {BUILD}", config.greeting)?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(error) => return Err(error.into()),
-            }
+        tokio::select! {
+            addresses = &mut initial, if !ready => {
+                generation.ready(addresses?)?;
+                ready = true;
+            },
+            accepted = listener.accept() => {
+                let (mut stream, _) = accepted?;
+                let reply = format!("{} {BUILD}\n", config.greeting);
+                process_supervisor::listener::drain_connection(stream.write_all(reply.as_bytes())).await??;
+            },
+            event = generation.next_event() => {
+                listener.stop_accepting()?;
+                return match event? {
+                    worker::Event::Quiesce { id } => generation.quiesced(id),
+                    worker::Event::Stop => Ok(Outcome::Stopped),
+                };
+            },
         }
-        if !ready_sent && let Ok(addresses) = received.try_recv() {
-            let ready = Ready {
-                build: BUILD.into(),
-                addresses,
-                request,
-                handoff_protocol: handoff::VERSION,
-                accepted: first.keys().cloned().collect(),
-                first_accepted_ns: first.clone(),
-            };
-            channel.write(
-                &format!("ready {}\n", serde_json::to_string(&ready)?),
-                deadline,
-            )?;
-            ready_sent = true;
-        }
-        if let Some(line) = channel.poll()? {
-            match serde_json::from_str::<Lifecycle>(&line)? {
-                Lifecycle::Quiesce { id } => {
-                    probe
-                        .join()
-                        .map_err(|_| anyhow::anyhow!("probe panicked"))?;
-                    // No background connection tasks or exclusive state remain.
-                    let stopped = listeners
-                        .iter()
-                        .map(|l| Ok((l.local_addr()?.to_string(), handoff::monotonic_ns()?)))
-                        .collect::<Result<_>>()?;
-                    return Ok(Outcome::Quiesced {
-                        id,
-                        stopped_accepting_ns: stopped,
-                        first_accepted_ns: first,
-                    });
-                }
-                Lifecycle::Retire { .. } => {
-                    probe
-                        .join()
-                        .map_err(|_| anyhow::anyhow!("probe panicked"))?;
-                    return Ok(Outcome::Stopped);
-                }
-                Lifecycle::Resume { .. } => bail!("unexpected resume while serving"),
-            }
-        }
-        std::thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -239,9 +189,15 @@ fn main() -> Result<()> {
             let inherited = unsafe {
                 worker::Inherited::take(count, 3 + count as i32, config.addresses.len())?
             };
-            worker::run(inherited, |listeners, channel, request| {
-                serve_generation(&config, listeners, channel, request)
-            })
+            worker::run(
+                inherited,
+                worker::Options::new(
+                    BUILD.into(),
+                    config.handoff_protocol,
+                    config.handoff_startup,
+                ),
+                |generation| serve_generation(&config, generation),
+            )
         }
         "upgrade" => {
             let config: Config<Echo> = supervisor::load_config(&path)?;
@@ -261,13 +217,7 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
-        "stop" => supervisor::stop_in(
-            &path,
-            Echo {
-                greeting: String::new(),
-            }
-            .runtime(),
-        ),
+        "stop" => supervisor::stop_in(&path, Echo::runtime()),
         _ => bail!("unknown mode"),
     }
 }

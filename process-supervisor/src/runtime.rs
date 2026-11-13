@@ -50,7 +50,7 @@ impl Runtime {
                 && std::os::unix::net::UnixStream::connect(&path).is_ok())
         {
             bail!(
-                "a worker is still listening for this database; stop the existing hub before starting another worker"
+                "a worker is still listening for this database; stop the existing service before starting another worker"
             );
         }
         match std::fs::symlink_metadata(&path) {

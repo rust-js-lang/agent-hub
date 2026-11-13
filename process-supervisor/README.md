@@ -11,7 +11,7 @@ other operating systems.
 | Listener binding, inheritance and lifetime | Worker entry point and request handling |
 | Stable installed executable, lock, immutable recovery images and atomic activation | Candidate identity, target and application protocol validation |
 | Drain/resume/retire protocol and correlation IDs | Finish requests and release exclusive state before reporting drained |
-| Parked worker lifetime and supervisor EOF handling while parked | Stop serving on supervisor EOF; use `handoff::Commands` in async serving loops |
+| Parked worker lifetime, serving commands, EOF and internal Resume replies | Finish serving when the generation emits Stop |
 | Per-address first acceptance, readiness validation and retirement grace | Full service/state probes for each address; report acceptance timestamps |
 | Exposure deadline, safe admission, rollback and process reaping | Disposable-state migration/write/read checks before touching live state |
 | Private IPC directory safety and namespacing | Stable namespace, CLI/environment conventions and announcements |
@@ -38,20 +38,32 @@ An adapter supplies:
 6. `announce`: application-specific notification of automatic rollback.
 
 The worker takes ownership of inherited descriptors with `worker::Inherited`
-and calls `worker::run` with a serving-generation callback. That callback owns
-its runtime, request tasks and exclusive state. Before returning
-`Outcome::Quiesced`, it must finish requests, stop every accept loop, and destroy
-all state owners. Only then does the library send `Drained` and park the process.
+and calls `worker::run` with negotiated `worker::Options` and a callback receiving
+a `worker::Generation` handle. The handle creates tracked listeners, owns
+`accepting`/`accepted`/`ready` framing and negotiation, answers Resume internally,
+and exposes Quiesce/Stop events through async or synchronous waits. EOF becomes
+Stop. Both the hub and the TCP example use this same implementation.
+
+The application callback owns its runtime, request tasks and exclusive state.
+Before calling `Generation::quiesced(id)`, it must finish requests, stop every
+accept loop, and destroy all state owners. The handle verifies the request ID
+and gathers timestamps from stopped library listeners; applications cannot
+construct quiescence metadata themselves. Only after the callback returns and
+its runtime has dropped does the library send `Drained` and park the process.
 On resume the callback starts a new generation in the same process. While
 parked, the worker cannot accept or reopen application state; channel EOF or a
 park timeout exits instead. The application must also observe channel EOF while
-serving. `handoff::Commands` supports cancellation-safe asynchronous command
-reads without consuming a queued resume across a runtime teardown.
+serving. The handle supports cancellation-safe command reads without consuming
+a queued resume across a runtime teardown. `next_event_observing` lets an
+application supply its latest service/address observations for an internal
+Resume reply; the library still owns the reply and lifecycle metadata.
 
 Use `worker::run_checked` in an application's conformance fixtures to supply a
 PID-based check that no exclusive resource remains held after each generation
 returns quiesced. A failed check prevents `Drained` from being sent. The hub's
 process tests independently inspect SQLite handle ownership after drain.
+The check runs inside the admission budget. Keep a production check cheap;
+an expensive check can consume the 500 ms scheduling margin and defer upgrades.
 
 Before activation, candidates may write only durable changes the previous
 worker can still read. This obligation also applies after activation when

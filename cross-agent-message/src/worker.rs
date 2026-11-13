@@ -5,8 +5,7 @@ use crate::{
     supervisor::Config,
 };
 use anyhow::{Context, Result, bail};
-use process_supervisor::worker::Outcome;
-use std::collections::BTreeMap;
+use process_supervisor::worker::{Event, Generation, Options, Outcome};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,53 +25,21 @@ pub fn run(config: Config, dashboard: crate::dashboard::Dashboard) -> Result<()>
     }
     // Hash the executable before the application starts serving.
     let _ = crate::updates::binary();
-    process_supervisor::worker::run(inherited, |listeners, channel, request| {
-        serve(&config, dashboard.clone(), listeners, channel, request)
+    let options = Options::new(
+        hub::BUILD.to_string(),
+        config.handoff_protocol,
+        config.handoff_startup,
+    );
+    process_supervisor::worker::run(inherited, options, |generation| {
+        serve(&config, dashboard.clone(), generation)
     })
-}
-
-use process_supervisor::listener::{Listener, Timing as ListenerTiming};
-
-fn readiness(
-    config: &Config,
-    addresses: Vec<protocol::ListenAddress>,
-    timing: &[Arc<ListenerTiming>],
-    request: u64,
-) -> crate::addresses::Ready {
-    let mut first_accepted_ns = BTreeMap::<String, u64>::new();
-    for listener in timing {
-        let first = listener.first_accepted_ns();
-        if first != 0 {
-            first_accepted_ns
-                .entry(listener.address.clone())
-                .and_modify(|at| *at = (*at).min(first))
-                .or_insert(first);
-        }
-    }
-    crate::addresses::Ready {
-        build: hub::BUILD.to_string(),
-        addresses: addresses
-            .into_iter()
-            .map(crate::addresses::process_address)
-            .collect(),
-        handoff_protocol: if config.handoff_protocol == crate::handoff::VERSION {
-            crate::handoff::VERSION
-        } else {
-            0
-        },
-        request,
-        accepted: first_accepted_ns.keys().cloned().collect(),
-        first_accepted_ns,
-    }
 }
 
 #[tokio::main]
 async fn serve(
     config: &Config,
     dashboard: crate::dashboard::Dashboard,
-    listeners: &[std::net::TcpListener],
-    ready: &mut crate::handoff::Channel,
-    request: u64,
+    generation: &mut Generation<'_>,
 ) -> Result<Outcome> {
     let mut store = Store::open(&config.db).context("worker cannot open database")?;
     store.resume_holds(hub::now())?;
@@ -118,27 +85,10 @@ async fn serve(
     std::fs::set_permissions(&control, std::fs::Permissions::from_mode(0o600))?;
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    let mut commands = if config.handoff_protocol == crate::handoff::VERSION {
-        Some(crate::handoff::Commands::new(
-            tokio::net::UnixStream::from_std(ready.stream.try_clone()?)?,
-        ))
-    } else {
-        None
-    };
-    // Finish fallible startup before any task can accept a TCP connection.
-    let (accepted_tx, mut accepted_rx) = tokio::sync::mpsc::unbounded_channel();
-    let listeners = listeners
-        .iter()
-        .map(|listener| Listener::new(listener, request, accepted_tx.clone()))
-        .collect::<Result<Vec<_>>>()?;
-    let timing: Vec<Arc<ListenerTiming>> = listeners.iter().map(Listener::timing).collect();
-    if config.handoff_startup && config.handoff_protocol == crate::handoff::VERSION {
-        ready.write(
-            &format!("accepting {request}\n"),
-            std::time::Instant::now() + Duration::from_secs(1),
-        )?;
-    }
-    for listener in listeners {
+    // The generation owns listener instrumentation and lifecycle framing.
+    let listeners = generation.listeners()?;
+    generation.accepting()?;
+    for mut listener in listeners {
         let local_address = listener.timing().address.clone();
         let app = app.clone();
         let peer_hub = hub.clone();
@@ -241,13 +191,8 @@ async fn serve(
     tokio::pin!(stopped);
     let outcome = loop {
         tokio::select! {
-            Some(accepted) = accepted_rx.recv() => {
-                if config.handoff_startup && config.handoff_protocol == crate::handoff::VERSION {
-                    ready.write(&format!("accepted {}\n", serde_json::to_string(&accepted)?), std::time::Instant::now() + Duration::from_secs(1))?;
-                }
-            },
             addresses = &mut initial, if !ready_sent => {
-                ready.write(&format!("ready {}\n", serde_json::to_string(&readiness(config, addresses?, &timing, request))?), std::time::Instant::now() + Duration::from_secs(1))?;
+                generation.ready(addresses?.into_iter().map(crate::addresses::process_address).collect())?;
                 ready_sent = true;
                 tasks.spawn(crate::addresses::monitor(config.clone(), hub.clone(), shutdown.subscribe()));
             },
@@ -255,19 +200,9 @@ async fn serve(
             _ = term.recv() => break None,
             _ = interrupt.recv() => break None,
             _ = &mut stopped => break None,
-            command = async {
-                match commands.as_mut() {
-                    Some(stream) => stream.receive().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                match command? {
-                    crate::handoff::Command::Quiesce { id } => break Some(id),
-                    crate::handoff::Command::Retire { .. } => break None,
-                    crate::handoff::Command::Resume { id } => {
-                        ready.write(&format!("ready {}\n", serde_json::to_string(&readiness(config, hub.info().addresses, &timing, id))?), std::time::Instant::now() + Duration::from_secs(1))?;
-                    }
-                }
+            event = generation.next_event_observing(|| Some(hub.info().addresses.into_iter().map(crate::addresses::process_address).collect())) => match event? {
+                Event::Quiesce { id } => break Some(id),
+                Event::Stop => break None,
             },
             result = tasks.join_next() => { if let Some(result) = result { result??; } bail!("listener stopped unexpectedly"); },
         }
@@ -280,24 +215,8 @@ async fn serve(
     // drain window before dropping the runtime (the supervisor enforces it too).
 
     let _ = std::fs::remove_file(control);
-    Ok(match outcome {
-        None => Outcome::Stopped,
-        Some(id) => {
-            let mut stopped_accepting_ns = BTreeMap::<String, u64>::new();
-            for listener in timing.iter() {
-                let stopped = listener.stopped_accepting_ns();
-                if stopped != 0 {
-                    stopped_accepting_ns
-                        .entry(listener.address.clone())
-                        .and_modify(|at| *at = (*at).max(stopped))
-                        .or_insert(stopped);
-                }
-            }
-            Outcome::Quiesced {
-                id,
-                stopped_accepting_ns,
-                first_accepted_ns: readiness(config, Vec::new(), &timing, id).first_accepted_ns,
-            }
-        }
-    })
+    match outcome {
+        None => Ok(Outcome::Stopped),
+        Some(id) => generation.quiesced(id),
+    }
 }

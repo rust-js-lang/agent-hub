@@ -1,6 +1,6 @@
 //! Hub adapter for the reusable cooperative process supervisor.
 use anyhow::Result;
-use process_supervisor::{Application, BuildInfo};
+use process_supervisor::{Application, BuildInfo, SupervisorEvent};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, process::Command, time::Duration};
 
@@ -20,7 +20,7 @@ impl Application for HubApplication {
     fn name(&self) -> &'static str {
         "cross-agent-message"
     }
-    fn runtime(&self) -> process_supervisor::runtime::Runtime {
+    fn runtime() -> process_supervisor::runtime::Runtime {
         process_supervisor::runtime::Runtime {
             home_directory: ".cross-agent-message",
             temporary_prefix: "cam",
@@ -54,8 +54,13 @@ impl Application for HubApplication {
             .env("CROSS_AGENT_CONTROL_SOCK", config.control());
         command
     }
-    fn announce(&self, config: &Config, message: &str) -> Result<()> {
-        crate::upgrade::announce(config, message)
+    fn announce(&self, config: &Config, event: &SupervisorEvent) -> Result<()> {
+        match event {
+            SupervisorEvent::AutomaticRollback { build, crashes } => crate::upgrade::announce(
+                config,
+                &format!("The hub rolled back to build {build} after {crashes} worker crashes."),
+            ),
+        }
     }
 }
 
@@ -66,15 +71,7 @@ pub fn load_config(db: &Path) -> Result<Config> {
     process_supervisor::supervisor::load_config(db)
 }
 pub fn stop(db: &Path) -> Result<()> {
-    process_supervisor::supervisor::stop_in(
-        db,
-        HubApplication {
-            away_after: 0,
-            forget_after: 0,
-            reconnect_grace: 0,
-        }
-        .runtime(),
-    )
+    process_supervisor::supervisor::stop_in(db, HubApplication::runtime())
 }
 
 #[cfg(test)]
