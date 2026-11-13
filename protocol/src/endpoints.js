@@ -8,16 +8,16 @@
  *
  * An endpoint fixes both request and response types:
  * ```compile_fail
- * use protocol::endpoints::{Post, SEND};
- * let _: &Post<protocol::Register, protocol::Message> = &SEND;
+ * use protocol::endpoints::{Feature, Post, SEND};
+ * let _: &Post<protocol::Register, protocol::Message, Feature> = &SEND;
  * ```
  * ```compile_fail
- * use protocol::endpoints::{Post, SEND};
- * let _: &Post<protocol::Send, protocol::Agent> = &SEND;
+ * use protocol::endpoints::{Feature, Post, SEND};
+ * let _: &Post<protocol::Send, protocol::Agent, Feature> = &SEND;
  * ```
  * ```compile_fail
- * use protocol::endpoints::{Get, SEND};
- * let _: &Get<protocol::Send, protocol::Message> = &SEND;
+ * use protocol::endpoints::{Feature, Get, SEND};
+ * let _: &Get<protocol::Send, protocol::Message, Feature> = &SEND;
  * ```
  */
 
@@ -27,7 +27,7 @@ import {
   refusalDebug_fmt,
   refusalDeserialize_deserialize,
 } from "./lib.js";
-import { $displayJsonError, $fromJson, $index, $next, $parseInt, $utf8Bytes } from "@rust-js/std";
+import { $displayJsonError, $fromJson, $parseInt } from "@rust-js/std";
 
 export const Feature = {
   name(feature) {
@@ -164,42 +164,6 @@ export function missing(route, request, advertised, Request) {
   }
   return missing;
 }
-
-export const Get = {
-  new(name, path, needs) {
-    return { route: { name, method: "Get", path, kind: "Json", needs } };
-  },
-  url(get, query, QQuery) {
-    return url(get.route.path, query, QQuery);
-  },
-};
-
-export const Post = {
-  new(name, path, needs) {
-    return { route: { name, method: "Post", path, kind: "Json", needs } };
-  },
-  url(post) {
-    return post.route.path;
-  },
-};
-
-export const Stream = {
-  new(name, path, needs) {
-    return { route: { name, method: "Get", path, kind: "Stream", needs } };
-  },
-  url(stream, query, QQuery) {
-    return url(stream.route.path, query, QQuery);
-  },
-};
-
-export const Download = {
-  new(name, path, needs) {
-    return { route: { name, method: "Get", path, kind: "Download", needs } };
-  },
-  url(download, query, QQuery) {
-    return url(download.route.path, query, QQuery);
-  },
-};
 
 export const AGENTS = {
   route: { name: "AGENTS", method: "Get", path: "/api/agents", kind: "Json" },
@@ -423,19 +387,6 @@ export function event(data) {
   return event === "Unknown" ? { TAG: "Ok" } : { TAG: "Ok", _0: event };
 }
 
-export const __Query = {
-  pairs: __Query_pairs,
-  parse: __Query_parse,
-  protocol: (self) => undefined,
-};
-function __Query_pairs(self) {
-  return [];
-}
-
-function __Query_parse(_) {
-  return { TAG: "Ok" };
-}
-
 function value(pairs, key) {
   let result;
   for (let i = 0; i < pairs.length; i++) {
@@ -483,48 +434,10 @@ function boolean(pairs, key) {
   return { TAG: "Ok", _0: false };
 }
 
-function encode(text) {
-  const HEX = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 65, 66, 67, 68, 69, 70];
-  let encoded = "";
-  for (const byte of $utf8Bytes(text)) {
-    if (
-      (byte >= 48 && byte <= 57) ||
-      (byte >= 65 && byte <= 90) ||
-      (byte >= 97 && byte <= 122) ||
-      byte === 45 ||
-      byte === 95 ||
-      byte === 46 ||
-      byte === 126
-    ) {
-      encoded += String.fromCharCode(byte);
-    } else {
-      encoded += "%" + String.fromCharCode($index(HEX, byte >>> (4 & 7)));
-      encoded += String.fromCharCode($index(HEX, byte & 15));
-    }
-  }
-  return encoded;
-}
-
-export function url(path, query, Query) {
-  const pairs = Query.pairs(query);
-  let result = path;
-  const iter = pairs.entries();
-  let value;
-  while ((value = $next(iter)) != null) {
-    const index = value[0];
-    const key = value[1][0];
-    const value$1 = value[1][1];
-    result += index === 0 ? "?" : "&";
-    result += encode(key) + "=";
-    result += encode(value$1);
-  }
-  return result;
-}
-
 export const historyQuery = {
   pairs: historyQuery_pairs,
   parse: historyQuery_parse,
-  protocol: (history) => undefined,
+  protocol: (arg0) => query_protocol(arg0, historyQuery),
 };
 function historyQuery_pairs(history) {
   const pairs = [];
@@ -614,7 +527,7 @@ function eventsQuery_parse(pairs) {
 export const noticeQueryQuery = {
   pairs: noticeQueryQuery_pairs,
   parse: noticeQueryQuery_parse,
-  protocol: (noticeQuery) => undefined,
+  protocol: (arg0) => query_protocol(arg0, noticeQueryQuery),
 };
 function noticeQueryQuery_pairs(noticeQuery) {
   return [
@@ -658,7 +571,7 @@ function noticeQueryQuery_parse(pairs) {
 export const noticeSnapshotQuery = {
   pairs: noticeSnapshotQuery_pairs,
   parse: noticeSnapshotQuery_parse,
-  protocol: (noticeSnapshot) => undefined,
+  protocol: (arg0) => query_protocol(arg0, noticeSnapshotQuery),
 };
 function noticeSnapshotQuery_pairs(noticeSnapshot) {
   return [
@@ -698,4 +611,6 @@ function noticeSnapshotQuery_parse(pairs) {
     },
   };
 }
+
+function query_protocol(self, SelfQuery, dropSelf) {}
 //# sourceMappingURL=endpoints.js.map

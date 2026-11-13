@@ -6,6 +6,7 @@ publish = false
 description = "Lets AI coding agents message each other through a hub, with a dashboard of every message."
 
 [dependencies]
+typed-endpoint = { path = "../typed-endpoint", features = ["axum"] }
 sqlite-idempotency = { path = "../sqlite-idempotency" }
 process-supervisor = { path = "../process-supervisor" }
 anyhow = "1"

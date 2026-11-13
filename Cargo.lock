@@ -279,6 +279,7 @@ dependencies = [
  "tokio-stream",
  "tower",
  "tower-http",
+ "typed-endpoint",
  "ureq",
 ]
 
@@ -872,6 +873,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "typed-endpoint",
 ]
 
 [[package]]
@@ -1340,6 +1342,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "typed-endpoint"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tower",
 ]
 
 [[package]]

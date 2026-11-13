@@ -3,7 +3,9 @@
 use std::io::{BufRead, BufReader};
 
 use anyhow::{Context, Result, bail};
-use protocol::endpoints::{self as api, Download, Get, Post, Query, Request, Retry, Route, Stream};
+use protocol::endpoints::{
+    self as api, Download, Feature, Get, Post, Query, Request, Retry, Route, Stream,
+};
 use protocol::{
     Agent, Channel, Event, Hold, HubInfo, Inbox, Join, Message, ReadInbox, ReadMessage, Register,
     Release, Retire, Retired, Send, SignIn, Take, Taken,
@@ -72,7 +74,7 @@ impl Client {
         Ok(())
     }
 
-    fn requirements(&self, route: &Route, request: &impl Request) -> Result<()> {
+    fn requirements(&self, route: &Route<Feature>, request: &impl Request) -> Result<()> {
         if route.needs.is_none() && request.needs().is_empty() {
             return Ok(());
         }
@@ -99,7 +101,7 @@ impl Client {
     /// ```
     pub fn get<Q: Query + Request, Res: DeserializeOwned>(
         &self,
-        endpoint: &Get<Q, Res>,
+        endpoint: &Get<Q, Res, Feature>,
         query: &Q,
     ) -> Result<Res> {
         self.requirements(&endpoint.route, query)?;
@@ -128,7 +130,7 @@ impl Client {
     /// ```
     pub fn post<B: Serialize + Request, Res: DeserializeOwned>(
         &self,
-        endpoint: &Post<B, Res>,
+        endpoint: &Post<B, Res, Feature>,
         body: &B,
     ) -> Result<Res> {
         self.requirements(&endpoint.route, body)?;
@@ -406,7 +408,7 @@ impl Client {
 
     pub fn download<Q: Query + Request>(
         &self,
-        endpoint: &Download<Q, Vec<u8>>,
+        endpoint: &Download<Q, Vec<u8>, Feature>,
         query: &Q,
     ) -> Result<Vec<u8>> {
         self.requirements(&endpoint.route, query)?;
@@ -481,7 +483,7 @@ impl Client {
 
     pub fn stream<Q: Query + Request>(
         &self,
-        endpoint: &Stream<Q, Event>,
+        endpoint: &Stream<Q, Event, Feature>,
         query: &Q,
     ) -> Result<impl Iterator<Item = Result<Event>> + use<Q>> {
         self.requirements(&endpoint.route, query)?;

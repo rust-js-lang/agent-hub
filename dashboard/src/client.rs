@@ -1,6 +1,6 @@
 //! Browser transport for the same endpoint contracts used by the native CLI.
 use js::{date, settle};
-use protocol::endpoints::{self as api, Get, Post, Query, Request, Retry, Route};
+use protocol::endpoints::{self as api, Feature, Get, Post, Query, Request, Retry, Route};
 use serde::{Serialize, de::DeserializeOwned};
 use webapi::{
     BodyInit, EventSource, EventTargetExt, MessageEvent, RequestInit, abort_signal, event_source,
@@ -46,7 +46,7 @@ fn incompatible_protocol() -> Error {
 }
 
 async fn ask<Res: DeserializeOwned>(
-    route: &Route,
+    route: &Route<Feature>,
     path: &str,
     json: Option<&str>,
     nonce: Option<&str>,
@@ -119,7 +119,11 @@ pub async fn probe() -> Result<Advertised, Error> {
     })
 }
 
-fn require(route: &Route, request: &impl Request, info: &protocol::HubInfo) -> Result<(), Error> {
+fn require(
+    route: &Route<Feature>,
+    request: &impl Request,
+    info: &protocol::HubInfo,
+) -> Result<(), Error> {
     let missing = api::missing(route, request, &info.features);
     if missing.is_empty() {
         Ok(())
@@ -138,7 +142,7 @@ fn require(route: &Route, request: &impl Request, info: &protocol::HubInfo) -> R
 /// client::get(&protocol::endpoints::SEND, &());
 /// ```
 pub async fn get<Q: Query + Request, Res: DeserializeOwned>(
-    endpoint: &Get<Q, Res>,
+    endpoint: &Get<Q, Res, Feature>,
     query: &Q,
 ) -> Result<Res, Error> {
     if endpoint.route.needs.is_some() || !query.needs().is_empty() {
@@ -160,7 +164,7 @@ pub async fn get<Q: Query + Request, Res: DeserializeOwned>(
 /// }
 /// ```
 pub async fn post<B: Serialize + Request, Res: DeserializeOwned>(
-    endpoint: &Post<B, Res>,
+    endpoint: &Post<B, Res, Feature>,
     body: &B,
 ) -> Result<Res, Error> {
     let needs = endpoint.route.needs.is_some() || !body.needs().is_empty();
@@ -214,7 +218,7 @@ pub async fn post<B: Serialize + Request, Res: DeserializeOwned>(
 /// Unknown types are additive; malformed known types reach the caller as an
 /// error without replacing a working connection.
 pub fn stream<Q: Query + Request>(
-    endpoint: &api::Stream<Q, protocol::Event>,
+    endpoint: &api::Stream<Q, protocol::Event, Feature>,
     query: &Q,
     advertised: &Advertised,
     receive: impl Fn(&'static EventSource, Result<protocol::Event, String>) + 'static,

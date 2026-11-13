@@ -5,7 +5,6 @@
 import { Error$ as Error } from "./client.js";
 import * as Client from "./client.js";
 import {
-  __Query,
   __Request,
   historyQuery,
   historyRequest,
@@ -27,6 +26,7 @@ import {
   sendSerialize_serialize,
   signInSerialize_serialize,
 } from "../../protocol/src/lib.js";
+import { __Query } from "../../typed-endpoint/src/lib.js";
 import { $json, $try } from "@rust-js/std";
 
 let reloading = false;

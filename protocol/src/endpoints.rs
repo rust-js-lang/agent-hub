@@ -5,21 +5,23 @@
 //!
 //! An endpoint fixes both request and response types:
 //! ```compile_fail
-//! use protocol::endpoints::{Post, SEND};
-//! let _: &Post<protocol::Register, protocol::Message> = &SEND;
+//! use protocol::endpoints::{Feature, Post, SEND};
+//! let _: &Post<protocol::Register, protocol::Message, Feature> = &SEND;
 //! ```
 //! ```compile_fail
-//! use protocol::endpoints::{Post, SEND};
-//! let _: &Post<protocol::Send, protocol::Agent> = &SEND;
+//! use protocol::endpoints::{Feature, Post, SEND};
+//! let _: &Post<protocol::Send, protocol::Agent, Feature> = &SEND;
 //! ```
 //! ```compile_fail
-//! use protocol::endpoints::{Get, SEND};
-//! let _: &Get<protocol::Send, protocol::Message> = &SEND;
+//! use protocol::endpoints::{Feature, Get, SEND};
+//! let _: &Get<protocol::Send, protocol::Message, Feature> = &SEND;
 //! ```
 
 use serde::de::DeserializeOwned;
 
 use crate::{Event, Refusal};
+
+pub use typed_endpoint::{Download, Get, Kind, Method, Post, Query, Route, Stream};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Feature {
@@ -151,31 +153,13 @@ impl Request for NoticeSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Method {
-    Get,
-    Post,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    Json,
-    Stream,
-    Download,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Route {
-    pub name: &'static str,
-    pub method: Method,
-    pub path: &'static str,
-    pub kind: Kind,
-    pub needs: Option<Feature>,
-}
-
 /// Return every unmet requirement, once, so transports can refuse before
 /// sending a request whose additive fields an old hub would ignore.
-pub fn missing(route: &Route, request: &impl Request, advertised: &[String]) -> Vec<Feature> {
+pub fn missing(
+    route: &Route<Feature>,
+    request: &impl Request,
+    advertised: &[String],
+) -> Vec<Feature> {
     let mut required = request.needs();
     if let Some(feature) = route.needs {
         required.insert(0, feature);
@@ -189,54 +173,10 @@ pub fn missing(route: &Route, request: &impl Request, advertised: &[String]) -> 
     missing
 }
 
-macro_rules! endpoint_kind {
-    ($kind:ident, $method:ident, $wire:ident) => {
-        pub struct $kind<Req, Res> {
-            pub route: Route,
-            types: std::marker::PhantomData<fn(Req) -> Res>,
-        }
-
-        impl<Req, Res> $kind<Req, Res> {
-            const fn new(name: &'static str, path: &'static str, needs: Option<Feature>) -> Self {
-                Self {
-                    route: Route {
-                        name,
-                        method: Method::$method,
-                        path,
-                        kind: Kind::$wire,
-                        needs,
-                    },
-                    types: std::marker::PhantomData,
-                }
-            }
-        }
-    };
-}
-
-endpoint_kind!(Get, Get, Json);
-endpoint_kind!(Post, Post, Json);
-endpoint_kind!(Stream, Get, Stream);
-endpoint_kind!(Download, Get, Download);
-
-macro_rules! query_url {
-    ($($kind:ident),*) => { $(
-        impl<Q: Query, Res> $kind<Q, Res> {
-            pub fn url(&self, query: &Q) -> String { url(self.route.path, query) }
-        }
-    )* };
-}
-query_url!(Get, Stream, Download);
-
-impl<B, Res> Post<B, Res> {
-    pub fn url(&self) -> &'static str {
-        self.route.path
-    }
-}
-
 macro_rules! endpoints {
     ($($name:ident: $kind:ident<$req:ty, $res:ty> = $path:expr, $needs:expr;)*) => {
-        $(pub const $name: $kind<$req, $res> = $kind::new(stringify!($name), $path, $needs);)*
-        pub const ALL: &[Route] = &[$($name.route,)*];
+        $(pub const $name: $kind<$req, $res, Feature> = $kind::new(stringify!($name), $path, $needs);)*
+        pub const ALL: &[Route<Feature>] = &[$($name.route,)*];
     };
 }
 
@@ -336,27 +276,6 @@ pub fn event(data: &str) -> Result<Option<Event>, serde_json::Error> {
     }
 }
 
-pub trait Query: Sized {
-    fn pairs(&self) -> Vec<(&'static str, String)>;
-    fn parse(pairs: &[(String, String)]) -> Result<Self, String>;
-
-    /// Streams carry their protocol here because EventSource cannot set a
-    /// request header. Ordinary endpoint queries make no protocol claim.
-    fn protocol(&self) -> Option<u32> {
-        None
-    }
-}
-
-impl Query for () {
-    fn pairs(&self) -> Vec<(&'static str, String)> {
-        Vec::new()
-    }
-
-    fn parse(_: &[(String, String)]) -> Result<Self, String> {
-        Ok(())
-    }
-}
-
 fn value<'a>(pairs: &'a [(String, String)], key: &str) -> Result<Option<&'a str>, String> {
     let mut result = None;
     for (name, value) in pairs {
@@ -382,33 +301,6 @@ fn boolean(pairs: &[(String, String)], key: &str) -> Result<bool, String> {
         Some("true") => Ok(true),
         Some(text) => Err(format!("invalid {key}: {text}")),
     }
-}
-
-fn encode(text: &str) -> String {
-    const HEX: &[u8] = b"0123456789ABCDEF";
-    let mut encoded = String::new();
-    for &byte in text.as_bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
-            encoded.push(byte as char);
-        } else {
-            encoded.push('%');
-            encoded.push(HEX[(byte >> 4) as usize] as char);
-            encoded.push(HEX[(byte & 15) as usize] as char);
-        }
-    }
-    encoded
-}
-
-pub fn url(path: &str, query: &impl Query) -> String {
-    let pairs = query.pairs();
-    let mut result = path.to_string();
-    for (index, (key, value)) in pairs.iter().enumerate() {
-        result.push(if index == 0 { '?' } else { '&' });
-        result.push_str(&encode(key));
-        result.push('=');
-        result.push_str(&encode(value));
-    }
-    result
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -550,6 +442,7 @@ impl Query for NoticeSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use typed_endpoint::url;
 
     #[test]
     fn all_additive_inbox_behavior_is_gated_including_sender_alone() {

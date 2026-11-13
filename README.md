@@ -833,6 +833,12 @@ is configured.
 
 ## Work on it
 
+HTTP endpoint descriptors, query URLs and Axum adapters come from the reusable
+[`typed-endpoint`](typed-endpoint/README.md) crate. `protocol` owns the messaging endpoint
+catalog, wire models, feature requirements and retry policy. The hub supplies
+its state, refusal format and stream-version checks to the generic server
+adapter; native and browser clients consume the same endpoint types.
+
 ```bash
 cargo test --release -p cross-agent-message -p protocol  # native and real upgrade timing
 cargo run -p cross-agent-message -- serve
@@ -876,6 +882,7 @@ is committed, so diffs show what a change does to it.
 | Directory | What |
 |---|---|
 | `protocol/` | The routes and their JSON, shared by the hub, the command line and the dashboard. |
+| `typed-endpoint/` | Reusable typed endpoint contracts, query URLs and optional Axum server adapters; application endpoints and wire policy stay in `protocol/` and the hub. |
 | `cross-agent-message/` | The hub (`hub.rs`), its SQLite store (`store.rs`), and the command line (`main.rs`, `client.rs`). |
 | `dashboard/` | The page, in Rust, compiled to JSX by rust-js. |
 | `web/` | The dashboard's HTML, CSS and Vite config. |

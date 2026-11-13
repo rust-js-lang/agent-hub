@@ -20,11 +20,11 @@ jobs:
           persist-credentials: false
       - name: Build and test current protocol
         # Handoff deadlines apply to the optimized executable we distribute.
-        run: cargo test --release --locked -p sqlite-idempotency -p process-supervisor -p cross-agent-message -p protocol
+        run: cargo test --release --locked -p typed-endpoint -p sqlite-idempotency -p process-supervisor -p cross-agent-message -p protocol
       - name: Check supervisor and application boundary
         run: |
           rustup component add clippy
-          cargo clippy --release --locked -p sqlite-idempotency -p process-supervisor -p cross-agent-message --all-targets -- -D warnings
+          cargo clippy --release --locked -p typed-endpoint -p sqlite-idempotency -p process-supervisor -p cross-agent-message --all-targets -- -D warnings
       - name: Exercise supervisor with an independent TCP application
         run: |
           cargo build --release --locked -p process-supervisor --example echo
@@ -49,7 +49,7 @@ jobs:
         # contract tests with Node; compilation alone is not this check.
         env:
           CARGO_BUILD_JOBS: 2
-        run: node rust-js/tooling/cli.js test --package protocol
+        run: node rust-js/tooling/cli.js test --package protocol --package typed-endpoint
       - name: Verify typed browser contracts and generated client
         env:
           CARGO_BUILD_JOBS: 2

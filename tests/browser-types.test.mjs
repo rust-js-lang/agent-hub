@@ -5,10 +5,14 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { findCompiler } from "../rust-js/tooling/build.js";
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const client = join(root, "dashboard/src/client.rs");
 const cli = join(root, "rust-js/tooling/cli.js");
+// Temp fixtures must use this application's compiler, not an unrelated native
+// package installed above the temporary directory.
+const compiler = await findCompiler(root);
 const lock = readFileSync(join(root, "Cargo.lock"), "utf8");
 const version = name => {
   const match = lock.match(new RegExp(`name = "${name}"\\nversion = "([^"]+)"`));
@@ -57,7 +61,7 @@ serde_json = "=${version("serde_json")}"
         // It does not emit over the real client.rs's generated JavaScript.
         return spawnSync(process.execPath, [cli, "clippy"], {
           cwd: dir, encoding: "utf8", timeout: 40_000,
-          env: { ...process.env, CARGO_NET_OFFLINE: "true", RUSTC_WRAPPER: "",
+          env: { ...process.env, RUST_JS_COMPILER: compiler, CARGO_NET_OFFLINE: "true", RUSTC_WRAPPER: "",
             CARGO_TARGET_DIR: join(root, "target/browser-type-contracts") },
         });
       };

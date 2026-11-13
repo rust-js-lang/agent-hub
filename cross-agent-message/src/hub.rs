@@ -417,6 +417,7 @@ pub fn router(hub: Arc<Hub>, dashboard: impl Into<Dashboard>) -> Router {
 /// The actual registry is checked against protocol::endpoints::ALL as sets.
 pub(crate) fn api_routes() -> Routes {
     Routes::new()
+        .with_stream_validation(crate::routes::protocol)
         .get(&api::AGENTS, agents)
         .post(&api::REGISTER, register)
         .get(&api::HISTORY, history)
