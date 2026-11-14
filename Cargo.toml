@@ -12,3 +12,10 @@ members = ["typed-endpoint", "sqlite-idempotency", "process-supervisor", "protoc
 # dependencies of `dashboard`, not members of this workspace.
 exclude = ["rust-js"]
 resolver = "3"
+
+# Keep the lockfile valid before rust-js generates its ignored .cargo config.
+# These are the same compatibility crates used by the browser compiler.
+[patch.crates-io]
+wasm-bindgen = { path = "rust-js/tooling/compat/wasm-bindgen" }
+wasm-bindgen-macro = { path = "rust-js/tooling/compat/wasm-bindgen-macro" }
+rust-js-builtins = { path = "rust-js/builtins" }
