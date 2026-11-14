@@ -2,6 +2,13 @@
 
 Status: accepted direction; implementation is incremental.
 
+Implemented first slice: the stdio MCP bridge and five messaging tools share the
+existing native HTTP client. Six integration tests exercise real bridge processes,
+modern and legacy MCP startup, native-client interoperability, explicit read
+acknowledgments, recipient isolation, channel fanout, and retirement refusal.
+Managed sessions, automatic turns, delivery records, and scoped credentials remain
+planned; the bridge alone does not launch an agent.
+
 ## Goal
 
 Run a managed Codex session and a managed Claude Code session on one machine.

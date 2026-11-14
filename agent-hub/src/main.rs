@@ -113,6 +113,12 @@ enum Command {
         #[command(flatten)]
         me: Me,
     },
+    /// Expose messaging tools over MCP stdio, bound to one agent identity.
+    /// Reads leave messages unread until ack_messages is called.
+    Mcp {
+        #[command(flatten)]
+        me: Me,
+    },
     /// Send a message to another agent, by its name as `agents` lists it,
     /// or to every other agent in a channel, `'#everyone'`. It waits in
     /// each one's inbox until that agent reads it.
@@ -280,6 +286,7 @@ fn run() -> Result<()> {
             | Command::Worker { .. }
             | Command::Upgrade { .. }
             | Command::Service { .. }
+            | Command::Mcp { .. }
     ) {
         let info = client.check_protocol()?;
         let _ = agent_hub::updates::warn_if_behind(
@@ -363,6 +370,7 @@ fn run() -> Result<()> {
             )
         }
         Command::Agents { me } => agents(&client, &me),
+        Command::Mcp { me } => agent_hub::mcp::serve(&cli.hub, &me.name),
         Command::Send { me, to, message } => send(&client, &me, &to, &message),
         Command::Inbox {
             me,

@@ -218,6 +218,51 @@ A name is letters, digits, `-`, `_` and `.`, and must be unique on the hub:
 for example `claude-api`, `codex-web`. An agent is listed once it has run a
 command. You can't send to an agent the hub hasn't seen, or to yourself.
 
+### Connect through MCP
+
+`agent-hub mcp --as NAME` exposes messaging tools over stdio, using the same
+hub and inboxes as the CLI. Start the hub with `agent-hub serve`, then configure
+each MCP host to launch its own bridge with a unique agent name. For example,
+an MCP host's server configuration can use:
+
+```json
+{
+  "mcpServers": {
+    "agent-hub": {
+      "command": "/absolute/path/to/agent-hub",
+      "args": ["mcp", "--as", "claude-api"]
+    }
+  }
+}
+```
+
+Use that host's MCP configuration format; the example shows the command and
+arguments, not a configuration file shared by every host. Give the Codex bridge
+another name, such as `codex-api`. The bridge registers its agent automatically.
+Add `--hub http://studio:7878` to the arguments to reach a hub on your private
+network, or set `AGENT_HUB_URL` in the bridge's environment.
+
+| Tool | Does |
+|---|---|
+| `list_agents` | Lists registered agents, including this bridge's agent. |
+| `send_message` | Sends `{ "to": "codex-api", "body": "Please review the parser." }`; accepts `#channel` recipients and returns an array of stored messages. |
+| `read_inbox` | Fetches unread messages in full without marking them read; optional `max` (1–100, default 20) and `channel` filters. |
+| `read_message` | Fetches a received message by `id`, without marking it read. |
+| `ack_messages` | Marks the supplied `ids` read after delivery; returns IDs newly acknowledged. |
+
+The sender is fixed by `--as`; tools cannot choose another sender. Reads remain
+available until acknowledged, so a dropped response does not consume mail.
+The bridge requires a hub supporting deferred reads and agent lifecycle, and
+refuses an older hub before registering or reading. A bridge cannot use a name
+while it is retired; explicitly run `agent-hub agents --as NAME` to start a new life
+before reconnecting. Closing a bridge does not retire its name.
+
+This bridge supplies tools to a running host. Automatic incoming-message turns
+are a separate, planned managed-worker feature; connecting the bridge alone does
+not start an idle agent's next turn. The [managed-agent design](docs/design/managed-agents.md)
+describes that next stage. The hub retains its existing private-network trust
+model: a fixed bridge identity is not per-agent authentication.
+
 ### Client and hub versions
 
 Protocol 1 clients and hubs accept additive fields from other releases. Build

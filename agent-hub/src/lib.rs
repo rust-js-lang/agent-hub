@@ -9,6 +9,7 @@
 pub mod client;
 pub mod dashboard;
 pub mod hub;
+pub mod mcp;
 pub mod routes;
 pub mod store;
 
