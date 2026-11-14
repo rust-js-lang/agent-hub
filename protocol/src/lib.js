@@ -9,7 +9,17 @@
  * against all three.
  */
 
-import { $byteLen, $debugStr, $json } from "@rust-js/std";
+import {
+  $byteLen,
+  $debugStr,
+  $json,
+  $sink,
+  $writeDebugOption,
+  $writeDebugStr,
+  $writeDebugStruct,
+} from "@rust-js/std";
+
+export const GENERATION_HEADER = "agent-hub-generation";
 
 /**
  * `GET`: every agent the hub knows, as [`Agent`]s. `POST` a [`Register`]:
@@ -894,7 +904,36 @@ export function releaseDeserialize_deserialize(json) {
 
 /** Why the hub refused a request: the body of every answer that isn't 200. */
 export function refusalDebug_fmt(refusal) {
-  return `Refusal { code: ${refusal.code == null ? "None" : `Some(${$debugStr(refusal.code)})`}, reason: ${$debugStr(refusal.reason)} }`;
+  const f = $sink();
+  $writeDebugStruct(
+    f,
+    "Refusal",
+    [
+      [
+        "code",
+        refusal.code,
+        (f, value) => {
+          $writeDebugOption(
+            f,
+            value,
+            (f, value) => {
+              $writeDebugStr(f, value);
+            },
+            false,
+          );
+        },
+      ],
+      [
+        "reason",
+        refusal.reason,
+        (f, value) => {
+          $writeDebugStr(f, value);
+        },
+      ],
+    ],
+    false,
+  );
+  return f.done();
 }
 
 export function refusalSerialize_serialize(refusal, json) {

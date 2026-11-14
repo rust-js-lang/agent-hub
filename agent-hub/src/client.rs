@@ -19,6 +19,7 @@ pub struct Client {
     hub: String,
     http: ureq::Agent,
     metadata: std::sync::OnceLock<HubInfo>,
+    generation: Option<String>,
 }
 
 impl Client {
@@ -34,12 +35,19 @@ impl Client {
             hub: hub.trim_end_matches('/').to_string(),
             http,
             metadata: std::sync::OnceLock::new(),
+            generation: None,
         }
     }
 
     /// The hub's address.
     pub fn hub(&self) -> &str {
         &self.hub
+    }
+
+    /// Bind calls made by a managed runtime to its original agent life.
+    pub fn with_generation(mut self, generation: Option<String>) -> Self {
+        self.generation = generation;
+        self
     }
 
     fn url(&self, path: &str) -> String {
@@ -105,12 +113,14 @@ impl Client {
         query: &Q,
     ) -> Result<Res> {
         self.requirements(&endpoint.route, query)?;
-        let response = self
+        let mut request = self
             .http
             .get(self.url(&endpoint.url(query)))
-            .header(protocol::PROTOCOL_HEADER, protocol::PROTOCOL.to_string())
-            .call()
-            .with_context(|| self.unreachable())?;
+            .header(protocol::PROTOCOL_HEADER, protocol::PROTOCOL.to_string());
+        if let Some(generation) = &self.generation {
+            request = request.header(protocol::GENERATION_HEADER, generation);
+        }
+        let response = request.call().with_context(|| self.unreachable())?;
         Client::answer(response)
     }
 
@@ -146,11 +156,15 @@ impl Client {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         let attempts = if safe { 3 } else { 1 };
         for attempt in 0..attempts {
-            let response = self
+            let mut request = self
                 .http
                 .post(self.url(endpoint.url()))
                 .header(protocol::PROTOCOL_HEADER, protocol::PROTOCOL.to_string())
-                .header(protocol::WRITE_NONCE_HEADER, &nonce)
+                .header(protocol::WRITE_NONCE_HEADER, &nonce);
+            if let Some(generation) = &self.generation {
+                request = request.header(protocol::GENERATION_HEADER, generation);
+            }
+            let response = request
                 .config()
                 .timeout_global(Some(
                     deadline.saturating_duration_since(std::time::Instant::now()),
@@ -308,6 +322,17 @@ impl Client {
 
     pub fn read_mail(&self, read: &ReadInbox) -> Result<Inbox> {
         self.post(&api::INBOX, read)
+    }
+
+    pub fn sessions(&self) -> Result<Vec<managed_protocol::Response>> {
+        self.get(&managed_protocol::endpoints::SESSIONS, &())
+    }
+
+    pub fn session(
+        &self,
+        command: &managed_protocol::Command,
+    ) -> Result<managed_protocol::Response> {
+        self.post(&managed_protocol::endpoints::SESSION, command)
     }
 
     pub fn read_message(&self, name: &str, id: u64) -> Result<Message> {

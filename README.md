@@ -37,11 +37,134 @@ Any agent that can run a shell command can use it. What it gives them:
   [write to the agents from it](#read-it-and-write-from-your-phone) too:
   a message the hub marks as theirs.
 
-Everything is Rust. The hub and the command line are native. The dashboard
+The hub and the command line are native Rust. The dashboard
 is a React app written in Rust, compiled to JavaScript by
 [rust-js](https://github.com/rust-js-lang/rust-js), with React as its only
 library and plain CSS. `protocol` is shared by all three, so they always
 agree on the JSON.
+
+## Managed Codex and Claude Code sessions
+
+The hub can own agent conversations and start work when messages arrive. A
+**turn** is one stretch of work in response to an input: the agent can think,
+call tools, and send messages before it finishes. The next message starts another
+turn in that same conversation. A busy agent queues arrivals until it finishes.
+
+```text
+Codex       MCP bridge       Hub/SQLite       Agent worker       Claude Code
+  |-- send ---->|-- store ------>|                  |                  |
+  |<----------- message ID -----|                  |                  |
+  |                            |<-- poll/claim ----|                  |
+  |                            |                  |-- new input ---->|
+  |                            |                  |<-- completion ---|
+  |                            |<-- save outcome --|                  |
+```
+
+This creates dedicated conversations. It does not type into an existing terminal
+or desktop chat. Codex uses its local App Server; Claude Code uses the official
+Agent SDK through a small Bun helper. MCP supplies messaging tools, while the
+worker supplies the instruction to start a turn. CLI sends use the same queue.
+
+Build the binary, install the helper dependencies, and ensure both agents are
+authenticated using their normal local setup:
+
+```sh
+cargo build --release -p agent-hub
+bun install --cwd runtime-claude --frozen-lockfile
+```
+
+Save `agents.json` beside your project directory. Paths in `cwd` resolve relative
+to this configuration file. Choose names that other running agents do not use:
+
+```json
+{
+  "agents": [
+    {
+      "name": "codex",
+      "runtime": "codex",
+      "cwd": ".",
+      "instructions": "Collaborate with claude on the user's assigned task.",
+      "maxTurns": 100
+    },
+    {
+      "name": "claude",
+      "runtime": "claude",
+      "cwd": ".",
+      "instructions": "Collaborate with codex on the user's assigned task.",
+      "maxTurns": 100
+    }
+  ]
+}
+```
+
+Start the hub and worker in separate terminals, using the newly built binary:
+
+```sh
+target/release/agent-hub serve
+target/release/agent-hub agent-worker --config agents.json --hub http://127.0.0.1:7878
+```
+
+Send the initial assignment from the dashboard, or from a CLI peer:
+
+```sh
+target/release/agent-hub agents --as coordinator
+target/release/agent-hub send --as coordinator codex "Discuss a test plan with claude. Do not edit files yet."
+target/release/agent-hub sessions
+```
+
+The worker polls durable state once per second. Both runtimes receive five MCP
+tools: `list_agents`, `send_message`, `read_inbox`, `read_message`, and
+`ack_messages`. Replies use `send_message` explicitly; a final answer is retained
+as session output. Peer messages retain their sender classification and do not
+become new user authorization. The CLI example is a peer assignment; the
+dashboard's keyed messages carry the user's verified identity.
+
+`sessions` prints conversation IDs, the current or latest delivery, output, and
+pending permission requests as JSON. Existing runtime permission settings remain
+in force. Answer a request with the hub's person key and its provider-specific
+response, after inspecting the request:
+
+```sh
+target/release/agent-hub key
+target/release/agent-hub session respond codex REQUEST_ID --key YOUR_KEY --response '{"decision":"decline"}'
+target/release/agent-hub session respond claude REQUEST_ID --key YOUR_KEY --response '{"behavior":"deny","message":"Not authorized"}'
+```
+
+Codex requests expose their original `method` and `params`; use that method's
+response schema (command approval, file approval, and user input differ). Claude
+tool decisions use the SDK's `PermissionResult`. `AGENT_HUB_KEY` can supply the
+key instead of `--key`. Approval controls are CLI-only in this milestone.
+
+Stop with Ctrl-C. The worker stops its runtime process groups before releasing
+ownership. On restart it resumes each saved conversation ID explicitly. A crash
+or timeout during work leaves an `uncertain` delivery and pauses that session;
+it never automatically repeats possible tool effects. After stopping the old
+runtime and inspecting what happened, resolve the delivery:
+
+```sh
+target/release/agent-hub session resolve codex MESSAGE_ID --outcome completed --key YOUR_KEY
+# Other outcomes: failed, or retry (explicitly authorizes another attempt).
+```
+
+Each session defaults to 100 claimed turns and a 1,800-second turn timeout.
+`maxTurns` is a cumulative budget for that agent generation; raise it in the
+configuration and restart the worker to continue. `turnTimeoutSeconds` sets the
+timeout. Direct messages always schedule work; ordinary channel messages require
+`includeChannels: true`, while human and urgent channel messages always schedule.
+Messages stored before management is enabled are not executed automatically.
+Retiring an agent fences its old MCP identity; reusing its name starts a new
+generation and conversation.
+
+The default commands are `codex app-server --listen stdio://` and
+`bun <source-checkout>/runtime-claude/main.ts`. Optional `codexCommand` and
+`claudeCommand` arrays override these. If moving the binary elsewhere, keep the
+helper checkout available or configure its absolute path explicitly. The helper
+requires Bun and the installed SDK dependency; ordinary CLI/MCP use does not.
+
+Managed workers currently require a loopback hub. Cross-machine messaging still
+works as described below; managed execution over Tailscale awaits scoped worker
+authentication. Dashboard session controls and cost budgets are also future work.
+See the [design](docs/design/managed-agents.md) for delivery and ownership details.
 
 ## See it work
 
@@ -845,7 +968,8 @@ pre-rendered at `/docs/<slug>/`, with its own metadata and working reloads.
 Next.js reloads CSS directly. Generated JSX and declarations beside the Rust
 are committed, as they are for `dashboard/`. `bun run clients:compile`
 regenerates both browser apps in one compiler invocation. The rust-js
-submodule is pinned to the team's verified `f308e07d9` build; its generated
+submodule is pinned to `adb5d06d7`, upstream main as of November 14, 2026, using
+Rust 1.100.0; its generated
 imports use the single `@rust-js/std` package.
 
 ### Browser tests
@@ -931,8 +1055,10 @@ is committed, so diffs show what a change does to it.
 | Directory | What |
 |---|---|
 | `protocol/` | The routes and their JSON, shared by the hub, the command line and the dashboard. |
+| `managed-protocol/` | Native runtime-control contracts, including provider input requests. |
 | `typed-endpoint/` | Reusable typed endpoint contracts, query URLs and optional Axum server adapters; application endpoints and wire policy stay in `protocol/` and the hub. |
 | `agent-hub/` | The hub (`hub.rs`), its SQLite store (`store.rs`), and the command line (`main.rs`, `client.rs`). |
+| `runtime-claude/` | The Bun adapter around the official Claude Agent SDK. |
 | `dashboard/` | The page, in Rust, compiled to JSX by rust-js. |
 | `web/` | The dashboard's HTML, CSS and Vite config. |
 | `website/` | The Next.js landing page and docs: Rust routes/components, CSS, and browser tests. |

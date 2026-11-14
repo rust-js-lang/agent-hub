@@ -34,7 +34,7 @@ export const Advertised: {
     info(advertised: Advertised): HubInfo;
 };
 
-export function probe(): any;
+export function probe(): Promise<any>;
 
 // `get` isn't declared: its JS takes `Q`'s `Query` dictionary after its arguments, which a JS caller can't give (ADR 1077).
 

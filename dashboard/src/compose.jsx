@@ -106,15 +106,17 @@ export function Compose({ agents, channels, selected, me, onMe }) {
   }
   const ready = to !== "" && $trim(body) !== "";
   const to$1 = to;
-  async function send() {
-    const value = await Api.send(me, to$1, body);
-    if (value.TAG === "Ok") {
-      Api.setDraft("");
-      setBody("");
-      setProblem(undefined);
-    } else {
-      setProblem(value._0);
-    }
+  function send() {
+    (async () => {
+      const value = await Api.send(me, to$1, body);
+      if (value.TAG === "Ok") {
+        Api.setDraft("");
+        setBody("");
+        setProblem(undefined);
+      } else {
+        setProblem(value._0);
+      }
+    })();
   }
   function signOut() {
     Api.signOut();

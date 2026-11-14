@@ -27,7 +27,16 @@ import {
   refusalDebug_fmt,
   refusalDeserialize_deserialize,
 } from "./lib.js";
-import { $displayJsonError, $fromJson, $parseInt } from "@rust-js/std";
+import {
+  $displayJsonError,
+  $fromJson,
+  $parseInt,
+  $sink,
+  $writeDebugStruct,
+  $writeInteger,
+  $writePadded,
+  $writingInto,
+} from "@rust-js/std";
 
 export const Feature = {
   name(feature) {
@@ -46,6 +55,8 @@ export const Feature = {
         return "notice-id";
       case "WriteNonce":
         return "write-nonce";
+      case "ManagedSessions":
+        return "managed-sessions";
     }
   },
 };
@@ -296,10 +307,35 @@ export const ALL = [
 ];
 
 /** Keep the HTTP status even when an old hub has no refusal code. */
-export const refusedDebug = { fmt: refusedDebug_fmt };
+export const refusedDebug = {
+  fmt: refusedDebug_fmt,
+  fmtInto: (f, value) => $writingInto(f, refusedDebug_fmt, value),
+};
 
 function refusedDebug_fmt(refused) {
-  return `Refused { status: ${refused.status}, refusal: ${refusalDebug_fmt(refused.refusal)} }`;
+  const f = $sink();
+  $writeDebugStruct(
+    f,
+    "Refused",
+    [
+      [
+        "status",
+        refused.status,
+        (f, value) => {
+          $writeInteger(f, value);
+        },
+      ],
+      [
+        "refusal",
+        refused.refusal,
+        (f, value) => {
+          $writingInto(f, refusalDebug_fmt, value);
+        },
+      ],
+    ],
+    false,
+  );
+  return f.done();
 }
 
 export const Refused = {
@@ -329,9 +365,14 @@ export const Refused = {
   },
 };
 
-export const refusedDisplay = { fmt: refusedDisplay_fmt };
+export const refusedDisplay = {
+  fmt: refusedDisplay_fmt,
+  fmtInto: (f, value) => $writingInto(f, refusedDisplay_fmt, value),
+};
 function refusedDisplay_fmt(refused) {
-  return refused.refusal.reason;
+  const f = $sink();
+  $writePadded(f, refused.refusal.reason);
+  return f.done();
 }
 
 const $refusedError_source = () => undefined;

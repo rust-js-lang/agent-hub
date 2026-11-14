@@ -32,6 +32,7 @@ pub enum Feature {
     BoundedSkip,
     NoticeId,
     WriteNonce,
+    ManagedSessions,
 }
 
 impl Feature {
@@ -44,6 +45,7 @@ impl Feature {
             Self::BoundedSkip => "bounded-skip",
             Self::NoticeId => "notice-id",
             Self::WriteNonce => "write-nonce",
+            Self::ManagedSessions => "managed-sessions",
         }
     }
 }
@@ -82,6 +84,7 @@ macro_rules! retry_requests {
 }
 retry_requests!(Retry::Always; crate::Join, crate::SignIn, crate::Retire, crate::Acknowledge);
 retry_requests!(Retry::Feature(Feature::WriteNonce); crate::Send, crate::Take, crate::Release);
+
 
 impl Request for crate::ReadInbox {
     fn needs(&self) -> Vec<Feature> {

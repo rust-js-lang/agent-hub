@@ -104,13 +104,13 @@ export function me() {
   if (storage == null) {
     return;
   }
-  const value = storage.getItem(NAME);
-  if (value != null) {
-    const value$1 = storage.getItem(KEY);
-    if (value$1 != null) {
+  const getItem = storage.getItem(NAME);
+  if (getItem != null) {
+    const value = storage.getItem(KEY);
+    if (value != null) {
       return {
-        name: value,
-        key: value$1,
+        name: getItem,
+        key: value,
       };
     }
   }

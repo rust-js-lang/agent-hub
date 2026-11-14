@@ -16,6 +16,9 @@ pub struct Store {
     db: Connection,
 }
 
+mod managed;
+pub use managed::SessionError;
+
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS agents (
         name TEXT PRIMARY KEY,
@@ -73,6 +76,7 @@ const ADDED: &[(&str, &str, &str)] = &[
     ("messages", "away", "INTEGER NOT NULL DEFAULT 0"),
     ("messages", "urgent", "INTEGER NOT NULL DEFAULT 0"),
     ("agents", "watching", "INTEGER NOT NULL DEFAULT 0"),
+    ("agents", "generation", "TEXT NOT NULL DEFAULT ''"),
 ];
 
 /// A key no one would guess, twelve digits in three groups, `4821-7730-1182`:
@@ -125,6 +129,7 @@ impl Store {
                 tx.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {kind}"))?;
             }
         }
+        tx.execute_batch(managed::SCHEMA)?;
         tx.commit()?;
         Ok(Store { db })
     }

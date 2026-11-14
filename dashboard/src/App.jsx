@@ -29,11 +29,13 @@ export function App() {
   const [me, setMe] = useState(Api.me);
 
   useEffect(() => {
-    async function refresh() {
-      const value = await Api.hub();
-      if (value.TAG === "Ok") {
-        setAddresses(value._0.addresses);
-      }
+    function refresh() {
+      (async () => {
+        const value = await Api.hub();
+        if (value.TAG === "Ok") {
+          setAddresses(value._0.addresses);
+        }
+      })();
     }
     refresh();
     const timer = setInterval(refresh, 15000);
@@ -45,19 +47,21 @@ export function App() {
   // Every event says something changed: fetch the agents and the history
   // again, so the page is the hub's own answer, whatever it missed.
   useEffect(() => {
-    async function refresh() {
-      const value = await Api.load();
-      if (value.TAG === "Ok") {
-        const agents = value._0[0];
-        const channels = value._0[1];
-        const messages = value._0[2];
-        setAgents(agents);
-        setChannels(channels);
-        setMessages(messages);
-        setProblem(undefined);
-      } else {
-        setProblem(value._0);
-      }
+    function refresh() {
+      (async () => {
+        const value = await Api.load();
+        if (value.TAG === "Ok") {
+          const agents = value._0[0];
+          const channels = value._0[1];
+          const messages = value._0[2];
+          setAgents(agents);
+          setChannels(channels);
+          setMessages(messages);
+          setProblem(undefined);
+        } else {
+          setProblem(value._0);
+        }
+      })();
     }
     const subscription = Live.listen(
       (info) => {

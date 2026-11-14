@@ -25,6 +25,8 @@ use tower_http::services::ServeDir;
 use crate::dashboard::{self, Dashboard};
 use crate::store::Store;
 
+mod managed;
+
 pub struct Hub {
     /// Serializes lifecycle changes with delivery, holds and watch attachment.
     lifecycle: Mutex<()>,
@@ -125,6 +127,21 @@ fn bad_request(reason: String) -> Refused {
     Refused(StatusCode::BAD_REQUEST, reason)
 }
 
+fn check_generation(hub: &Hub, headers: &axum::http::HeaderMap, name: &str) -> Result<(), Refused> {
+    if let Some(expected) = headers.get(protocol::GENERATION_HEADER) {
+        let expected = expected
+            .to_str()
+            .map_err(|_| bad_request("Invalid generation header".into()))?;
+        if hub.store().generation(name)?.as_deref() != Some(expected) {
+            return Err(Refused(
+                StatusCode::GONE,
+                "This managed agent generation was retired or replaced".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Hub {
     /// A hub over `store`, holding what it kept held.
     pub fn new(store: Store) -> rusqlite::Result<Hub> {
@@ -220,6 +237,7 @@ impl Hub {
             "bounded-skip",
             "notice-id",
             "listen-status",
+            "managed-sessions",
         ];
         if self.supervised {
             features.push("live-upgrade");
@@ -440,6 +458,8 @@ pub(crate) fn api_routes() -> Routes {
         .get(&api::HUB, info)
         .post_empty(&api::STOP, stop)
         .stream(&api::EVENTS, events)
+        .get(&managed_protocol::endpoints::SESSIONS, managed::sessions)
+        .post(&managed_protocol::endpoints::SESSION, managed::command)
 }
 
 /// A file of the dashboard kept in this binary, or that there's none.
@@ -566,10 +586,11 @@ async fn agents(State(hub): State<Arc<Hub>>, _: Query<()>) -> Result<Json<Vec<Ag
 
 async fn register(
     State(hub): State<Arc<Hub>>,
-    _headers: axum::http::HeaderMap,
+    headers: axum::http::HeaderMap,
     Json(agent): Json<Register>,
 ) -> Result<Json<Agent>, Refused> {
     let _lifecycle = hub.lifecycle();
+    check_generation(&hub, &headers, &agent.name)?;
     check_name(&agent.name).map_err(bad_request)?;
     // The person's name is theirs: no agent's command takes it.
     if hub
@@ -689,6 +710,7 @@ async fn send(
     Json(send): Json<Send>,
 ) -> Result<Json<Message>, Refused> {
     let _lifecycle = hub.lifecycle();
+    check_generation(&hub, &headers, &send.from)?;
     let receipt = receipt(&headers, &send.from)?;
     if let Some(answer) = hub.store().replay_receipt(receipt.as_ref())? {
         return Ok(Json(answer));
@@ -788,6 +810,7 @@ async fn broadcast(
     Json(send): Json<Send>,
 ) -> Result<Json<Vec<Message>>, Refused> {
     let _lifecycle = hub.lifecycle();
+    check_generation(&hub, &headers, &send.from)?;
     let receipt = receipt(&headers, &send.from)?;
     if let Some(answer) = hub.store().replay_receipt(receipt.as_ref())? {
         return Ok(Json(answer));
@@ -839,10 +862,11 @@ async fn broadcast(
 
 async fn read_inbox(
     State(hub): State<Arc<Hub>>,
-    _headers: axum::http::HeaderMap,
+    headers: axum::http::HeaderMap,
     Json(read): Json<ReadInbox>,
 ) -> Result<Json<Inbox>, Refused> {
     let _lifecycle = hub.lifecycle();
+    check_generation(&hub, &headers, &read.name)?;
     hub.agent(&read.name)?;
     if let Some(channel) = &read.channel {
         check_channel(channel).map_err(bad_request)?;
@@ -871,10 +895,11 @@ async fn read_inbox(
 
 async fn read_message(
     State(hub): State<Arc<Hub>>,
-    _headers: axum::http::HeaderMap,
+    headers: axum::http::HeaderMap,
     Json(read): Json<ReadMessage>,
 ) -> Result<Json<Message>, Refused> {
     let _lifecycle = hub.lifecycle();
+    check_generation(&hub, &headers, &read.name)?;
     hub.agent(&read.name)?;
     let message = hub
         .store()
@@ -897,10 +922,11 @@ async fn read_message(
 
 async fn acknowledge(
     State(hub): State<Arc<Hub>>,
-    _headers: axum::http::HeaderMap,
+    headers: axum::http::HeaderMap,
     Json(ack): Json<protocol::Acknowledge>,
 ) -> Result<Json<Vec<u64>>, Refused> {
     let _lifecycle = hub.lifecycle();
+    check_generation(&hub, &headers, &ack.name)?;
     hub.agent(&ack.name)?;
     let ids = hub.store().acknowledge(&ack.name, &ack.ids, now())?;
     if !ids.is_empty() {

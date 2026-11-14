@@ -14,11 +14,14 @@ axum = "0.8"
 clap = { version = "4", features = ["derive", "env"] }
 gethostname = "1"
 protocol = { path = "../protocol" }
+managed-protocol = { path = "../managed-protocol" }
 rusqlite = { version = "0.37", features = ["bundled", "backup"] }
 serde = "1"
 serde_json = "1"
 rmcp = { version = "3.10.0", default-features = false, features = ["server", "macros", "transport-io"] }
-tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "io-util"] }
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time", "io-util", "process"] }
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v4"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower-http = { version = "0.6", features = ["fs"] }
 ureq = { version = "3", features = ["json"] }
@@ -30,4 +33,3 @@ tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
 rmcp = { version = "3.10.0", default-features = false, features = ["client"] }
-tokio = { version = "1", features = ["process"] }

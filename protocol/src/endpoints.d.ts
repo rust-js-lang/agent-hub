@@ -5,7 +5,7 @@ import type { Acknowledge, Agent, Channel, Event, Hold, HubInfo, Inbox, Join, Me
 
 export type { Download, Get, Kind, Method, Post, Route, Stream } from "../../typed-endpoint/src/lib.js";
 
-export type Feature = "InboxDigests" | "AgentLifecycle" | "BinaryDownload" | "ReadAck" | "BoundedSkip" | "NoticeId" | "WriteNonce";
+export type Feature = "InboxDigests" | "AgentLifecycle" | "BinaryDownload" | "ReadAck" | "BoundedSkip" | "NoticeId" | "WriteNonce" | "ManagedSessions";
 
 export const Feature: {
     name(feature: Feature): string;

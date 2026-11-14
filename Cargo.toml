@@ -1,12 +1,13 @@
 # agent-hub: one workspace. `protocol` is what the hub, the command
 # line and the dashboard agree on. `agent-hub` is the hub and the
 # command line, native Rust. `process-supervisor` is the reusable upgrade engine.
+# `managed-protocol` keeps native runtime control outside browser contracts.
 # `sqlite-idempotency` commits business effects and retry receipts atomically.
 # `typed-endpoint` shares typed contracts and optional Axum adapters across services.
 # `dashboard` is the page, compiled to JavaScript
 # by rust-js. `website` is the independent documentation and landing site.
 [workspace]
-members = ["typed-endpoint", "sqlite-idempotency", "process-supervisor", "protocol", "agent-hub", "dashboard", "website"]
+members = ["typed-endpoint", "sqlite-idempotency", "process-supervisor", "protocol", "managed-protocol", "agent-hub", "dashboard", "website"]
 # The pinned rust-js checkout, a submodule: its crates are path
 # dependencies of `dashboard`, not members of this workspace.
 exclude = ["rust-js"]

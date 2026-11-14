@@ -18,13 +18,22 @@ jobs:
           fetch-depth: 0
           submodules: recursive
           persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.4.4
+      - name: Check Claude runtime adapter
+        working-directory: runtime-claude
+        run: |
+          bun install --frozen-lockfile
+          bun run check
+          bun test
       - name: Build and test current protocol
         # Handoff deadlines apply to the optimized executable we distribute.
-        run: cargo test --release --locked -p typed-endpoint -p sqlite-idempotency -p process-supervisor -p agent-hub -p protocol
+        run: cargo test --release --locked -p typed-endpoint -p sqlite-idempotency -p process-supervisor -p agent-hub -p protocol -p managed-protocol
       - name: Check supervisor and application boundary
         run: |
           rustup component add clippy
-          cargo clippy --release --locked -p typed-endpoint -p sqlite-idempotency -p process-supervisor -p agent-hub --all-targets -- -D warnings
+          cargo clippy --release --locked -p typed-endpoint -p sqlite-idempotency -p process-supervisor -p agent-hub -p managed-protocol --all-targets -- -D warnings
       - name: Exercise supervisor with an independent TCP application
         run: |
           cargo build --release --locked -p process-supervisor --example echo
@@ -32,9 +41,6 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: 24
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: 1.4.4
       - run: bun install --frozen-lockfile
       - name: Install pinned compiler tooling dependencies
         working-directory: rust-js

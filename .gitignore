@@ -1,5 +1,6 @@
 /target
 /node_modules
+/runtime-claude/node_modules
 /web/dist
 # The patch `rust-js build` writes, of where installed crates are.
 /.cargo

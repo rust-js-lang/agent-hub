@@ -58,8 +58,21 @@ struct Bridge {
 
 impl Bridge {
     async fn start(hub: &TestHub, name: &str, modern: bool) -> Self {
-        let mut process = Command::new(env!("CARGO_BIN_EXE_agent-hub"))
-            .args(["mcp", "--as", name, "--hub", &hub.url])
+        Self::start_bound(hub, name, modern, None).await
+    }
+
+    async fn start_bound(
+        hub: &TestHub,
+        name: &str,
+        modern: bool,
+        generation: Option<&str>,
+    ) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agent-hub"));
+        command.args(["mcp", "--as", name, "--hub", &hub.url]);
+        if let Some(generation) = generation {
+            command.args(["--generation", generation]);
+        }
+        let mut process = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -396,4 +409,64 @@ async fn old_hubs_are_refused_before_registration_or_any_mail_operation() {
     assert!(error.to_string().contains("read-ack"));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_managed_bridge_cannot_send_or_read_after_its_name_is_recycled() {
+    let hub = TestHub::start().await;
+    let generation = hub
+        .native(|client| {
+            client.register("claude").unwrap();
+            client
+                .session(&managed_protocol::Command::Open {
+                    name: "codex".into(),
+                    owner: "test-worker-owner".into(),
+                    machine: "test".into(),
+                    runtime: managed_protocol::Runtime::Codex,
+                    cwd: "/tmp".into(),
+                    max_turns: 10,
+                    include_channels: false,
+                })
+                .unwrap()
+                .session
+                .generation
+        })
+        .await;
+    let bridge = Bridge::start_bound(&hub, "codex", true, Some(&generation)).await;
+    let _: Vec<Message> = value(
+        bridge
+            .call("send_message", json!({"to":"claude","body":"First life"}))
+            .await,
+    );
+    let mail = hub
+        .native(|client| {
+            client.retire("codex").unwrap();
+            client.register("codex").unwrap();
+            client.send("claude", "codex", "New life only").unwrap()
+        })
+        .await;
+    assert_eq!(
+        bridge
+            .call("send_message", json!({"to":"claude","body":"Stale sender"}))
+            .await
+            .is_error,
+        Some(true)
+    );
+    assert_eq!(
+        bridge.call("read_inbox", json!({})).await.is_error,
+        Some(true)
+    );
+    assert_eq!(
+        bridge
+            .call("ack_messages", json!({"ids":[mail.id]}))
+            .await
+            .is_error,
+        Some(true)
+    );
+    let inbox = hub
+        .native(|client| client.read_inbox("claude", 20).unwrap())
+        .await;
+    assert_eq!(inbox.messages.len(), 1);
+    assert_eq!(inbox.messages[0].body, "First life");
+    bridge.close().await;
 }

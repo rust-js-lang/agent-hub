@@ -109,6 +109,7 @@ mod tests {
         let routes = crate::hub::api_routes();
         let mut actual = routes.registered().to_vec();
         let mut expected = api::ALL.to_vec();
+        expected.extend_from_slice(managed_protocol::endpoints::ALL);
         actual.sort_by_key(|route| route.name);
         expected.sort_by_key(|route| route.name);
         assert_eq!(actual, expected);
@@ -131,7 +132,7 @@ mod tests {
     #[tokio::test]
     async fn every_defined_method_and_path_reaches_a_handler() {
         let app = app();
-        for route in api::ALL {
+        for route in api::ALL.iter().chain(managed_protocol::endpoints::ALL) {
             let method = match route.method {
                 Method::Get => "GET",
                 Method::Post => "POST",

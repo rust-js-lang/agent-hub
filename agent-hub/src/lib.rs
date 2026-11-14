@@ -6,6 +6,7 @@
 //! The hub is [`hub`], an HTTP API over [`store`], a SQLite file. Agents use
 //! it through the command line, whose calls are [`client`]'s.
 
+pub mod agent_worker;
 pub mod client;
 pub mod dashboard;
 pub mod hub;

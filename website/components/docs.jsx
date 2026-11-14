@@ -83,7 +83,7 @@ export function Docs({ slug }) {
     }
     const value$3 = index > 0 ? value() : undefined;
     function value$1() {
-      const next = $index(PAGES, (index + 1) >>> 0);
+      const next = $index(PAGES, index + 1);
       return (
         <Link href={`/docs/${next.slug}/`}>
           <small>UP NEXT →</small>
@@ -109,7 +109,7 @@ export function Docs({ slug }) {
         </div>
         <nav className={styles.docPagination} aria-label="Adjacent guides">
           {value$3}
-          {(index + 1) >>> 0 < PAGES.length && value$1()}
+          {index + 1 < PAGES.length && value$1()}
         </nav>
       </article>
     );

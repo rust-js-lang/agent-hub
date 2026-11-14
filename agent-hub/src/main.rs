@@ -57,6 +57,18 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Manage local Codex and Claude Code conversations from a JSON config.
+    AgentWorker {
+        #[arg(long)]
+        config: PathBuf,
+    },
+    /// Show managed conversations, current work, output, and pending user input.
+    Sessions,
+    /// Answer runtime input or resolve work after its old runtime has stopped.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     /// Upgrade a locally supervised hub with preflight and rollback.
     Upgrade {
         binary: PathBuf,
@@ -118,6 +130,9 @@ enum Command {
     Mcp {
         #[command(flatten)]
         me: Me,
+        /// Original agent life, supplied by the managed worker.
+        #[arg(long, env = "AGENT_HUB_GENERATION")]
+        generation: Option<String>,
     },
     /// Send a message to another agent, by its name as `agents` lists it,
     /// or to every other agent in a channel, `'#everyone'`. It waits in
@@ -237,6 +252,35 @@ enum ServiceCommand {
     Remove,
 }
 
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// Answer a pending provider request with its JSON response shape.
+    Respond {
+        name: String,
+        id: String,
+        #[arg(long)]
+        response: String,
+        #[arg(long, env = "AGENT_HUB_KEY")]
+        key: String,
+    },
+    /// Resolve failed/uncertain work after confirming the old runtime stopped.
+    Resolve {
+        name: String,
+        message_id: u64,
+        #[arg(long, value_enum)]
+        outcome: Resolution,
+        #[arg(long, env = "AGENT_HUB_KEY")]
+        key: String,
+    },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum Resolution {
+    Retry,
+    Completed,
+    Failed,
+}
+
 fn default_db() -> PathBuf {
     std::env::home_dir()
         .unwrap_or_default()
@@ -284,6 +328,7 @@ fn run() -> Result<()> {
             | Command::BuildInfo
             | Command::SelfCheck { .. }
             | Command::Worker { .. }
+            | Command::AgentWorker { .. }
             | Command::Upgrade { .. }
             | Command::Service { .. }
             | Command::Mcp { .. }
@@ -297,6 +342,57 @@ fn run() -> Result<()> {
         );
     }
     match cli.command {
+        Command::AgentWorker { config } => agent_hub::agent_worker::run(&cli.hub, &config),
+        Command::Sessions => {
+            println!("{}", serde_json::to_string_pretty(&client.sessions()?)?);
+            Ok(())
+        }
+        Command::Session { command } => {
+            let name = match &command {
+                SessionCommand::Respond { name, .. } | SessionCommand::Resolve { name, .. } => name,
+            };
+            let session = client
+                .sessions()?
+                .into_iter()
+                .find(|entry| &entry.session.name == name)
+                .context("No managed session has that name")?
+                .session;
+            let request = match command {
+                SessionCommand::Respond {
+                    name,
+                    id,
+                    response,
+                    key,
+                } => managed_protocol::Command::Respond {
+                    name,
+                    generation: session.generation,
+                    id,
+                    response: serde_json::from_str(&response)?,
+                    key,
+                },
+                SessionCommand::Resolve {
+                    name,
+                    message_id,
+                    outcome,
+                    key,
+                } => managed_protocol::Command::Resolve {
+                    name,
+                    generation: session.generation,
+                    message_id,
+                    key,
+                    state: match outcome {
+                        Resolution::Retry => managed_protocol::DeliveryState::Queued,
+                        Resolution::Completed => managed_protocol::DeliveryState::Completed,
+                        Resolution::Failed => managed_protocol::DeliveryState::Failed,
+                    },
+                },
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&client.session(&request)?)?
+            );
+            Ok(())
+        }
         Command::SelfCheck { db } => agent_hub::upgrade::self_check(&db),
         Command::Worker { config } => {
             let config = serde_json::from_slice(&std::fs::read(config)?)?;
@@ -370,7 +466,7 @@ fn run() -> Result<()> {
             )
         }
         Command::Agents { me } => agents(&client, &me),
-        Command::Mcp { me } => agent_hub::mcp::serve(&cli.hub, &me.name),
+        Command::Mcp { me, generation } => agent_hub::mcp::serve(&cli.hub, &me.name, generation),
         Command::Send { me, to, message } => send(&client, &me, &to, &message),
         Command::Inbox {
             me,

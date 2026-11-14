@@ -56,12 +56,24 @@ impl Messaging {
     /// Refuse old hubs before a read could accidentally consume a message.
     /// Reconnect registration also prevents a retired bridge from reviving a name.
     pub async fn connect(hub: &str, name: &str) -> Result<Self> {
+        Self::connect_bound(hub, name, None).await
+    }
+
+    pub async fn connect_bound(hub: &str, name: &str, generation: Option<String>) -> Result<Self> {
         check_name(name).map_err(anyhow::Error::msg)?;
         let hub = hub.to_string();
         let name = name.to_string();
         tokio::task::spawn_blocking(move || {
-            let client = Client::new(&hub);
+            let client = Client::new(&hub).with_generation(generation.clone());
             let info = client.check_protocol()?;
+            if generation.is_some()
+                && !info
+                    .features
+                    .iter()
+                    .any(|feature| feature == "managed-sessions")
+            {
+                bail!("Managed identity requires a hub supporting managed-sessions");
+            }
             for feature in ["read-ack", "inbox-digests", "agent-lifecycle"] {
                 if !info.features.iter().any(|known| known == feature) {
                     bail!("MCP messaging requires {feature}: upgrade the hub on its machine");
@@ -189,12 +201,12 @@ impl Messaging {
 impl ServerHandler for Messaging {}
 
 /// Run a stdio bridge. Never print diagnostics on its protocol output stream.
-pub fn serve(hub: &str, name: &str) -> Result<()> {
+pub fn serve(hub: &str, name: &str, generation: Option<String>) -> Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
         .block_on(async {
-            let bridge = Messaging::connect(hub, name).await?;
+            let bridge = Messaging::connect_bound(hub, name, generation).await?;
             let service = bridge.serve(rmcp::transport::stdio()).await?;
             service.waiting().await?;
             Ok(())

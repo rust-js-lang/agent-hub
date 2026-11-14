@@ -7,7 +7,7 @@
 export function reload(): void;
 
 /** Every agent, every channel, and the history, newest first. */
-export function load(): any;
+export function load(): Promise<any>;
 
 /**
  * The person the agents work for, as this device remembers them: the
@@ -28,7 +28,7 @@ export function me(): Me | null | undefined;
  * Signs the person in as `name` with the hub's `key`, and remembers them
  * on this device.
  */
-export function signIn(name: string, key: string): any;
+export function signIn(name: string, key: string): Promise<any>;
 
 /** Forgets who signed in on this device. */
 export function signOut(): void;
@@ -37,17 +37,17 @@ export function signOut(): void;
  * Sends `body` as the person to `to`: an agent, or a channel, `#team`,
  * each agent in which is sent a copy.
  */
-export function send(me: Me, to: string, body: string): any;
+export function send(me: Me, to: string, body: string): Promise<any>;
 
 /** The person has read what was sent to them: it's on the page. */
-export function read(me: Me): any;
+export function read(me: Me): Promise<any>;
 
-export function retire(me: Me, name: string): any;
+export function retire(me: Me, name: string): Promise<any>;
 
 /** A time in milliseconds since the Unix epoch, in the reader's locale. */
 export function time(at: bigint): string;
 
-export function hub(): any;
+export function hub(): Promise<any>;
 
 export function draft(): string;
 

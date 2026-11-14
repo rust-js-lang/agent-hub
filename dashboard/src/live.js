@@ -183,11 +183,11 @@ function probe(state, kind) {
     }
     if (answer.TAG !== "Err") {
       const hub = state.hub;
-      const value = Advertised.info(answer._0);
+      const info = Advertised.info(answer._0);
       hub({
-        ...value,
-        features: value.features.slice(),
-        addresses: value.addresses.map((item) => ({ ...item })),
+        ...info,
+        features: info.features.slice(),
+        addresses: info.addresses.map((item) => ({ ...item })),
       });
       if (kind === "Mount") {
         connect(state, answer._0);
