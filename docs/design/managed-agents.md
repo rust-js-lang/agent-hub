@@ -1,13 +1,22 @@
 # Managed agents and MCP messaging
 
-Status: accepted direction; implementation is incremental.
+Status: local managed sessions implemented; cross-machine control remains planned.
 
-Implemented first slice: the stdio MCP bridge and five messaging tools share the
-existing native HTTP client. Six integration tests exercise real bridge processes,
-modern and legacy MCP startup, native-client interoperability, explicit read
-acknowledgments, recipient isolation, channel fanout, and retirement refusal.
-Managed sessions, automatic turns, delivery records, and scoped credentials remain
-planned; the bridge alone does not launch an agent.
+The stdio MCP bridge, CLI, and runtime worker share the native HTTP client and
+SQLite messages. The worker manages Codex App Server and Claude Agent SDK
+conversations, starts incoming-message turns automatically, persists explicit
+conversation IDs, serializes arrivals, and routes user decisions through CLI
+controls. Ownership leases, generation fencing, durable deliveries, bounded turns,
+and explicit recovery for uncertain work are implemented. Scoped network
+credentials, dashboard session controls, and cost budgets remain planned.
+
+Integration tests run both provider adapters against deterministic child
+processes, exchange messages through real MCP bridges, and cover resumption,
+busy queues, approvals, and crash recovery. A live test verified Codex sending
+through MCP and automatically waking Claude; Claude's weekly account limit
+prevented a live reply. This is not evidence of a completed live round trip.
+Live Codex incoming-message turns also completed across worker restarts with
+the same saved conversation ID.
 
 ## Goal
 
@@ -16,8 +25,8 @@ Either agent can send a message through MCP; an idle recipient starts a new
 turn automatically, in its existing conversation. Extend the same workflow to
 workers on other machines over a Tailscale private network.
 
-The user chose hub-managed sessions rather than injection into independently
-running terminal or desktop sessions. Preserve the existing CLI, dashboard,
+The hub creates dedicated conversations and owns their runtime processes. It does
+not type into independently running terminal or desktop chats. Preserve the existing CLI, dashboard,
 channels, holds, history, retirement, and cooperative hub upgrades.
 
 ## Decisions
@@ -43,7 +52,7 @@ channels, holds, history, retirement, and cooperative hub upgrades.
                    | Dashboard           |
                    +----------+----------+
                               |
-                       typed HTTP + events
+                       typed HTTP polling
                               |
                    +----------+----------+
                    | Machine worker      |
@@ -85,7 +94,7 @@ presentation policy, not a prerequisite for automatic message delivery.
 
 ## MCP interface
 
-Proposed command: `agent-hub mcp --as NAME --hub URL`.
+Command: `agent-hub mcp --as NAME --hub URL`.
 
 The bridge binds one agent identity at startup. Tool arguments cannot choose a
 sender or impersonate the person. Its stdout is exclusively MCP frames;
@@ -115,9 +124,12 @@ for generic clients. They are not required for the managed worker to wake an
 agent. Do not use experimental `events/*`, agent-discovery methods, MCP Tasks,
 sampling, or Claude Channels for the initial workflow.
 
-The first bridge uses the existing private-network trust model. A bound name is
-not authentication. Scoped credentials and authorization are required before
-managed runtime control is reachable across machines.
+The bridge uses the existing private-network trust model. A bound name is not
+authentication. Managed bridges also bind `--generation` and the hub rejects
+their reads and writes after retirement or name reuse. Workers currently reject
+non-loopback hub URLs. Scoped credentials and authorization are required before
+supporting managed runtime control across machines. This local milestone does
+not add authentication to the hub's existing HTTP listener.
 
 ## Runtime adapters
 
@@ -147,8 +159,7 @@ Sender       MCP bridge       Hub          Worker          Receiver runtime
   |-- send ------>|-- send --->|              |                   |
   |               |            | commit message + delivery         |
   |<-------- stored ID --------|              |                   |
-  |               |            |-- wake ----->|                   |
-  |               |            |<-- claim ----|                   |
+  |               |            |<-- poll/claim|                   |
   |               |            |              |-- submit turn --->|
   |               |            |              |<-- completion ----|
   |               |            |<-- complete -|                   |
@@ -164,8 +175,8 @@ an explicit initial backlog boundary; do not unexpectedly execute old history.
 Delivery records reference existing messages rather than copying their bodies:
 
 ```text
-delivery: id, message_id, recipient_generation, state,
-          owner_epoch, runtime_turn_id, error
+delivery: message_id, name, generation, state,
+          runtime_turn_id, output, error
 
 state: queued -> running -> completed
                     |----> failed
@@ -182,10 +193,11 @@ fencing against stale updates. One turn runs per session. Ordinary arrivals queu
 in order while busy; no implicit interruption. Retiring a generation stops its
 work from reaching another session that later reuses its name.
 
-The worker subscribes before reconciling pending work. Reconcile on startup,
-reconnect, turn completion, and periodically. Notifications are hints; durable
-delivery state is authoritative. This also recovers a commit followed by a crash
-before event publication. Process all pending batches, not just the first page.
+The worker polls and reconciles once per second, renewing a 60-second ownership
+lease. SQLite claims one oldest eligible delivery atomically; the same poll
+retried after a lost response returns the already running delivery. Durable state
+is authoritative, so dispatch does not depend on event publication. An event
+subscription can later reduce latency without becoming a correctness dependency.
 
 Losing ownership is not permission to launch a second runtime while the first
 may still execute. Stop dispatch, reconcile the existing runtime, and fence stale
@@ -193,12 +205,21 @@ updates. If submission succeeded but its acknowledgment was lost, use available
 runtime history to determine the outcome. Otherwise mark uncertain and surface
 it to the user. Do not promise exactly-once arbitrary filesystem or tool effects.
 
-Approvals pause the session and appear in the dashboard. Route decisions to the
+Approvals pause the session and appear in `agent-hub sessions`. Route keyed CLI decisions to the
 owning worker and runtime request; do not change global approval policy. Preserve
 the distinction between peer messages and user-authored messages in injected
 context. Replies are explicit sends; a normal final answer is not automatically
 broadcast. Avoid acknowledgment-only reply loops and bound automatic conversation
-work by configured turn/cost limits.
+work by configured turn limits and timeouts. Cost limits and dashboard approval
+views remain planned.
+
+The runtime process group is stopped and reaped before ownership is released.
+If ownership expires during running work, replacement registration records an
+uncertain outcome and blocks dispatch. A person must stop the previous runtime,
+inspect its effects, and explicitly resolve or retry before work continues.
+An ordinary inbox read never consumes a delivery. New managed registration does
+not backfill old messages. Output updates contain capped snapshots, so transport
+retries do not append duplicate text.
 
 ## Cross-machine deployment
 
@@ -227,8 +248,11 @@ Extract boundaries as implementation requires them, without moving unrelated
 upgrade code or rewriting all HTTP endpoints first:
 
 - `protocol`: shared wire models and endpoint contracts.
-- `hub-core`: application operations, persistence, lifecycle, deliveries; no MCP
-  or Axum dependency. Extract incrementally from the existing hub handlers.
+- `managed-protocol`: native runtime-control models and typed endpoints. Raw
+  provider requests stay outside the browser-compiled messaging protocol.
+- `agent-hub/src/store/managed.rs`: transactional ownership and delivery state,
+  with SQLite triggers that also capture sends by older hub binaries.
+- `agent-hub/src/hub/managed.rs`: HTTP validation and keyed user decisions.
 - Shared native client: typed operations and reconnect/event handling, used by
   CLI, MCP bridge, and agent worker.
 - `agent-hub`: composition, CLI, HTTP/MCP adapters, agent worker, Codex adapter,
@@ -247,10 +271,12 @@ storage or parse human CLI output in the MCP adapter.
 2. Extract application operations and event reconnection into shared modules as
    needed. Add generation-aware managed sessions, delivery records, ownership,
    and caller-stable operation IDs. Preserve legacy CLI semantics.
-3. Add the local agent worker, Codex App Server adapter, Claude SDK helper, and
-   dashboard session/output/approval views. Configure MCP for both runtimes.
-4. Prove the bidirectional local workflow, restart recovery, and busy-session
-   queuing. Add scoped credentials and run the same workflow across Tailscale.
+3. Implemented: local agent worker, Codex App Server adapter, Claude SDK helper,
+   MCP configuration for both runtimes, and CLI status/approval/recovery controls.
+   Dashboard session/output/approval views remain planned.
+4. Deterministic bidirectional workflow, restart recovery, and busy-session
+   queuing are tested. Complete the live reply test when the Claude account can
+   run again. Add scoped credentials before testing managed execution over Tailscale.
 
 ## Acceptance
 
